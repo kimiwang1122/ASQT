@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ASQT 控制台</title>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">ASQT</div>
+        <nav id="nav">
+          <a href="#overview" data-page="overview" class="active">总览</a>
+          <a href="#data" data-page="data">数据</a>
+          <a href="#strategy" data-page="strategy">策略</a>
+          <a href="#orders" data-page="orders">交易</a>
+          <a href="#review" data-page="review">复盘</a>
+          <a href="#settings" data-page="settings">设置</a>
+        </nav>
+        <div class="sidebar-note">基座巡检 · 业务模块未接入</div>
+      </aside>
+      <main>
+        <header>
+          <div>
+            <h1 id="page-title">系统总览</h1>
+            <p id="runtime">加载中</p>
+          </div>
+          <div class="header-actions">
+            <div class="theme-toggle" aria-label="主题切换">
+              <button id="theme-dark" type="button" title="黑夜模式">☾</button>
+              <button id="theme-light" type="button" title="白天模式">☀</button>
+            </div>
+            <button id="bootstrap" type="button">初始化演示数据</button>
+          </div>
+        </header>
+
+        <section class="page" id="page-overview">
+          <section class="metrics">
+            <article>
+              <span>数据源</span>
+              <strong id="source-count">-</strong>
+            </article>
+            <article>
+              <span>标的数量</span>
+              <strong id="instrument-count">-</strong>
+            </article>
+            <article>
+              <span>质量问题</span>
+              <strong id="quality-count">-</strong>
+            </article>
+            <article>
+              <span>告警</span>
+              <strong id="alert-count">-</strong>
+            </article>
+          </section>
+
+          <section class="panel">
+            <div class="panel-title">
+              <h2>行情样例</h2>
+              <span id="market-file">未加载</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>日期</th>
+                    <th>代码</th>
+                    <th>开盘</th>
+                    <th>最高</th>
+                    <th>最低</th>
+                    <th>收盘</th>
+                    <th>成交量</th>
+                    <th>来源</th>
+                  </tr>
+                </thead>
+                <tbody id="market-body"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-title">
+              <h2>最近任务</h2>
+              <span>调度基座</span>
+            </div>
+            <ul id="task-list" class="task-list"></ul>
+          </section>
+        </section>
+
+        <section class="page hidden" id="page-data">
+          <section class="panel">
+            <div class="panel-title">
+              <h2>数据契约样例</h2>
+              <span>日历 / 涨跌停 / 因子</span>
+            </div>
+            <div class="kv-grid" id="data-summary"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-title">
+              <h2>数据源注册</h2>
+              <span>含配额 / 成本 / 负责人</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>名称</th>
+                    <th>授权</th>
+                    <th>配额</th>
+                    <th>成本</th>
+                    <th>负责人</th>
+                    <th>健康</th>
+                  </tr>
+                </thead>
+                <tbody id="source-body"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section class="page hidden" id="page-strategy">
+          <div class="empty-state" data-module="StrategyService">
+            <h2>策略模块未接入</h2>
+            <p>缺少对象：策略版本、参数组、目标持仓生成服务。</p>
+            <p>下一步：实现 StrategyService，完成生命周期与 target_position 写入。</p>
+          </div>
+        </section>
+
+        <section class="page hidden" id="page-orders">
+          <div class="empty-state" data-module="OrderService / ExecutionAdapter">
+            <h2>交易模块未接入</h2>
+            <p>缺少对象：标准订单状态机、模拟撮合、账本与急停控制。</p>
+            <p>下一步：实现 OrderService 与 PaperBroker ExecutionAdapter。</p>
+          </div>
+        </section>
+
+        <section class="page hidden" id="page-review">
+          <div class="empty-state" data-module="ReviewService">
+            <h2>复盘模块未接入</h2>
+            <p>缺少对象：实验记录、收益归因、滑点偏差报告。</p>
+            <p>下一步：实现 ReviewService，并预留 MLflow 适配边界。</p>
+          </div>
+        </section>
+
+        <section class="page hidden" id="page-settings">
+          <section class="panel">
+            <div class="panel-title">
+              <h2>运行目录</h2>
+              <span>技术设计存储约定</span>
+            </div>
+            <div class="kv-grid" id="layout-grid"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-title">
+              <h2>端口边界</h2>
+              <span>Adapter / Service 尚未接线</span>
+            </div>
+            <ul id="port-list" class="task-list"></ul>
+          </section>
+          <section class="panel">
+            <div class="panel-title">
+              <h2>主题</h2>
+              <span>参考样例图的纯黑控制台风格</span>
+            </div>
+            <p class="hint">通过右上角月/日切换主题。黑夜模式采用纯黑底、深灰卡片、胶囊导航与青绿强调色。</p>
+          </section>
+        </section>
+      </main>
+    </div>
+    <script src="/assets/app.js"></script>
+  </body>
+</html>
