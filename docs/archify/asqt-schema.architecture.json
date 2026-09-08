@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "ASQT 库表关系：主数据、行情与台账",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [1080, 560],
+    "output": "docs/archify/asqt-schema.architecture.html",
+    "views": [
+      {
+        "id": "master-bars",
+        "label": "主数据与日K",
+        "focus": ["data_source", "instrument", "calendar", "market_daily", "quality_issue"],
+        "note": "标的、日历、来源逻辑指向 Parquet 日K；质量问题按行记在 SQLite。"
+      },
+      {
+        "id": "limits",
+        "label": "涨跌停与停牌",
+        "focus": ["instrument", "limit_suspension"],
+        "note": "limit_suspension 主键是 (symbol, trade_date)，当日停牌不得新开仓。"
+      },
+      {
+        "id": "ledger",
+        "label": "策略与订单台账",
+        "focus": ["strategy", "target", "order", "fill", "account"],
+        "note": "表已建、模拟成交未接线；成交按 order_id 挂回标准订单。"
+      }
+    ]
+  },
+  "components": [
+    { "id": "instrument", "type": "database", "label": "instrument_master", "sublabel": "PK symbol", "tag": "SQLite", "pos": [250, 88], "size": [168, 58] },
+    { "id": "limit_suspension", "type": "database", "label": "limit_suspension", "sublabel": "PK symbol+date", "tag": "SQLite", "pos": [480, 88], "size": [168, 58] },
+    { "id": "calendar", "type": "database", "label": "trade_calendar", "sublabel": "PK date+market", "tag": "SQLite", "pos": [720, 88], "size": [160, 58] },
+    { "id": "data_source", "type": "database", "label": "data_source", "sublabel": "PK source_id", "tag": "SQLite", "pos": [48, 248], "size": [150, 58] },
+    { "id": "market_daily", "type": "database", "label": "market_daily", "sublabel": "PK symbol+date", "tag": "Parquet", "pos": [250, 248], "size": [168, 58] },
+    { "id": "quality_issue", "type": "security", "label": "quality_issue", "sublabel": "PK issue_id", "tag": "SQLite", "pos": [480, 248], "size": [160, 58] },
+    { "id": "strategy", "type": "database", "label": "strategy_version", "sublabel": "PK id+version", "tag": "SQLite", "pos": [48, 408], "size": [150, 58] },
+    { "id": "target", "type": "database", "label": "target_position", "sublabel": "PK target_id", "tag": "SQLite", "pos": [248, 408], "size": [160, 58] },
+    { "id": "order", "type": "database", "label": "standard_order", "sublabel": "PK order_id", "tag": "SQLite", "pos": [458, 408], "size": [160, 58] },
+    { "id": "fill", "type": "database", "label": "execution_fill", "sublabel": "PK fill_id", "tag": "SQLite", "pos": [668, 408], "size": [150, 58] },
+    { "id": "account", "type": "database", "label": "account_snapshot", "sublabel": "PK acct+date", "tag": "SQLite", "pos": [868, 408], "size": [150, 58] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "标准行情", "wraps": ["market_daily"] },
+    { "kind": "region", "label": "SQLite 主数据", "wraps": ["data_source", "instrument", "calendar", "quality_issue", "limit_suspension"] },
+    { "kind": "region", "label": "SQLite 交易台账", "wraps": ["strategy", "target", "order", "fill", "account"] }
+  ],
+  "connections": [
+    { "id": "sym-bar", "from": "instrument", "to": "market_daily", "label": "symbol", "variant": "emphasis", "labelDy": 24 },
+    { "id": "src-bar", "from": "data_source", "to": "market_daily", "label": "source", "variant": "emphasis" },
+    { "id": "bar-issue", "from": "market_daily", "to": "quality_issue", "label": "dataset 行", "variant": "security" },
+    { "id": "sym-limit", "from": "instrument", "to": "limit_suspension", "label": "symbol" },
+    { "id": "cal-limit", "from": "limit_suspension", "to": "calendar", "label": "trade_date" },
+    { "id": "st-target", "from": "strategy", "to": "target", "label": "id+version", "variant": "dashed", "labelDy": 53 },
+    { "id": "target-order", "from": "target", "to": "order", "label": "目标仓", "variant": "dashed" },
+    { "id": "order-fill", "from": "order", "to": "fill", "label": "order_id", "variant": "dashed" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "逻辑键，不是外键",
+      "items": [
+        "关联是 symbol / trade_date / source / order_id；CREATE 未写 FOREIGN KEY"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "日K 不在 SQLite",
+      "items": [
+        "market_daily 在 Parquet；SQLite 用 quality_issue 与 market_data_file 做台账和目录"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "未画进图的表",
+      "items": [
+        "factor_signal、task_run、alert、operation_audit 已建表；公司行为仍是 CSV"
+      ]
+    }
+  ]
+}

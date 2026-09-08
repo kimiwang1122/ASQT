@@ -1,0 +1,167 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "ASQT 下一步接通后长这样",
+    "locale": "zh-CN",
+    "animation": "trace",
+    "quality_profile": "showcase",
+    "output": "docs/archify/asqt-next.architecture.html",
+    "repository": {
+      "url": "https://github.com/kimiwang1122/ASQT",
+      "revision": "12d41cde3aaa2751b71b01f7a7e3f42ee34520d5"
+    },
+    "views": [
+      {
+        "id": "trusted-data",
+        "label": "可信数据进门",
+        "focus": ["market", "quality", "parquet", "sqlite"],
+        "note": "外部行情必须先过质量闸门，合格数据才进入行情文件和台账。"
+      },
+      {
+        "id": "trade-loop",
+        "label": "模拟交易闭环",
+        "focus": ["api", "strategy", "paper", "sqlite"],
+        "note": "策略只输出目标持仓，订单经本地模拟盘成交后写回台账，仍不接实盘。"
+      },
+      {
+        "id": "operator-view",
+        "label": "运营仍可叫停",
+        "focus": ["operator", "console", "quality", "paper"],
+        "note": "人可以随时巡检；质量失败或急停时，模拟下单必须停下。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "operator",
+      "type": "external",
+      "label": "运营人员",
+      "sublabel": "巡检 / 急停",
+      "pos": [40, 270],
+      "size": [140, 64]
+    },
+    {
+      "id": "console",
+      "type": "frontend",
+      "label": "控制台",
+      "sublabel": "总览 · 数据 · 交易",
+      "pos": [230, 270],
+      "size": [150, 64],
+      "sources": [{ "path": "frontend/index.html", "line": 1, "end_line": 22, "label": "页面壳" }]
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "本地服务",
+      "sublabel": "FastAPI :8000",
+      "pos": [440, 270],
+      "size": [150, 64],
+      "sources": [{ "path": "asqt/api.py", "line": 14, "end_line": 39, "label": "create_app" }]
+    },
+    {
+      "id": "sqlite",
+      "type": "database",
+      "label": "台账库",
+      "sublabel": "订单 / 持仓 / 审计",
+      "pos": [680, 150],
+      "size": [150, 64],
+      "sources": [{ "path": "asqt/db.py", "line": 11, "end_line": 26, "label": "schema" }]
+    },
+    {
+      "id": "parquet",
+      "type": "database",
+      "label": "行情文件",
+      "sublabel": "标准日K",
+      "pos": [680, 400],
+      "size": [150, 64],
+      "sources": [{ "path": "asqt/storage.py", "line": 11, "end_line": 26, "label": "market_daily" }]
+    },
+    {
+      "id": "strategy",
+      "type": "backend",
+      "label": "策略服务",
+      "sublabel": "目标持仓",
+      "tag": "P2-P3",
+      "pos": [230, 400],
+      "size": [150, 64],
+      "sources": [{ "path": "asqt/ports.py", "line": 50, "end_line": 57, "label": "StrategyService" }]
+    },
+    {
+      "id": "market",
+      "type": "external",
+      "label": "外部行情源",
+      "sublabel": "baostock 主源",
+      "tag": "P1 接入",
+      "pos": [230, 48],
+      "size": [150, 64],
+      "sources": [{ "path": "asqt/ports.py", "line": 13, "end_line": 22, "label": "DataSourceAdapter" }]
+    },
+    {
+      "id": "quality",
+      "type": "security",
+      "label": "质量闸门",
+      "sublabel": "不合格就停交易",
+      "tag": "P1 必过",
+      "pos": [440, 48],
+      "size": [150, 64],
+      "sources": [{ "path": "asqt/ports.py", "line": 34, "end_line": 38, "label": "QualityChecker" }]
+    },
+    {
+      "id": "paper",
+      "type": "backend",
+      "label": "模拟交易",
+      "sublabel": "PaperBroker",
+      "tag": "P3 本地",
+      "pos": [920, 270],
+      "size": [150, 64],
+      "sources": [{ "path": "asqt/ports.py", "line": 69, "end_line": 84, "label": "ExecutionAdapter" }]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "研究与台账仍在本机",
+      "wraps": ["console", "api", "sqlite", "parquet", "strategy"]
+    },
+    {
+      "kind": "security-group",
+      "label": "交易前必须经过的闸门",
+      "wraps": ["quality", "paper"]
+    }
+  ],
+  "connections": [
+    { "id": "open-console", "from": "operator", "to": "console", "label": "打开巡检", "variant": "emphasis" },
+    { "id": "console-api", "from": "console", "to": "api", "label": "/api/status" },
+    { "id": "api-sqlite", "from": "api", "to": "sqlite", "label": "查台账", "fromSide": "top", "toSide": "bottom" },
+    { "id": "api-parquet", "from": "api", "to": "parquet", "label": "读日K", "fromSide": "bottom", "toSide": "top" },
+    { "id": "market-quality", "from": "market", "to": "quality", "label": "标准化后质检", "variant": "emphasis", "labelDy": 56 },
+    { "id": "quality-api", "from": "quality", "to": "api", "label": "失败则阻断", "variant": "security", "labelDy": 24 },
+    { "id": "api-strategy", "from": "api", "to": "strategy", "label": "生成目标仓", "fromSide": "bottom", "toSide": "right" },
+    { "id": "api-paper", "from": "api", "to": "paper", "label": "模拟下单" },
+    { "id": "paper-sqlite", "from": "paper", "to": "sqlite", "label": "成交写账本", "fromSide": "top", "toSide": "right" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "接通后的主路径",
+      "items": [
+        "行情先质检再入库；第一阶段只在本地模拟盘成交"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "仍然禁止的事",
+      "items": [
+        "质量失败或急停时不得新下单；模拟盘稳定前不接实盘"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "和「现在」比看什么",
+      "items": [
+        "对比图会标出新增的策略服务和接通的实线"
+      ]
+    }
+  ]
+}

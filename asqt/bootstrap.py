@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from asqt.config import Settings, get_settings
 from asqt.db import connect, initialize_database
-from asqt.storage import write_market_daily
+from asqt.storage import market_daily_path, read_market_daily, write_market_daily
 
 
 DEMO_MARKET_DAILY = [
@@ -67,7 +67,15 @@ DEMO_MARKET_DAILY = [
 def seed_demo(settings: Settings | None = None) -> dict:
     settings = settings or get_settings()
     initialize_database(settings)
-    parquet_path = write_market_daily(DEMO_MARKET_DAILY, settings)
+    existing: list[dict] = []
+    current_path = market_daily_path(settings)
+    if current_path.exists():
+        existing = read_market_daily(settings=settings)
+    skip_market = len(existing) > len(DEMO_MARKET_DAILY)
+    if skip_market:
+        parquet_path = current_path
+    else:
+        parquet_path = write_market_daily(DEMO_MARKET_DAILY, settings)
     now = datetime.now(timezone.utc).isoformat()
 
     with connect(settings) as conn:
@@ -133,36 +141,46 @@ def seed_demo(settings: Settings | None = None) -> dict:
             """,
             ("2026-08-21", "000001.SZ", "momentum_20d", 0.12, "demo-factor-v0", "seed-demo"),
         )
+        if not skip_market:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO market_data_file
+                    (dataset, file_path, row_count, min_trade_date, max_trade_date, data_version)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "market_daily",
+                    str(parquet_path),
+                    len(DEMO_MARKET_DAILY),
+                    "2026-08-20",
+                    "2026-08-21",
+                    "demo-20260826",
+                ),
+            )
         conn.execute(
             """
-            INSERT OR REPLACE INTO market_data_file
-                (dataset, file_path, row_count, min_trade_date, max_trade_date, data_version)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "market_daily",
-                str(parquet_path),
-                len(DEMO_MARKET_DAILY),
-                "2026-08-20",
-                "2026-08-21",
-                "demo-20260826",
-            ),
-        )
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO task_run
+            INSERT INTO task_run
                 (run_id, task_name, status, started_at, finished_at, message)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (str(uuid4()), "seed_demo", "success", now, now, "Demo baseline data seeded"),
+            (
+                str(uuid4()),
+                "seed_demo",
+                "success",
+                now,
+                now,
+                "Skipped overwriting existing market_daily" if skip_market else "Demo baseline data seeded",
+            ),
         )
         conn.commit()
 
+    market_rows = len(existing) if skip_market else len(DEMO_MARKET_DAILY)
     return {
         "database": str(settings.database_path),
         "parquet": str(parquet_path),
         "layout": settings.layout(),
-        "market_daily_rows": len(DEMO_MARKET_DAILY),
+        "market_daily_rows": market_rows,
+        "skipped_market_daily": skip_market,
         "trade_calendar_rows": 3,
         "limit_suspension_rows": 4,
         "factor_signal_rows": 1,

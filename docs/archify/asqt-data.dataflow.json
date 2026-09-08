@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "钱能不能动，先看数据过不过关",
+    "locale": "zh-CN",
+    "animation": "trace",
+    "viewBox": [1080, 540],
+    "quality_profile": "showcase",
+    "output": "docs/archify/asqt-data.dataflow.html",
+    "views": [
+      {
+        "id": "collect",
+        "label": "数据从哪来",
+        "focus": ["vendor", "raw", "normalizer"],
+        "note": "外部行情先落成原始文件，再翻译成系统内部的标准日K。"
+      },
+      {
+        "id": "gate",
+        "label": "质量闸门",
+        "focus": ["normalizer", "quality", "alert"],
+        "note": "缺数、错价、对不上账，就会记问题并告警，而不是悄悄改掉。"
+      },
+      {
+        "id": "use",
+        "label": "合格之后才能用",
+        "focus": ["quality", "parquet", "sqlite", "console", "trade"],
+        "note": "只有通过闸门的数据可以给控制台查看；交易路径在失败时被切断。"
+      }
+    ]
+  },
+  "stages": [
+    { "label": "采集" },
+    { "label": "翻译" },
+    { "label": "质检" },
+    { "label": "存放" },
+    { "label": "使用" }
+  ],
+  "nodes": [
+    { "id": "vendor", "type": "external", "label": "行情源", "sublabel": "外部接口", "stage": 0, "row": 1, "tag": "原始" },
+    { "id": "raw", "type": "database", "label": "原始文件", "sublabel": "raw_data/", "stage": 1, "row": 1, "tag": "可追溯" },
+    { "id": "normalizer", "type": "backend", "label": "标准化", "sublabel": "统一口径", "stage": 2, "row": 0, "tag": "口径" },
+    { "id": "quality", "type": "security", "label": "质量闸门", "sublabel": "过关或停交易", "stage": 2, "row": 1, "tag": "P0 阻断" },
+    { "id": "parquet", "type": "database", "label": "标准日K", "sublabel": "market_daily", "stage": 3, "row": 0, "tag": "Parquet" },
+    { "id": "sqlite", "type": "database", "label": "台账问题表", "sublabel": "quality_issue", "stage": 3, "row": 2, "tag": "SQLite" },
+    { "id": "alert", "type": "messagebus", "label": "告警", "sublabel": "告诉人来处理", "stage": 2, "row": 2, "tag": "高优先级" },
+    { "id": "console", "type": "frontend", "label": "控制台", "sublabel": "给人看", "stage": 4, "row": 0, "tag": "巡检" },
+    { "id": "trade", "type": "backend", "label": "交易通道", "sublabel": "仅模拟盘", "stage": 4, "row": 1, "tag": "可被阻断" }
+  ],
+  "flows": [
+    { "id": "pull-raw", "from": "vendor", "to": "raw", "label": "原样保存", "classification": "原始响应", "variant": "emphasis" },
+    { "id": "normalize", "from": "raw", "to": "normalizer", "label": "翻译成标准字段", "classification": "standard_data", "variant": "emphasis" },
+    { "id": "check", "from": "normalizer", "to": "quality", "label": "完整性/合法性", "classification": "质检", "variant": "security", "labelDy": 24 },
+    { "id": "pass-bars", "from": "quality", "to": "parquet", "label": "合格日K", "classification": "可交易数据", "variant": "emphasis" },
+    { "id": "record-issue", "from": "quality", "to": "sqlite", "label": "记下问题", "classification": "quality_issue", "variant": "dashed" },
+    { "id": "raise-alert", "from": "quality", "to": "alert", "label": "失败就告警", "classification": "停交易信号", "variant": "security", "labelDy": 24 },
+    { "id": "show-console", "from": "parquet", "to": "console", "label": "给人查看", "classification": "只读", "variant": "default", "route": "straight" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "一句话",
+      "items": [
+        "数据先翻译、再质检，合格才进库",
+        "原始文件要留着，才能回答价格从哪来"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "不合格时",
+      "items": [
+        "问题记入台账并告警，不能悄悄覆盖",
+        "交易通道应被切断"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "和现状",
+      "items": [
+        "今天只有演示日K；闸门规则属于 P1"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "ASQT 现在能做什么",
+    "locale": "zh-CN",
+    "animation": "trace",
+    "quality_profile": "showcase",
+    "output": "docs/archify/asqt-now.architecture.html",
+    "repository": {
+      "url": "https://github.com/kimiwang1122/ASQT",
+      "revision": "12d41cde3aaa2751b71b01f7a7e3f42ee34520d5"
+    },
+    "views": [
+      {
+        "id": "today-path",
+        "label": "今天能打开的路径",
+        "focus": ["operator", "console", "api", "sqlite", "parquet"],
+        "note": "运营人员打开控制台，只能查看演示数据和台账，还不能自动买卖。"
+      },
+      {
+        "id": "demo-data",
+        "label": "演示数据从哪来",
+        "focus": ["seed", "parquet", "api"],
+        "note": "当前行情不是真市场拉取，而是一键灌入的本地样例。"
+      },
+      {
+        "id": "not-wired",
+        "label": "还没接通的部分",
+        "focus": ["market", "quality", "paper"],
+        "note": "行情源、质量闸门、模拟交易只有接口约定，尚未接线，所以不会真实下单。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "operator",
+      "type": "external",
+      "label": "运营人员",
+      "sublabel": "看状态 / 点按钮",
+      "pos": [40, 270],
+      "size": [140, 64]
+    },
+    {
+      "id": "console",
+      "type": "frontend",
+      "label": "控制台",
+      "sublabel": "总览 · 数据 · 设置",
+      "pos": [230, 270],
+      "size": [150, 64],
+      "sources": [{ "path": "frontend/index.html", "line": 1, "end_line": 22, "label": "页面壳" }]
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "本地服务",
+      "sublabel": "FastAPI :8000",
+      "pos": [440, 270],
+      "size": [150, 64],
+      "sources": [{ "path": "asqt/api.py", "line": 14, "end_line": 39, "label": "create_app" }]
+    },
+    {
+      "id": "sqlite",
+      "type": "database",
+      "label": "台账库",
+      "sublabel": "SQLite 订单/审计",
+      "pos": [680, 150],
+      "size": [150, 64],
+      "sources": [{ "path": "asqt/db.py", "line": 11, "end_line": 26, "label": "schema" }]
+    },
+    {
+      "id": "parquet",
+      "type": "database",
+      "label": "行情文件",
+      "sublabel": "Parquet 日K",
+      "pos": [680, 400],
+      "size": [150, 64],
+      "sources": [{ "path": "asqt/storage.py", "line": 11, "end_line": 26, "label": "market_daily" }]
+    },
+    {
+      "id": "seed",
+      "type": "backend",
+      "label": "演示灌数",
+      "sublabel": "seed-demo",
+      "tag": "本地样例",
+      "pos": [230, 400],
+      "size": [150, 64],
+      "sources": [{ "path": "asqt/bootstrap.py", "line": 67, "end_line": 91, "label": "seed_demo" }]
+    },
+    {
+      "id": "market",
+      "type": "external",
+      "label": "外部行情源",
+      "sublabel": "baostock 等",
+      "tag": "未接入",
+      "pos": [230, 48],
+      "size": [150, 64],
+      "sources": [{ "path": "asqt/ports.py", "line": 13, "end_line": 22, "label": "DataSourceAdapter" }]
+    },
+    {
+      "id": "quality",
+      "type": "security",
+      "label": "质量闸门",
+      "sublabel": "不合格就停交易",
+      "tag": "未接入",
+      "pos": [440, 48],
+      "size": [150, 64],
+      "sources": [{ "path": "asqt/ports.py", "line": 34, "end_line": 38, "label": "QualityChecker" }]
+    },
+    {
+      "id": "paper",
+      "type": "backend",
+      "label": "模拟交易",
+      "sublabel": "PaperBroker",
+      "tag": "未接入",
+      "pos": [920, 270],
+      "size": [150, 64],
+      "sources": [{ "path": "asqt/ports.py", "line": 69, "end_line": 84, "label": "ExecutionAdapter" }]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "已经能跑的基座",
+      "wraps": ["console", "api", "sqlite", "parquet", "seed"]
+    },
+    {
+      "kind": "security-group",
+      "label": "只写了接口，还没接通",
+      "wraps": ["market", "quality", "paper"]
+    }
+  ],
+  "connections": [
+    { "id": "open-console", "from": "operator", "to": "console", "label": "打开巡检", "variant": "emphasis" },
+    { "id": "console-api", "from": "console", "to": "api", "label": "/api/status" },
+    { "id": "api-sqlite", "from": "api", "to": "sqlite", "label": "查台账", "fromSide": "top", "toSide": "bottom" },
+    { "id": "api-parquet", "from": "api", "to": "parquet", "label": "读日K", "fromSide": "bottom", "toSide": "top" },
+    { "id": "seed-parquet", "from": "seed", "to": "parquet", "label": "写入样例", "variant": "dashed" },
+    { "id": "market-quality", "from": "market", "to": "quality", "label": "尚未拉取", "variant": "dashed" },
+    { "id": "quality-api", "from": "quality", "to": "api", "label": "通过才可交易", "variant": "security", "labelDy": 24 },
+    { "id": "api-paper", "from": "api", "to": "paper", "label": "不会真实下单", "variant": "dashed" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "现在可以做什么",
+      "items": [
+        "打开控制台查看演示行情和台账，初始化只写本地样例"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "现在还不能做什么",
+      "items": [
+        "还不能自动拉真实行情，也不能自动买卖"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "怎么读这张图",
+      "items": [
+        "实线已接通，虚线是规划；点 SRC 可跳到源码"
+      ]
+    }
+  ]
+}

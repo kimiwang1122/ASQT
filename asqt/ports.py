@@ -111,6 +111,17 @@ class AlertService(Protocol):
         ...
 
 
+WIRED_PORTS: dict[str, str] = {
+    "DataSourceAdapter": "wired",
+    "DataNormalizer": "wired",
+    "QualityChecker": "wired",
+    "ResearchEngine": "wired",
+    "StrategyService": "wired",
+    "OrderService": "wired",
+    "ReviewService": "wired",
+    "Scheduler": "wired",
+}
+
 PORT_NAMES: tuple[str, ...] = (
     "DataSourceAdapter",
     "DataNormalizer",
@@ -123,3 +134,14 @@ PORT_NAMES: tuple[str, ...] = (
     "Scheduler",
     "AlertService",
 )
+
+
+def port_entries() -> list[dict[str, str]]:
+    return [
+        {
+            "name": name,
+            "status": WIRED_PORTS.get(name, "not_wired"),
+            "phase": "p1" if name in {"DataSourceAdapter", "DataNormalizer", "QualityChecker"} else ("p2" if name in WIRED_PORTS else "later"),
+        }
+        for name in PORT_NAMES
+    ]

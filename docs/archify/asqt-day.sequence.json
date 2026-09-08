@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "收盘后系统会按这个顺序做事",
+    "locale": "zh-CN",
+    "animation": "trace",
+    "viewBox": [1080, 600],
+    "column_fit": "spread",
+    "quality_profile": "showcase",
+    "output": "docs/archify/asqt-day.sequence.html",
+    "views": [
+      {
+        "id": "update",
+        "label": "先更新数据",
+        "focus": ["clock", "adapter", "store"],
+        "note": "到点后先把当天行情拉回来并保存，而不是先下单。"
+      },
+      {
+        "id": "gate",
+        "label": "再过质量闸门",
+        "focus": ["store", "quality", "alert", "api"],
+        "note": "不合格就告警并停止后续交易步骤。"
+      },
+      {
+        "id": "paper",
+        "label": "最后才模拟成交",
+        "focus": ["api", "strategy", "paper", "store"],
+        "note": "只有闸门放行后，才会生成目标仓并在本地模拟盘记账。"
+      }
+    ]
+  },
+  "participants": [
+    { "id": "clock", "type": "external", "label": "收盘闹钟", "sublabel": "定时任务" },
+    { "id": "adapter", "type": "cloud", "label": "行情适配", "sublabel": "外部数据源" },
+    { "id": "store", "type": "database", "label": "本地仓库", "sublabel": "文件 + 台账" },
+    { "id": "quality", "type": "security", "label": "质量闸门", "sublabel": "过关/阻断" },
+    { "id": "alert", "type": "messagebus", "label": "告警", "sublabel": "通知人" },
+    { "id": "api", "type": "backend", "label": "本地服务", "sublabel": "FastAPI" },
+    { "id": "strategy", "type": "backend", "label": "策略", "sublabel": "目标持仓" },
+    { "id": "paper", "type": "backend", "label": "模拟盘", "sublabel": "虚拟成交" }
+  ],
+  "segments": [
+    { "from": 145, "to": 250, "label": "更新" },
+    { "from": 265, "to": 400, "label": "质检" },
+    { "from": 415, "to": 520, "label": "模拟交易" }
+  ],
+  "messages": [
+    { "id": "kickoff", "from": "clock", "to": "adapter", "y": 170, "label": "到点，去拉今天行情", "variant": "emphasis" },
+    { "id": "save-raw", "from": "adapter", "to": "store", "y": 205, "label": "先保存原始结果", "variant": "default" },
+    { "id": "saved", "from": "store", "to": "adapter", "y": 235, "label": "已落盘", "variant": "return" },
+    { "id": "ask-check", "from": "clock", "to": "quality", "y": 285, "label": "请检查能不能用", "variant": "security" },
+    { "id": "read-std", "from": "quality", "to": "store", "y": 318, "label": "抽查标准日K", "variant": "default" },
+    { "id": "rows", "from": "store", "to": "quality", "y": 348, "label": "返回记录", "variant": "return" },
+    { "id": "fail-alert", "from": "quality", "to": "alert", "y": 380, "label": "失败：通知人并停交易", "variant": "security" },
+    { "id": "pass-api", "from": "quality", "to": "api", "y": 428, "label": "通过：可以继续", "variant": "emphasis" },
+    { "id": "need-target", "from": "api", "to": "strategy", "y": 458, "label": "生成今天目标仓", "variant": "default" },
+    { "id": "targets", "from": "strategy", "to": "paper", "y": 484, "label": "转成买卖单", "variant": "emphasis" },
+    { "id": "fill", "from": "paper", "to": "store", "y": 514, "label": "虚拟成交并记账", "variant": "dashed" }
+  ],
+  "activations": [
+    { "participant": "adapter", "from": 165, "to": 242, "type": "cloud" },
+    { "participant": "store", "from": 200, "to": 242, "type": "database" },
+    { "participant": "quality", "from": 280, "to": 440, "type": "security" },
+    { "participant": "alert", "from": 375, "to": 410, "type": "messagebus" },
+    { "participant": "api", "from": 423, "to": 518, "type": "backend" },
+    { "participant": "strategy", "from": 453, "to": 493, "type": "backend" },
+    { "participant": "paper", "from": 479, "to": 520, "type": "backend" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "顺序",
+      "items": [
+        "先问数据到了没有，再问能不能信",
+        "最后才允许模拟买卖并记账"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "中途失败",
+      "items": [
+        "质检失败时，策略和下单都不应发生",
+        "人会收到告警，系统不应硬撑"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "边界",
+      "items": [
+        "这是设计中的每日闭环，今天还要靠手动灌数"
+      ]
+    }
+  ]
+}

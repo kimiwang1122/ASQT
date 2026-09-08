@@ -1,4 +1,7 @@
 .venv/
+.env
+*.token
+data/.tushare_token
 __pycache__/
 .pytest_cache/
 .playwright-cli/
@@ -9,3 +12,5 @@ logs/
 dist/
 node_modules/
 .DS_Store
+docs/archify/.archify-*/
+docs/archify/*.visual-check.*

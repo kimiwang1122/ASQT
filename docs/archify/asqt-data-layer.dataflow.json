@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "ASQT 数据层：从名单到质量闸门",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [1080, 560],
+    "output": "docs/archify/asqt-data-layer.dataflow.html",
+    "views": [
+      {
+        "id": "pull-path",
+        "label": "主备拉取",
+        "focus": ["universe", "baostock", "akshare", "pipeline", "raw"],
+        "note": "POC 名单驱动 pull-daily；BaoStock 主源，AkShare 备源补拉，raw 原样落盘。"
+      },
+      {
+        "id": "gate-path",
+        "label": "标准化与闸门",
+        "focus": ["pipeline", "normalizer", "quality", "store"],
+        "note": "未复权 OHLC 加 adj_factor；闸门记 issue 后一并 upsert，不改价格。"
+      },
+      {
+        "id": "auth-path",
+        "label": "对账与消费",
+        "focus": ["store", "reconcile", "console", "research"],
+        "note": "reconcile 对照第二源且不写回行情；控制台只读；研究回测尚未接线。"
+      }
+    ]
+  },
+  "stages": [
+    { "label": "来源" },
+    { "label": "拉取" },
+    { "label": "标准化" },
+    { "label": "闸门与库" },
+    { "label": "使用" }
+  ],
+  "nodes": [
+    { "id": "universe", "type": "database", "label": "POC 宇宙", "sublabel": "P0 名单", "stage": 0, "row": 0, "tag": "56+6" },
+    { "id": "baostock", "type": "external", "label": "BaoStock", "sublabel": "主行情", "stage": 0, "row": 1, "tag": "priority 10" },
+    { "id": "akshare", "type": "external", "label": "AkShare", "sublabel": "备源", "stage": 0, "row": 2, "tag": "priority 20" },
+    { "id": "raw", "type": "database", "label": "raw JSON", "sublabel": "data/raw/", "stage": 1, "row": 0, "tag": "可追溯" },
+    { "id": "pipeline", "type": "backend", "label": "pull-daily", "sublabel": "pipeline.py", "stage": 1, "row": 1, "tag": "CLI" },
+    { "id": "normalizer", "type": "backend", "label": "标准化", "sublabel": "Normalizer", "stage": 2, "row": 1, "tag": "契约" },
+    { "id": "quality", "type": "security", "label": "质量闸门", "sublabel": "QualityChecker", "stage": 3, "row": 0, "tag": "四类规则" },
+    { "id": "store", "type": "database", "label": "标准库", "sublabel": "Parquet SQLite", "stage": 3, "row": 1, "tag": "market_daily" },
+    { "id": "reconcile", "type": "backend", "label": "跨源对账", "sublabel": "asqt reconcile", "stage": 4, "row": 0, "tag": "cron" },
+    { "id": "console", "type": "frontend", "label": "控制台", "sublabel": "/api 只读", "stage": 4, "row": 1, "tag": "巡检" },
+    { "id": "research", "type": "backend", "label": "研究回测", "sublabel": "Qlib 未接", "stage": 4, "row": 2, "tag": "P2" }
+  ],
+  "flows": [
+    { "id": "list-to-pull", "from": "universe", "to": "pipeline", "label": "universe-load", "classification": "instrument_master", "variant": "default" },
+    { "id": "primary-k", "from": "baostock", "to": "pipeline", "label": "日K 复权", "classification": "vendor raw", "variant": "emphasis", "labelAt": [120, 220] },
+    { "id": "backup-k", "from": "akshare", "to": "pipeline", "label": "ETF 补拉", "classification": "vendor raw", "variant": "dashed" },
+    { "id": "keep-raw", "from": "pipeline", "to": "raw", "label": "原样 JSON", "classification": "raw_data", "variant": "emphasis", "labelAt": [315, 210] },
+    { "id": "to-norm", "from": "pipeline", "to": "normalizer", "label": "厂商行", "classification": "adapter rows", "variant": "emphasis" },
+    { "id": "to-gate", "from": "normalizer", "to": "quality", "label": "标准日K", "classification": "market_daily", "variant": "security" },
+    { "id": "gate-issues", "from": "quality", "to": "store", "label": "upsert 与 issue", "classification": "block/warn", "variant": "security", "labelAt": [745, 214] },
+    { "id": "read-console", "from": "store", "to": "console", "label": "只读巡检", "classification": "FastAPI", "variant": "default", "labelAt": [960, 220] },
+    { "id": "to-reconcile", "from": "store", "to": "reconcile", "label": "第二源对照", "classification": "不写回行情", "variant": "dashed" },
+    { "id": "later-research", "from": "store", "to": "research", "label": "后复权待接", "classification": "P2", "variant": "dashed" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "主路径已接通",
+      "items": [
+        "pull-daily 主源 BaoStock，AkShare 补 ETF；raw 与标准库并存"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "闸门不改数",
+      "items": [
+        "缺数、越界、复权、时点记 issue；核实送转才抑制 adj_conflict"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "对账与后续",
+      "items": [
+        "reconcile 只告警不挡交易；控制台只读，Qlib 尚未接线"
+      ]
+    }
+  ]
+}

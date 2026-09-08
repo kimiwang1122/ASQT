@@ -4,21 +4,46 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ASQT 控制台</title>
-    <link rel="stylesheet" href="/assets/styles.css" />
+    <link rel="stylesheet" href="/assets/styles.css?v=p2-ui13" />
   </head>
   <body>
     <div class="shell">
       <aside class="sidebar">
-        <div class="brand">ASQT</div>
+        <div class="brand-row">
+          <div class="brand">ASQT</div>
+          <button id="sidebar-toggle" type="button" class="icon-btn" aria-label="收起侧栏" title="收起/展开侧栏">⟨</button>
+        </div>
         <nav id="nav">
-          <a href="#overview" data-page="overview" class="active">总览</a>
-          <a href="#data" data-page="data">数据</a>
-          <a href="#strategy" data-page="strategy">策略</a>
-          <a href="#orders" data-page="orders">交易</a>
-          <a href="#review" data-page="review">复盘</a>
-          <a href="#settings" data-page="settings">设置</a>
+          <a href="#overview" data-page="overview" title="总览" class="active">
+            <svg class="nav-icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="1.5" width="5.5" height="5.5" rx="1"/><rect x="9" y="1.5" width="5.5" height="5.5" rx="1"/><rect x="1.5" y="9" width="5.5" height="5.5" rx="1"/><rect x="9" y="9" width="5.5" height="5.5" rx="1"/></svg>
+            <span class="nav-label">总览</span>
+          </a>
+          <a href="#data" data-page="data" title="数据">
+            <svg class="nav-icon" viewBox="0 0 16 16" aria-hidden="true"><ellipse cx="8" cy="4" rx="5.5" ry="2"/><path d="M2.5 4v8c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2V4"/><path d="M2.5 8c0 1.1 2.5 2 5.5 2s5.5-.9 5.5-2"/></svg>
+            <span class="nav-label">数据</span>
+          </a>
+          <a href="#sync" data-page="sync" title="同步">
+            <svg class="nav-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8a5 5 0 0 1 8.5-3.5L13 6"/><path d="M13 3v3H10"/><path d="M13 8a5 5 0 0 1-8.5 3.5L3 10"/><path d="M3 13v-3h3"/></svg>
+            <span class="nav-label">同步</span>
+          </a>
+          <a href="#strategy" data-page="strategy" title="策略">
+            <svg class="nav-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 12.5 6.2 8l2.6 2.4L14 4.5"/><path d="M10 4.5h4v4"/></svg>
+            <span class="nav-label">策略</span>
+          </a>
+          <a href="#orders" data-page="orders" title="交易">
+            <svg class="nav-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 5.5h10M10.5 3 13.5 5.5 10.5 8"/><path d="M13 10.5H3M5.5 8 2.5 10.5 5.5 13"/></svg>
+            <span class="nav-label">交易</span>
+          </a>
+          <a href="#review" data-page="review" title="复盘">
+            <svg class="nav-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 3.5h6.5L13 6v6.5H4z"/><path d="M10.5 3.5V6H13"/><path d="M6 8.5h4M6 11h3"/></svg>
+            <span class="nav-label">复盘</span>
+          </a>
+          <a href="#settings" data-page="settings" title="设置">
+            <svg class="nav-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/><path d="M8 2.4v1.6M8 12v1.6M2.4 8h1.6M12 8h1.6M4 4l1.1 1.1M10.9 10.9 12 12M12 4l-1.1 1.1M5.1 10.9 4 12"/></svg>
+            <span class="nav-label">设置</span>
+          </a>
         </nav>
-        <div class="sidebar-note">基座巡检 · 业务模块未接入</div>
+        <div class="sidebar-note">P2 研究已接 · 模拟交易未开</div>
       </aside>
       <main>
         <header>
@@ -27,68 +52,193 @@
             <p id="runtime">加载中</p>
           </div>
           <div class="header-actions">
-            <div class="theme-toggle" aria-label="主题切换">
-              <button id="theme-dark" type="button" title="黑夜模式">☾</button>
-              <button id="theme-light" type="button" title="白天模式">☀</button>
+            <div class="theme-toggle" role="group" aria-label="主题切换">
+              <button id="theme-dark" type="button" aria-label="黑夜模式" title="黑夜模式">☾</button>
+              <button id="theme-light" type="button" aria-label="白天模式" title="白天模式">☀</button>
             </div>
+            <button id="sync-now" type="button" aria-busy="false" aria-readonly="false">追加行情</button>
             <button id="bootstrap" type="button">初始化演示数据</button>
+            <p id="action-error" class="field-error" hidden></p>
           </div>
         </header>
 
         <section class="page" id="page-overview">
-          <section class="metrics">
-            <article>
-              <span>数据源</span>
-              <strong id="source-count">-</strong>
-            </article>
-            <article>
-              <span>标的数量</span>
-              <strong id="instrument-count">-</strong>
-            </article>
-            <article>
+          <section class="metrics is-loading" aria-label="数据门禁">
+            <a class="metric metric-hero" id="metric-quality" data-tone="neutral" href="#data">
               <span>质量问题</span>
-              <strong id="quality-count">-</strong>
+              <strong id="quality-count" class="num">-</strong>
+              <p class="metric-hint" id="quality-hint">检查数据能否进研究或交易</p>
+            </a>
+            <article class="metric metric-hero" id="metric-alerts" data-tone="neutral">
+              <span>开放告警</span>
+              <strong id="alert-count" class="num">-</strong>
+              <p class="metric-hint" id="alert-hint">阻断项会停在质量门</p>
             </article>
-            <article>
-              <span>告警</span>
-              <strong id="alert-count">-</strong>
+            <article class="metric">
+              <span>数据源</span>
+              <strong id="source-count" class="num">-</strong>
+            </article>
+            <article class="metric">
+              <span>标的</span>
+              <strong id="instrument-count" class="num">-</strong>
             </article>
           </section>
 
-          <section class="panel">
-            <div class="panel-title">
-              <h2>行情样例</h2>
-              <span id="market-file">未加载</span>
-            </div>
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>日期</th>
-                    <th>代码</th>
-                    <th>开盘</th>
-                    <th>最高</th>
-                    <th>最低</th>
-                    <th>收盘</th>
-                    <th>成交量</th>
-                    <th>来源</th>
-                  </tr>
-                </thead>
-                <tbody id="market-body"></tbody>
-              </table>
-            </div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-title">
-              <h2>最近任务</h2>
-              <span>调度基座</span>
-            </div>
-            <ul id="task-list" class="task-list"></ul>
-          </section>
+          <div class="overview-workbench">
+            <section class="panel">
+              <div class="panel-title">
+                <h2>行情 Top50</h2>
+                <span id="market-file">未加载</span>
+              </div>
+              <form class="filters filters-inline" id="market-filters">
+                <label class="filter-inline">
+                  日期
+                  <input id="market-date" type="date" />
+                </label>
+                <label class="filter-inline">
+                  市场
+                  <select id="market-exchange" data-asqt-select>
+                    <option value="">全部</option>
+                    <option value="SH">SH</option>
+                    <option value="SZ">SZ</option>
+                  </select>
+                </label>
+                <label class="filter-inline">
+                  类型
+                  <select id="market-type" data-asqt-select>
+                    <option value="">全部</option>
+                    <option value="stock">股票</option>
+                    <option value="etf">ETF</option>
+                  </select>
+                </label>
+                <label class="filter-inline">
+                  代码
+                  <input id="market-code" type="search" placeholder="代码或名称" autocomplete="off" />
+                </label>
+                <label class="filter-action">
+                  <button type="submit">筛选</button>
+                </label>
+              </form>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th class="num">#</th>
+                      <th>日期</th>
+                      <th>代码</th>
+                      <th>市场</th>
+                      <th>名称</th>
+                      <th>开盘</th>
+                      <th>最高</th>
+                      <th>最低</th>
+                      <th>收盘</th>
+                      <th>
+                        <button type="button" class="sort-btn" data-sort-scope="market" data-sort="volume">成交量</button>
+                      </th>
+                      <th>
+                        <span class="th-with-tip">
+                          <button type="button" class="sort-btn" data-sort-scope="market" data-sort="dod">环比</button>
+                          <span class="tip" tabindex="0" aria-label="环比说明" data-tip="环比：相对上一交易日成交量的变化。">i</span>
+                        </span>
+                      </th>
+                      <th>
+                        <span class="th-with-tip">
+                          <button type="button" class="sort-btn" data-sort-scope="market" data-sort="yoy">同比</button>
+                          <span class="tip" tabindex="0" aria-label="同比说明" data-tip="同比：相对约一年前最近交易日成交量的变化。">i</span>
+                        </span>
+                      </th>
+                      <th>来源</th>
+                    </tr>
+                  </thead>
+                  <tbody id="market-body"></tbody>
+                </table>
+              </div>
+            </section>
+            <section class="panel panel-side" id="task-panel">
+              <div class="panel-title">
+                <h2>最近任务</h2>
+                <span>按次留档</span>
+                <button id="tasks-toggle" type="button" class="icon-btn" aria-label="收起任务" title="收起/展开任务">⟩</button>
+              </div>
+              <ul id="task-list" class="task-list"></ul>
+            </section>
+          </div>
         </section>
 
         <section class="page hidden" id="page-data">
+          <section class="panel">
+            <div class="panel-title">
+              <h2>质量问题</h2>
+              <span id="quality-page-meta">未加载</span>
+            </div>
+            <form class="filters filters-inline" id="quality-filters">
+              <label class="filter-inline">
+                日期
+                <input id="quality-date" type="date" />
+              </label>
+              <label class="filter-inline">
+                级别
+                <select id="quality-severity" data-asqt-select>
+                  <option value="">全部</option>
+                  <option value="block">阻断</option>
+                  <option value="warn">警告</option>
+                </select>
+              </label>
+              <label class="filter-inline">
+                状态
+                <select id="quality-status" data-asqt-select>
+                  <option value="open" selected>未关闭</option>
+                  <option value="closed">已关闭</option>
+                  <option value="all">全部</option>
+                </select>
+              </label>
+              <label class="filter-inline">
+                代码
+                <input id="quality-code" type="search" placeholder="代码或名称" autocomplete="off" />
+              </label>
+              <label class="filter-action">
+                <button type="submit">筛选</button>
+              </label>
+            </form>
+            <div class="pager">
+              <button type="button" class="secondary" id="quality-prev">上一页</button>
+              <span id="quality-page-label">-</span>
+              <button type="button" class="secondary" id="quality-next">下一页</button>
+            </div>
+            <div class="table-wrap">
+              <table class="quality-table">
+                <thead>
+                  <tr>
+                    <th class="num">#</th>
+                    <th>
+                      <button type="button" class="sort-btn" data-sort-scope="quality" data-sort="created_at">时间</button>
+                    </th>
+                    <th>
+                      <button type="button" class="sort-btn" data-sort-scope="quality" data-sort="symbol">代码</button>
+                    </th>
+                    <th>
+                      <button type="button" class="sort-btn" data-sort-scope="quality" data-sort="exchange">市场</button>
+                    </th>
+                    <th>
+                      <button type="button" class="sort-btn" data-sort-scope="quality" data-sort="trade_date">日期</button>
+                    </th>
+                    <th>
+                      <button type="button" class="sort-btn" data-sort-scope="quality" data-sort="check_type">检查</button>
+                    </th>
+                    <th>
+                      <button type="button" class="sort-btn" data-sort-scope="quality" data-sort="severity">级别</button>
+                    </th>
+                    <th>
+                      <button type="button" class="sort-btn" data-sort-scope="quality" data-sort="status">状态</button>
+                    </th>
+                    <th>差异</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="quality-body"></tbody>
+              </table>
+            </div>
+          </section>
           <section class="panel">
             <div class="panel-title">
               <h2>数据契约样例</h2>
@@ -99,7 +249,7 @@
           <section class="panel">
             <div class="panel-title">
               <h2>数据源注册</h2>
-              <span>含配额 / 成本 / 负责人</span>
+              <span>健康度为最近一次拉数写入，不是实时探测；东方财富走 AkShare，无单独一行</span>
             </div>
             <div class="table-wrap">
               <table>
@@ -120,28 +270,206 @@
           </section>
         </section>
 
+        <section class="page hidden" id="page-sync">
+          <section class="panel">
+            <div class="panel-title">
+              <h2>数据同步记录</h2>
+              <span id="sync-page-meta">未加载</span>
+            </div>
+            <p class="hint" id="sync-scheduler-hint">人工点「追加行情」立即异步执行；每个交易日 16:30 起等主源当日 K 再质检，17:30 起按原逻辑重试直到成功。</p>
+            <form class="filters filters-inline" id="sync-filters">
+              <label class="filter-inline">
+                状态
+                <select id="sync-status" data-asqt-select>
+                  <option value="all">全部</option>
+                  <option value="running">进行中</option>
+                  <option value="success">成功</option>
+                  <option value="skipped">已是最新</option>
+                  <option value="quality_failed">质检未通过</option>
+                  <option value="failed">失败</option>
+                </select>
+              </label>
+              <label class="filter-inline">
+                触发
+                <select id="sync-trigger" data-asqt-select>
+                  <option value="all">全部</option>
+                  <option value="manual">人工</option>
+                  <option value="auto">自动</option>
+                </select>
+              </label>
+              <label class="filter-action">
+                <button type="submit">筛选</button>
+              </label>
+            </form>
+            <div class="pager">
+              <button type="button" class="secondary" id="sync-prev">上一页</button>
+              <span id="sync-page-label">-</span>
+              <button type="button" class="secondary" id="sync-next">下一页</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th class="num">#</th>
+                    <th>开始时间</th>
+                    <th>结束时间</th>
+                    <th>触发</th>
+                    <th>状态</th>
+                    <th>窗口</th>
+                    <th>截止日</th>
+                    <th>行数</th>
+                    <th>质检</th>
+                    <th>不通过原因</th>
+                  </tr>
+                </thead>
+                <tbody id="sync-body"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
         <section class="page hidden" id="page-strategy">
-          <div class="empty-state" data-module="StrategyService">
-            <h2>策略模块未接入</h2>
-            <p>缺少对象：策略版本、参数组、目标持仓生成服务。</p>
-            <p>下一步：实现 StrategyService，完成生命周期与 target_position 写入。</p>
-          </div>
+          <section class="panel">
+            <div class="panel-title">
+              <h2>策略版本</h2>
+              <span>生命周期 · 仅 paper 可下单</span>
+            </div>
+            <p class="hint">草稿 / 回测 / 候选不能写可下单目标仓。点「重跑回测」立即入队，后台计算，页面显示进度；完成后覆盖 latest 实验。</p>
+            <form class="filters filters-inline" id="strategy-run-form">
+              <label class="filter-inline">
+                策略
+                <select id="strategy-run-id" data-asqt-select="wide">
+                  <option value="all">两只都跑</option>
+                  <option value="etf_ma_rotate">ETF 均线轮动</option>
+                  <option value="stock_momentum_topk">股票动量 TopK</option>
+                </select>
+              </label>
+              <label class="filter-action">
+                <button type="submit" id="strategy-run">重跑回测</button>
+              </label>
+            </form>
+            <p id="strategy-run-result" class="hint" hidden></p>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>策略</th>
+                    <th>版本</th>
+                    <th>状态</th>
+                    <th>参数组</th>
+                    <th>代码版本</th>
+                    <th>生效日</th>
+                  </tr>
+                </thead>
+                <tbody id="strategy-body"></tbody>
+              </table>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-title">
+              <h2>最近实验</h2>
+              <span>data/experiment/latest-*.json</span>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>策略</th>
+                    <th>状态</th>
+                    <th>样本内收益</th>
+                    <th>样本外收益</th>
+                    <th>样本外回撤</th>
+                    <th>数据版本</th>
+                  </tr>
+                </thead>
+                <tbody id="experiment-body"></tbody>
+              </table>
+            </div>
+          </section>
         </section>
 
         <section class="page hidden" id="page-orders">
-          <div class="empty-state" data-module="OrderService / ExecutionAdapter">
-            <h2>交易模块未接入</h2>
-            <p>缺少对象：标准订单状态机、模拟撮合、账本与急停控制。</p>
-            <p>下一步：实现 OrderService 与 PaperBroker ExecutionAdapter。</p>
-          </div>
+          <section class="panel">
+            <div class="panel-title">
+              <h2>Mock 下单</h2>
+              <span>质检闸门 · 非真实撮合</span>
+            </div>
+            <p class="hint">有开放 `block` 质量问题时拒绝新订单并写入 `rejected`；通过则写入 `risk_pending`。不走 PaperBroker。</p>
+            <form class="filters filters-inline" id="mock-order-form">
+              <label class="filter-inline">
+                代码
+                <input id="order-symbol" type="search" placeholder="代码或名称" autocomplete="off" required />
+              </label>
+              <label class="filter-inline">
+                方向
+                <select id="order-side" data-asqt-select>
+                  <option value="BUY">买入</option>
+                  <option value="SELL">卖出</option>
+                </select>
+              </label>
+              <label class="filter-inline">
+                数量
+                <input id="order-qty" type="number" min="1" step="1" value="100" />
+              </label>
+              <label class="filter-action">
+                <button type="submit">试下 mock 单</button>
+              </label>
+            </form>
+            <p id="order-result" class="hint" hidden></p>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>代码</th>
+                    <th>方向</th>
+                    <th>数量</th>
+                    <th>状态</th>
+                    <th>风控标记</th>
+                  </tr>
+                </thead>
+                <tbody id="order-body"></tbody>
+              </table>
+            </div>
+          </section>
         </section>
 
         <section class="page hidden" id="page-review">
-          <div class="empty-state" data-module="ReviewService">
-            <h2>复盘模块未接入</h2>
-            <p>缺少对象：实验记录、收益归因、滑点偏差报告。</p>
-            <p>下一步：实现 ReviewService，并预留 MLflow 适配边界。</p>
-          </div>
+          <section class="panel">
+            <div class="panel-title">
+              <h2>回测归因</h2>
+              <span>T+1 权重 × 复权收益</span>
+            </div>
+            <p class="hint" id="review-hint">按标的累加每日贡献。模拟 vs 回测偏差要等 PaperBroker 成交后才能算。</p>
+            <form class="filters filters-inline" id="review-filter-form">
+              <label class="filter-inline">
+                策略
+                <select id="review-strategy" data-asqt-select="wide">
+                  <option value="etf_ma_rotate">ETF 均线轮动</option>
+                  <option value="stock_momentum_topk">股票动量 TopK</option>
+                </select>
+              </label>
+              <label class="filter-action">
+                <button type="submit">查看</button>
+              </label>
+            </form>
+            <div class="kv-grid" id="review-summary"></div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>代码</th>
+                    <th>贡献</th>
+                    <th>样本内</th>
+                    <th>样本外</th>
+                    <th>持有日</th>
+                    <th>平均权重</th>
+                  </tr>
+                </thead>
+                <tbody id="review-body"></tbody>
+              </table>
+            </div>
+          </section>
         </section>
 
         <section class="page hidden" id="page-settings">
@@ -164,11 +492,12 @@
               <h2>主题</h2>
               <span>参考样例图的纯黑控制台风格</span>
             </div>
-            <p class="hint">通过右上角月/日切换主题。黑夜模式采用纯黑底、深灰卡片、胶囊导航与青绿强调色。</p>
+            <p class="hint">通过右上角月/日切换主题。总览页按交易台密度排版：质量门做焦点，单强调色，边框分层。</p>
           </section>
         </section>
       </main>
     </div>
-    <script src="/assets/app.js"></script>
+    <div id="toast-host" class="toast-host" aria-live="polite"></div>
+    <script src="/assets/app.js?v=p2-ui13"></script>
   </body>
 </html>

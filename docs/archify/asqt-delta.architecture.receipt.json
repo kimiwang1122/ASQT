@@ -1,0 +1,323 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "compare",
+  "type": "architecture",
+  "comparatorVersion": 1,
+  "canonicalVersion": 1,
+  "completeness": "complete",
+  "proofLevel": "revision-pinned",
+  "base": {
+    "title": "ASQT 现在能做什么",
+    "rawSha256": "db25dc272b7ff6468baa21eece574daa0660dcd45e38a4d43ef6b4f533b08699",
+    "semanticSha256": "b266ed9cb7c6ffaeeb427bc2a0bbe61c384cf760d2f5efcd77072bf85ced2d5c",
+    "bytes": 5469,
+    "revision": "12d41cde3aaa2751b71b01f7a7e3f42ee34520d5"
+  },
+  "head": {
+    "title": "ASQT 下一步接通后长这样",
+    "rawSha256": "fd2496e7a6903ceae143bf266ac26c4c61471dfd18e834046448a5136abd1f92",
+    "semanticSha256": "f8986c05d8f65a0937898b7672a0be362865c012b7eab1a15d58b74291101266",
+    "bytes": 5643,
+    "revision": "12d41cde3aaa2751b71b01f7a7e3f42ee34520d5"
+  },
+  "summary": {
+    "components": {
+      "added": 1,
+      "changed": 7,
+      "evidenceChanged": 0,
+      "removed": 1,
+      "moved": 0
+    },
+    "connections": {
+      "added": 2,
+      "changed": 3,
+      "removed": 1,
+      "rerouted": 0
+    },
+    "boundaries": {
+      "added": 2,
+      "changed": 0,
+      "removed": 2,
+      "geometryChanged": 0
+    },
+    "presentationChanged": true,
+    "provenanceChanged": false
+  },
+  "changes": {
+    "components": [
+      {
+        "id": "console",
+        "baseLabel": "控制台",
+        "headLabel": "控制台",
+        "status": "changed",
+        "classifications": [
+          "semantic"
+        ],
+        "changedFields": [
+          "/sublabel"
+        ]
+      },
+      {
+        "id": "market",
+        "baseLabel": "外部行情源",
+        "headLabel": "外部行情源",
+        "status": "changed",
+        "classifications": [
+          "semantic"
+        ],
+        "changedFields": [
+          "/sublabel",
+          "/tag"
+        ]
+      },
+      {
+        "id": "operator",
+        "baseLabel": "运营人员",
+        "headLabel": "运营人员",
+        "status": "changed",
+        "classifications": [
+          "semantic"
+        ],
+        "changedFields": [
+          "/sublabel"
+        ]
+      },
+      {
+        "id": "paper",
+        "baseLabel": "模拟交易",
+        "headLabel": "模拟交易",
+        "status": "changed",
+        "classifications": [
+          "semantic"
+        ],
+        "changedFields": [
+          "/tag"
+        ]
+      },
+      {
+        "id": "parquet",
+        "baseLabel": "行情文件",
+        "headLabel": "行情文件",
+        "status": "changed",
+        "classifications": [
+          "semantic"
+        ],
+        "changedFields": [
+          "/sublabel"
+        ]
+      },
+      {
+        "id": "quality",
+        "baseLabel": "质量闸门",
+        "headLabel": "质量闸门",
+        "status": "changed",
+        "classifications": [
+          "semantic"
+        ],
+        "changedFields": [
+          "/tag"
+        ]
+      },
+      {
+        "id": "seed",
+        "baseLabel": "演示灌数",
+        "status": "removed",
+        "classifications": [
+          "semantic"
+        ],
+        "changedFields": []
+      },
+      {
+        "id": "sqlite",
+        "baseLabel": "台账库",
+        "headLabel": "台账库",
+        "status": "changed",
+        "classifications": [
+          "semantic"
+        ],
+        "changedFields": [
+          "/sublabel"
+        ]
+      },
+      {
+        "id": "strategy",
+        "headLabel": "策略服务",
+        "status": "added",
+        "classifications": [
+          "semantic"
+        ],
+        "changedFields": []
+      }
+    ],
+    "connections": [
+      {
+        "id": "api-paper",
+        "base": {
+          "from": "api",
+          "to": "paper",
+          "label": "不会真实下单"
+        },
+        "head": {
+          "from": "api",
+          "to": "paper",
+          "label": "模拟下单"
+        },
+        "status": "changed",
+        "classifications": [
+          "semantic"
+        ],
+        "changedFields": [
+          "/label",
+          "/variant"
+        ]
+      },
+      {
+        "id": "api-strategy",
+        "head": {
+          "from": "api",
+          "to": "strategy",
+          "label": "生成目标仓"
+        },
+        "status": "added",
+        "classifications": [
+          "topology"
+        ],
+        "changedFields": []
+      },
+      {
+        "id": "market-quality",
+        "base": {
+          "from": "market",
+          "to": "quality",
+          "label": "尚未拉取"
+        },
+        "head": {
+          "from": "market",
+          "to": "quality",
+          "label": "标准化后质检"
+        },
+        "status": "changed",
+        "classifications": [
+          "geometry",
+          "semantic"
+        ],
+        "changedFields": [
+          "/label",
+          "/labelDy",
+          "/variant"
+        ]
+      },
+      {
+        "id": "paper-sqlite",
+        "head": {
+          "from": "paper",
+          "to": "sqlite",
+          "label": "成交写账本"
+        },
+        "status": "added",
+        "classifications": [
+          "topology"
+        ],
+        "changedFields": []
+      },
+      {
+        "id": "quality-api",
+        "base": {
+          "from": "quality",
+          "to": "api",
+          "label": "通过才可交易"
+        },
+        "head": {
+          "from": "quality",
+          "to": "api",
+          "label": "失败则阻断"
+        },
+        "status": "changed",
+        "classifications": [
+          "semantic"
+        ],
+        "changedFields": [
+          "/label"
+        ]
+      },
+      {
+        "id": "seed-parquet",
+        "base": {
+          "from": "seed",
+          "to": "parquet",
+          "label": "写入样例"
+        },
+        "status": "removed",
+        "classifications": [
+          "topology"
+        ],
+        "changedFields": []
+      }
+    ],
+    "boundaries": [
+      {
+        "key": "region:已经能跑的基座",
+        "kind": "region",
+        "label": "已经能跑的基座",
+        "status": "removed",
+        "classifications": [
+          "scope"
+        ],
+        "changedFields": []
+      },
+      {
+        "key": "region:研究与台账仍在本机",
+        "kind": "region",
+        "label": "研究与台账仍在本机",
+        "status": "added",
+        "classifications": [
+          "scope"
+        ],
+        "changedFields": []
+      },
+      {
+        "key": "security-group:交易前必须经过的闸门",
+        "kind": "security-group",
+        "label": "交易前必须经过的闸门",
+        "status": "added",
+        "classifications": [
+          "scope"
+        ],
+        "changedFields": []
+      },
+      {
+        "key": "security-group:只写了接口，还没接通",
+        "kind": "security-group",
+        "label": "只写了接口，还没接通",
+        "status": "removed",
+        "classifications": [
+          "scope"
+        ],
+        "changedFields": []
+      }
+    ]
+  },
+  "identity": {
+    "components": "components[].id",
+    "connections": "connections[].id (required)",
+    "boundaries": "boundaries[].kind + boundaries[].label (derived)"
+  },
+  "view": {
+    "visualPreset": "classic"
+  },
+  "limitations": [
+    "Authored Architecture IR only; no runtime impact, causality, risk, or mergeability is inferred.",
+    "Boundary identity is conservatively derived from kind + label."
+  ],
+  "artifact": {
+    "sha256": "1937fe60a1cf2bb64c515bd52fbd69e58b4d202d84da6be98839c3703388fc59",
+    "bytes": 2055507
+  },
+  "validation": {
+    "checksPassed": 28,
+    "checkCount": 28,
+    "baseComposition": "pass",
+    "headComposition": "pass"
+  }
+}

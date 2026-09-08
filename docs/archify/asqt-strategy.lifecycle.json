@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "一个策略怎样才允许去模拟买卖",
+    "locale": "zh-CN",
+    "animation": "trace",
+    "viewBox": [1080, 660],
+    "quality_profile": "showcase",
+    "output": "docs/archify/asqt-strategy.lifecycle.html",
+    "views": [
+      {
+        "id": "main",
+        "label": "正常升级路径",
+        "focus": ["draft", "backtest", "candidate", "paper", "archived"],
+        "note": "策略从草稿到模拟盘，每一步都要留下版本记录，不能跳级。"
+      },
+      {
+        "id": "pause",
+        "label": "可以暂停，不是消失",
+        "focus": ["paper", "paused"],
+        "note": "模拟盘中的策略可以被人暂停；恢复前还要再检查。"
+      },
+      {
+        "id": "exits",
+        "label": "停用和失败",
+        "focus": ["backtest", "failed", "paused", "retired"],
+        "note": "回测不可复现或风险越界时，应停用而不是直接实盘。"
+      }
+    ]
+  },
+  "lanes": [
+    { "id": "main", "label": "正式阶段" },
+    { "id": "waiting", "label": "人工控制" },
+    { "id": "exceptions", "label": "研究失败" },
+    { "id": "terminal", "label": "退出" }
+  ],
+  "states": [
+    { "id": "draft", "type": "start", "label": "草稿", "sublabel": "还在试想法", "lane": "main", "col": 0, "step": "01", "tag": "不可交易" },
+    { "id": "backtest", "type": "active", "label": "回测中", "sublabel": "用历史数据检验", "lane": "main", "col": 1, "step": "02", "tag": "研究" },
+    { "id": "candidate", "type": "decision", "label": "候选", "sublabel": "样本外说得通", "lane": "main", "col": 2, "step": "03", "tag": "待准入" },
+    { "id": "paper", "type": "active", "label": "模拟盘", "sublabel": "虚拟资金跟踪", "lane": "main", "col": 3, "step": "04", "tag": "可记账" },
+    { "id": "archived", "type": "success", "label": "归档", "sublabel": "留下完整记录", "lane": "main", "col": 4, "step": "05", "tag": "可复盘" },
+    { "id": "paused", "type": "waiting", "label": "暂停", "sublabel": "人工叫停", "lane": "waiting", "col": 1, "tag": "急停优先" },
+    { "id": "failed", "type": "failure", "label": "回测未过", "sublabel": "不可复现/未来函数", "lane": "exceptions", "col": 0, "tag": "可重做" },
+    { "id": "retired", "type": "failure", "label": "停用", "sublabel": "不再参与交易", "lane": "terminal", "col": 1, "tag": "终态" }
+  ],
+  "transitions": [
+    { "id": "pause-from-paper", "from": "paper", "to": "paused", "variant": "security" },
+    { "id": "resume-to-paper", "from": "paused", "to": "paper", "variant": "emphasis" },
+    { "id": "backtest-fail", "from": "backtest", "to": "failed", "variant": "security" },
+    { "id": "retry-research", "from": "failed", "to": "draft", "variant": "dashed", "fromSide": "left", "toSide": "top", "via": [[24, 307], [24, 70], [94, 70]] },
+    { "id": "pause-retire", "from": "paused", "to": "retired", "variant": "security" },
+    { "id": "candidate-retire", "from": "candidate", "to": "retired", "variant": "dashed" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "准入规则",
+      "items": [
+        "草稿和回测中的策略不能自动下单",
+        "进模拟盘前要能讲清数据和参数版本"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "人的权利",
+      "items": [
+        "模拟过程中可随时暂停；急停优先于策略"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "失败怎么处理",
+      "items": [
+        "回测不过回到草稿；停用后不再产生新订单"
+      ]
+    }
+  ]
+}

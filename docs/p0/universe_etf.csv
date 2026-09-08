@@ -1,0 +1,7 @@
+symbol,name,instrument_type,exchange,board,pool,index_name,reason,asof_date
+510300.SH,华泰柏瑞沪深300ETF,etf,SH,broad_index,etf_broad,沪深300,大盘宽基;同指数只留成交额更高的场内品种,2026-09-03
+510500.SH,南方中证500ETF,etf,SH,broad_index,etf_broad,中证500,中盘宽基,2026-09-03
+512100.SH,南方中证1000ETF,etf,SH,broad_index,etf_broad,中证1000,小盘宽基,2026-09-03
+159915.SZ,易方达创业板ETF,etf,SZ,broad_index,etf_broad,创业板指,创业成长宽基,2026-09-03
+588000.SH,华夏上证科创板50ETF,etf,SH,broad_index,etf_broad,科创50,科创宽基,2026-09-03
+510050.SH,华夏上证50ETF,etf,SH,broad_index,etf_broad,上证50,超大盘宽基;AUM/成交额通常可查,2026-09-03
