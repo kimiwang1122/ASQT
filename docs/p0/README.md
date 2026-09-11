@@ -15,10 +15,11 @@ P0 → P1：书面冻结已齐；未决项见 [open_questions.md](open_questions
 | [risk_defaults.md](risk_defaults.md) | 账户/持仓/停机默认值 | 回撤 8%/12%，股票 10%，ETF 20%，总仓 95% |
 | [universe_policy.md](universe_policy.md) | POC 标的池原则 | ≥50 股 + ≥5 ETF；名单见 CSV，筛选日 2026-09-03 |
 | [data_budget.md](data_budget.md) | 主备数据源与费用 | 主源 baostock、备源 AkShare；付费暂缓 |
-| [open_questions.md](open_questions.md) | 未决与暂缓 | Q3 已关闭；Q1/Q2/Q4 暂缓；Q5/Q6 已关闭；Q7 排除北交所 |
+| [open_questions.md](open_questions.md) | 未决与暂缓 | Q3/Q4 已关闭；Q1/Q2 暂缓；Q5/Q6 已关闭；Q7 排除北交所 |
 | [corporate_actions.md](corporate_actions.md) | 已核实送转除权 | 抑制 adj 误报；不改价格 |
 | [reconcile.md](reconcile.md) | 跨源鉴定 | CLI + cron；不替代完整事件主数据 |
 
-讲解图（非正式冻结件）：[../archify/README.md](../archify/README.md)
+讲解图（非正式冻结件）：[../archify/README.md](../archify/README.md)  
+口头/聊天用语：[../glossary.md](../glossary.md)
 
 变更规则：改冻结口径必须先改对应文件并更新确认日期，再改代码。

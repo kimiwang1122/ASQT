@@ -1,4 +1,4 @@
-"""P2 first strategies: one rule (ETF MA) and one A-share TopK."""
+"""P2 strategies: ETF MA, A-share TopK, and ETF momentum TopK."""
 
 from __future__ import annotations
 
@@ -6,10 +6,11 @@ from typing import Any
 
 from asqt.symbols import infer_instrument_type
 
-CODE_VERSION = "p2.1"
+CODE_VERSION = "p2.2"
 
 ETF_MA_ROTATE = "etf_ma_rotate"
 STOCK_MOMENTUM_TOPK = "stock_momentum_topk"
+ETF_MOMENTUM_TOPK = "etf_momentum_topk"
 
 STRATEGY_SPECS: dict[str, dict[str, Any]] = {
     ETF_MA_ROTATE: {
@@ -24,6 +25,12 @@ STRATEGY_SPECS: dict[str, dict[str, Any]] = {
         "parameter_set_id": "stock_momentum_topk.k5.l20",
         "params": {"lookback": 20, "top_k": 5, "max_weight": 0.10, "gross_limit": 0.95},
     },
+    ETF_MOMENTUM_TOPK: {
+        "kind": "topk",
+        "instrument_type": "etf",
+        "parameter_set_id": "etf_momentum_topk.k3.l40",
+        "params": {"lookback": 40, "top_k": 3, "max_weight": 0.20, "gross_limit": 0.95},
+    },
 }
 
 
@@ -35,7 +42,7 @@ def asof_rows(rows: list[dict[str, Any]], asof: str) -> list[dict[str, Any]]:
     return [row for row in rows if str(row["trade_date"]) <= asof]
 
 
-def _by_symbol(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def market_by_symbol(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         grouped.setdefault(str(row["symbol"]), []).append(row)
@@ -44,11 +51,52 @@ def _by_symbol(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     return grouped
 
 
+def _by_symbol(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    return market_by_symbol(rows)
+
+
+def suspended_keys(limits: list[dict[str, Any]] | None) -> set[tuple[str, str]]:
+    out: set[tuple[str, str]] = set()
+    for row in limits or []:
+        if int(row.get("is_suspended") or 0) == 1:
+            out.add((str(row.get("symbol")), str(row.get("trade_date"))))
+    return out
+
+
+def _series_asof(series: list[dict[str, Any]], asof: str) -> list[dict[str, Any]]:
+    if not series:
+        return []
+    if str(series[-1]["trade_date"]) <= asof:
+        return series
+    if str(series[0]["trade_date"]) > asof:
+        return []
+    lo, hi = 0, len(series)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if str(series[mid]["trade_date"]) <= asof:
+            lo = mid + 1
+        else:
+            hi = mid
+    return series[:lo]
+
+
 def _suspended(limits: list[dict[str, Any]], symbol: str, trade_date: str) -> bool:
     for row in limits:
         if row.get("symbol") == symbol and str(row.get("trade_date")) == trade_date:
             return int(row.get("is_suspended") or 0) == 1
     return False
+
+
+def _is_suspended(
+    symbol: str,
+    trade_date: str,
+    *,
+    limits: list[dict[str, Any]] | None = None,
+    suspended: set[tuple[str, str]] | None = None,
+) -> bool:
+    if suspended is not None:
+        return (symbol, trade_date) in suspended
+    return _suspended(limits or [], symbol, trade_date)
 
 
 def _clip_weights(raw: dict[str, float], max_weight: float, gross_limit: float) -> dict[str, float]:
@@ -68,20 +116,23 @@ def signal_etf_ma_rotate(
     *,
     limits: list[dict[str, Any]] | None = None,
     params: dict[str, Any] | None = None,
+    market_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
+    suspended: set[tuple[str, str]] | None = None,
 ) -> dict[str, float]:
     spec = dict(STRATEGY_SPECS[ETF_MA_ROTATE]["params"])
     spec.update(params or {})
     window = int(spec["window"])
-    snapshot = _by_symbol(asof_rows(rows, asof))
+    grouped = market_by_symbol if market_by_symbol is not None else _by_symbol(rows)
     chosen: list[str] = []
-    for symbol, series in snapshot.items():
+    for symbol, series in grouped.items():
         if infer_instrument_type(symbol) != "etf":
             continue
-        if _suspended(limits or [], symbol, asof):
+        if _is_suspended(symbol, asof, limits=limits, suspended=suspended):
             continue
-        if len(series) < window:
+        hist = _series_asof(series, asof)
+        if len(hist) < window:
             continue
-        closes = [adj_close(item) for item in series[-window:]]
+        closes = [adj_close(item) for item in hist[-window:]]
         sma = sum(closes) / window
         if closes[-1] > sma:
             chosen.append(symbol)
@@ -97,22 +148,69 @@ def signal_stock_momentum_topk(
     *,
     limits: list[dict[str, Any]] | None = None,
     params: dict[str, Any] | None = None,
+    market_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
+    suspended: set[tuple[str, str]] | None = None,
 ) -> dict[str, float]:
-    spec = dict(STRATEGY_SPECS[STOCK_MOMENTUM_TOPK]["params"])
+    return _signal_momentum_topk(
+        rows,
+        asof,
+        strategy_id=STOCK_MOMENTUM_TOPK,
+        instrument_type="stock",
+        limits=limits,
+        params=params,
+        market_by_symbol=market_by_symbol,
+        suspended=suspended,
+    )
+
+
+def signal_etf_momentum_topk(
+    rows: list[dict[str, Any]],
+    asof: str,
+    *,
+    limits: list[dict[str, Any]] | None = None,
+    params: dict[str, Any] | None = None,
+    market_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
+    suspended: set[tuple[str, str]] | None = None,
+) -> dict[str, float]:
+    return _signal_momentum_topk(
+        rows,
+        asof,
+        strategy_id=ETF_MOMENTUM_TOPK,
+        instrument_type="etf",
+        limits=limits,
+        params=params,
+        market_by_symbol=market_by_symbol,
+        suspended=suspended,
+    )
+
+
+def _signal_momentum_topk(
+    rows: list[dict[str, Any]],
+    asof: str,
+    *,
+    strategy_id: str,
+    instrument_type: str,
+    limits: list[dict[str, Any]] | None = None,
+    params: dict[str, Any] | None = None,
+    market_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
+    suspended: set[tuple[str, str]] | None = None,
+) -> dict[str, float]:
+    spec = dict(STRATEGY_SPECS[strategy_id]["params"])
     spec.update(params or {})
     lookback = int(spec["lookback"])
     top_k = int(spec["top_k"])
-    snapshot = _by_symbol(asof_rows(rows, asof))
+    grouped = market_by_symbol if market_by_symbol is not None else _by_symbol(rows)
     scored: list[tuple[float, str]] = []
-    for symbol, series in snapshot.items():
-        if infer_instrument_type(symbol) != "stock":
+    for symbol, series in grouped.items():
+        if infer_instrument_type(symbol) != instrument_type:
             continue
-        if _suspended(limits or [], symbol, asof):
+        if _is_suspended(symbol, asof, limits=limits, suspended=suspended):
             continue
-        if len(series) < lookback + 1:
+        hist = _series_asof(series, asof)
+        if len(hist) < lookback + 1:
             continue
-        start = adj_close(series[-(lookback + 1)])
-        end = adj_close(series[-1])
+        start = adj_close(hist[-(lookback + 1)])
+        end = adj_close(hist[-1])
         if start <= 0:
             continue
         scored.append((end / start - 1.0, symbol))
@@ -131,27 +229,35 @@ def factor_rows(
     *,
     source_run_id: str,
     params: dict[str, Any] | None = None,
+    market_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
-    snapshot = _by_symbol(asof_rows(rows, asof))
+    grouped = market_by_symbol if market_by_symbol is not None else _by_symbol(rows)
     out: list[dict[str, Any]] = []
     if strategy_id == ETF_MA_ROTATE:
         window = int((params or STRATEGY_SPECS[strategy_id]["params"])["window"])
         name = "etf_ma_gap"
-        for symbol, series in snapshot.items():
-            if infer_instrument_type(symbol) != "etf" or len(series) < window:
+        for symbol, series in grouped.items():
+            if infer_instrument_type(symbol) != "etf":
                 continue
-            closes = [adj_close(item) for item in series[-window:]]
+            hist = _series_asof(series, asof)
+            if len(hist) < window:
+                continue
+            closes = [adj_close(item) for item in hist[-window:]]
             sma = sum(closes) / window
             value = closes[-1] / sma - 1.0 if sma else 0.0
             out.append(_factor(asof, symbol, name, value, source_run_id))
-    elif strategy_id == STOCK_MOMENTUM_TOPK:
+    elif strategy_id in {STOCK_MOMENTUM_TOPK, ETF_MOMENTUM_TOPK}:
         lookback = int((params or STRATEGY_SPECS[strategy_id]["params"])["lookback"])
-        name = "stock_momentum"
-        for symbol, series in snapshot.items():
-            if infer_instrument_type(symbol) != "stock" or len(series) < lookback + 1:
+        name = "stock_momentum" if strategy_id == STOCK_MOMENTUM_TOPK else "etf_momentum"
+        want = STRATEGY_SPECS[strategy_id]["instrument_type"]
+        for symbol, series in grouped.items():
+            if infer_instrument_type(symbol) != want:
                 continue
-            start = adj_close(series[-(lookback + 1)])
-            end = adj_close(series[-1])
+            hist = _series_asof(series, asof)
+            if len(hist) < lookback + 1:
+                continue
+            start = adj_close(hist[-(lookback + 1)])
+            end = adj_close(hist[-1])
             value = end / start - 1.0 if start else 0.0
             out.append(_factor(asof, symbol, name, value, source_run_id))
     return out
@@ -162,6 +268,8 @@ def weights_for(strategy_id: str, rows: list[dict[str, Any]], asof: str, **kwarg
         return signal_etf_ma_rotate(rows, asof, **kwargs)
     if strategy_id == STOCK_MOMENTUM_TOPK:
         return signal_stock_momentum_topk(rows, asof, **kwargs)
+    if strategy_id == ETF_MOMENTUM_TOPK:
+        return signal_etf_momentum_topk(rows, asof, **kwargs)
     raise ValueError(f"unknown strategy: {strategy_id}")
 
 

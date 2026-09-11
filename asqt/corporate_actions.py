@@ -74,7 +74,11 @@ def action_explains_jump(prev: dict[str, Any], curr: dict[str, Any], action: dic
     if action.get("ex_date") != str(curr.get("trade_date") or "")[:10]:
         return False
     share_ratio = float(action.get("share_ratio") or 0)
-    if share_ratio <= 1.01:
+    cash = float(action.get("cash_per_share") or 0)
+    # Pure cash dividends have share_ratio ≈ 1; still allow them to silence small factor jumps.
+    if share_ratio <= 1.01 and cash <= 0:
+        return False
+    if share_ratio <= 0:
         return False
     prev_close = _num(prev.get("close"))
     curr_close = _num(curr.get("close"))
@@ -85,9 +89,21 @@ def action_explains_jump(prev: dict[str, Any], curr: dict[str, Any], action: dic
     if curr_close >= prev_close:
         return False
     factor_ratio = curr_factor / prev_factor
-    cash = float(action.get("cash_per_share") or 0)
+    expected_ratio = share_ratio if share_ratio > 1.01 else 1.0
+    # Cash-only: vendor factors often move slightly; require price to land near theoretical ex.
+    if share_ratio <= 1.01:
+        expected = theoretical_ex_price(prev_close, cash, 1.0)
+        if expected is None:
+            return False
+        band = limit_pct(str(curr.get("symbol"))) + PRICE_BAND_BUFFER
+        if abs(curr_close / expected - 1.0) > band:
+            return False
+        # Factor may stay flat or nudge; reject only wild jumps that look like splits.
+        if factor_ratio >= 1.2 or factor_ratio <= 1 / 1.2:
+            return False
+        return True
     factor_tol = FACTOR_TOLERANCE_WITH_CASH if cash > 0 else FACTOR_TOLERANCE
-    if abs(factor_ratio / share_ratio - 1.0) > factor_tol:
+    if abs(factor_ratio / expected_ratio - 1.0) > factor_tol:
         return False
     expected = theoretical_ex_price(prev_close, cash, share_ratio)
     if expected is None:

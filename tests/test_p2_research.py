@@ -13,10 +13,15 @@ from asqt.research_engine import LocalResearchEngine, LocalStrategyService, data
 from asqt.storage import write_market_daily
 from asqt.strategies import (
     ETF_MA_ROTATE,
+    ETF_MOMENTUM_TOPK,
     STOCK_MOMENTUM_TOPK,
     STRATEGY_SPECS,
     asof_rows,
+    market_by_symbol,
+    signal_etf_momentum_topk,
     signal_stock_momentum_topk,
+    suspended_keys,
+    weights_for,
 )
 
 
@@ -89,7 +94,7 @@ def _seed(settings: Settings, rows: list[dict], instruments: list[tuple[str, str
 
 
 def _trend_book() -> tuple[list[dict], list[tuple[str, str]]]:
-    days = _dates(40)
+    days = _dates(60)
     rows: list[dict] = []
     stocks = ["000001.SZ", "000002.SZ", "000063.SZ", "000100.SZ", "000333.SZ", "000338.SZ"]
     etfs = ["510300.SH", "510500.SH", "159915.SZ"]
@@ -123,6 +128,9 @@ def test_p2_both_strategies_backtest_isolated_and_reproducible(tmp_path):
         assert report["kind"] in {"rule", "topk"}
         assert report["metrics"]["is"]["n_days"] >= 1
         assert report["metrics"]["oos"]["n_days"] >= 1
+        is_ret = report["metrics"]["is"]["total_return"]
+        oos_ret = report["metrics"]["oos"]["total_return"]
+        assert abs((1.0 + is_ret) * (1.0 + oos_ret) - report["nav"]) < 1e-8
         assert report["in_sample_end"] < max(row["trade_date"] for row in rows)
         assert second[strategy_id]["metrics"] == report["metrics"]
         assert second[strategy_id]["data_version"] == report["data_version"]
@@ -139,6 +147,21 @@ def test_p2_both_strategies_backtest_isolated_and_reproducible(tmp_path):
     assert (settings.experiment_dir / f"latest-{ETF_MA_ROTATE}.json").exists()
 
 
+def test_p2_etf_momentum_topk_prefers_stronger_etf(tmp_path):
+    days = _dates(50)
+    rows = []
+    for index, day in enumerate(days):
+        rows.append(_bar("510300.SH", day, 4.0 + index * 0.01))
+        rows.append(_bar("510500.SH", day, 5.0 + index * 0.05))
+        rows.append(_bar("159915.SZ", day, 2.0 + index * 0.02))
+        rows.append(_bar("000001.SZ", day, 10.0 + index))  # stock must be ignored
+    weights = signal_etf_momentum_topk(rows, days[-1])
+    assert set(weights) <= {"510300.SH", "510500.SH", "159915.SZ"}
+    assert "000001.SZ" not in weights
+    assert len(weights) == 3
+    assert abs(sum(weights.values()) - 0.60) < 1e-9
+
+
 def test_p2_signal_cannot_see_future_close(tmp_path):
     days = _dates(25)
     rows = []
@@ -153,7 +176,31 @@ def test_p2_signal_cannot_see_future_close(tmp_path):
     leaked = signal_stock_momentum_topk(rows, days[-1], params=tight)
     assert list(weights) == ["000001.SZ"]
     assert list(leaked) == ["000002.SZ"]
-    assert max(str(row["trade_date"]) for row in asof_rows(rows, asof)) == asof
+
+
+def test_p2_indexed_weights_match_full_scan(tmp_path):
+    days = _dates(30)
+    rows = []
+    for index, day in enumerate(days):
+        rows.append(_bar("510300.SH", day, 4.0 + index * 0.01))
+        rows.append(_bar("510500.SH", day, 5.0 + (0.02 if index > 10 else 0.0)))
+        rows.append(_bar("000001.SZ", day, 10.0 + index * 0.03))
+        rows.append(_bar("000002.SZ", day, 8.0 + (0.2 if index % 3 == 0 else 0.0)))
+    limits = [{"symbol": "000002.SZ", "trade_date": days[20], "is_suspended": 1}]
+    grouped = market_by_symbol(rows)
+    halted = suspended_keys(limits)
+    asof = days[22]
+    for strategy_id in (ETF_MA_ROTATE, STOCK_MOMENTUM_TOPK, ETF_MOMENTUM_TOPK):
+        naive = weights_for(strategy_id, rows, asof, limits=limits)
+        indexed = weights_for(
+            strategy_id,
+            rows,
+            asof,
+            limits=limits,
+            market_by_symbol=grouped,
+            suspended=halted,
+        )
+        assert indexed == naive
 
 
 def test_p2_draft_cannot_emit_targets(tmp_path):
@@ -221,6 +268,11 @@ def test_p2_backtest_attribution_and_quality_block(tmp_path):
     assert attr["paper_vs_backtest"]["available"] is False
     assert attr["paper_vs_backtest"]["reason"] == "no_paper_fills"
     assert abs(attr["nav"] - report["nav"]) < 1e-8
+    assert attr["is_days"] >= 1
+    assert attr["oos_days"] >= 1
+    assert attr["sample"]["n_sessions"] >= 4
+    assert attr["params"]
+    assert attr["top_oos"] is not None
     assert abs(attr["is_contribution"] + attr["oos_contribution"] - attr["additive_return"]) < 1e-12
     assert attr["by_symbol"]
     assert attr["by_symbol"][0]["contribution"] >= attr["by_symbol"][-1]["contribution"]
@@ -241,7 +293,7 @@ def test_p2_backtest_attribution_and_quality_block(tmp_path):
 
     daily = LocalReviewService(settings).build_daily_review()
     assert daily["paper_vs_backtest"]["available"] is False
-    assert len(daily["items"]) == 2
+    assert len(daily["items"]) == len(STRATEGY_SPECS)
 
 
 def test_p2_attribution_api(tmp_path, monkeypatch):

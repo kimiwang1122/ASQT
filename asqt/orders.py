@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from asqt.config import Settings, get_settings
 from asqt.db import execute, query_all
+from asqt.ops import quality_gate
 from asqt.storage import read_market_snapshot
 
 
@@ -17,15 +18,7 @@ class MockOrderService:
         self.settings = settings or get_settings()
 
     def quality_gate(self) -> dict:
-        blocks = query_all(
-            "SELECT COUNT(*) AS c FROM quality_issue WHERE status = 'open' AND severity = 'block'",
-            settings=self.settings,
-        )[0]["c"]
-        return {
-            "trade_allowed": int(blocks) == 0,
-            "block_count": int(blocks),
-            "source": "quality_issue",
-        }
+        return quality_gate(self.settings)
 
     def list_orders(self, limit: int = 20) -> list[dict]:
         return query_all(

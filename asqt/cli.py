@@ -11,7 +11,7 @@ from asqt.db import initialize_database, query_all
 from asqt.pipeline import check_market_daily, pull_daily, pull_daily_append, reconcile_daily
 from asqt.sync import run_sync_job
 from asqt.ports import port_entries
-from asqt.research_engine import LocalResearchEngine, run_p2_acceptance_suite
+from asqt.research_engine import LocalResearchEngine, LocalStrategyService, run_p2_acceptance_suite
 from asqt.strategies import STRATEGY_SPECS
 from asqt.universe import apply_universe, poc_symbols
 
@@ -73,9 +73,19 @@ def cmd_pull_daily(symbols: list[str], start: str, end: str, source: str) -> Non
     print(json.dumps(_jsonable(result), ensure_ascii=False, indent=2))
 
 
-def cmd_sync_daily(*, source: str, skip_reconcile: bool, overlap_days: int, lookback_days: int) -> None:
+def cmd_sync_daily(
+    *,
+    source: str,
+    skip_reconcile: bool,
+    overlap_days: int,
+    lookback_days: int,
+    trigger: str = "manual",
+) -> None:
     settings = get_settings()
-    sync = run_sync_job(trigger="manual", source=source, settings=settings, overlap_days=overlap_days)
+    kind = (trigger or "manual").strip().lower()
+    if kind not in {"manual", "cron", "scheduler"}:
+        kind = "manual"
+    sync = run_sync_job(trigger=kind, source=source, settings=settings, overlap_days=overlap_days)
     reconcile = None
     if not skip_reconcile and sync.get("status") in {"success", "skipped"}:
         symbols = poc_symbols(settings)
@@ -103,6 +113,47 @@ def cmd_research_backtest(strategy: str) -> None:
         spec = STRATEGY_SPECS[strategy]
         result = LocalResearchEngine(settings).run_backtest(strategy, spec["parameter_set_id"], "auto")
     print(json.dumps(_jsonable(result), ensure_ascii=False, indent=2))
+
+
+def cmd_paper_admit(strategy: str, reason: str) -> None:
+    service = LocalStrategyService(get_settings())
+    ids = list(STRATEGY_SPECS) if strategy == "all" else [strategy]
+    result = [service.admit_to_paper(item, reason) for item in ids]
+    print(json.dumps(_jsonable(result), ensure_ascii=False, indent=2))
+
+
+def cmd_paper_run(strategy: str, days: int) -> None:
+    from asqt.paper import run_paper_days
+
+    result = run_paper_days(strategy_id=strategy, days=days, settings=get_settings())
+    print(json.dumps(_jsonable(result), ensure_ascii=False, indent=2))
+
+
+def cmd_paper_daily() -> None:
+    from asqt.paper import advance_paper_session
+
+    result = advance_paper_session(trigger="cli", settings=get_settings())
+    print(json.dumps(_jsonable(result), ensure_ascii=False, indent=2))
+
+
+def cmd_paper_reset(strategy: str) -> None:
+    from asqt.paper import reset_paper_account
+
+    result = reset_paper_account(strategy_id=strategy, settings=get_settings())
+    print(json.dumps(_jsonable(result), ensure_ascii=False, indent=2))
+
+
+def cmd_alert_demo(*, live: bool) -> None:
+    from asqt.alert_demo import run_alert_demo
+
+    result = run_alert_demo(live=live)
+    print(json.dumps(_jsonable(result), ensure_ascii=False, indent=2))
+
+
+def cmd_kill_switch(engaged: bool, reason: str) -> None:
+    from asqt.ops import set_kill_switch
+
+    print(json.dumps(set_kill_switch(engaged, reason), ensure_ascii=False, indent=2))
 
 
 def _jsonable(value):
@@ -147,11 +198,36 @@ def main() -> None:
     sync.add_argument("--overlap-days", type=int, default=1)
     sync.add_argument("--lookback-days", type=int, default=14, help="reconcile window")
     sync.add_argument("--skip-reconcile", action="store_true")
+    sync.add_argument(
+        "--trigger",
+        default="manual",
+        choices=("manual", "cron", "scheduler"),
+        help="cron 兜底请用 cron，便于和进程内 auto 区分",
+    )
     research = subparsers.add_parser("research-backtest")
     research.add_argument(
         "--strategy",
         default="all",
         choices=("all", *STRATEGY_SPECS.keys()),
+    )
+    admit = subparsers.add_parser("paper-admit")
+    admit.add_argument("--strategy", default="all", choices=("all", *STRATEGY_SPECS.keys()))
+    admit.add_argument("--reason", default="admit to paper")
+    paper = subparsers.add_parser("paper-run")
+    paper.add_argument("--strategy", default="all", choices=("all", *STRATEGY_SPECS.keys()))
+    paper.add_argument("--days", type=int, default=20)
+    daily = subparsers.add_parser("paper-daily")
+    reset = subparsers.add_parser("paper-reset")
+    reset.add_argument("--strategy", default="all", choices=("all", *STRATEGY_SPECS.keys()))
+    kill = subparsers.add_parser("kill-switch")
+    kill.add_argument("--on", action="store_true")
+    kill.add_argument("--off", action="store_true")
+    kill.add_argument("--reason", required=True)
+    demo = subparsers.add_parser("alert-demo")
+    demo.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="只走隔离库与本地 jsonl，不推飞书",
     )
     args = parser.parse_args()
 
@@ -190,6 +266,7 @@ def main() -> None:
             skip_reconcile=args.skip_reconcile,
             overlap_days=args.overlap_days,
             lookback_days=args.lookback_days,
+            trigger=args.trigger,
         )
     elif args.command == "check-quality":
         cmd_check_quality()
@@ -207,6 +284,20 @@ def main() -> None:
         cmd_reconcile(symbols, start, end, args.peer)
     elif args.command == "research-backtest":
         cmd_research_backtest(args.strategy)
+    elif args.command == "paper-admit":
+        cmd_paper_admit(args.strategy, args.reason)
+    elif args.command == "paper-run":
+        cmd_paper_run(args.strategy, args.days)
+    elif args.command == "paper-daily":
+        cmd_paper_daily()
+    elif args.command == "paper-reset":
+        cmd_paper_reset(args.strategy)
+    elif args.command == "kill-switch":
+        if args.on == args.off:
+            parser.error("provide exactly one of --on or --off")
+        cmd_kill_switch(bool(args.on), args.reason)
+    elif args.command == "alert-demo":
+        cmd_alert_demo(live=not args.dry_run)
 
 
 if __name__ == "__main__":

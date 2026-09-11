@@ -224,7 +224,8 @@ def test_api_does_not_import_baostock_and_marks_p1_ports_wired(tmp_path, monkeyp
     by_name = {item["name"]: item for item in ports}
     assert by_name["QualityChecker"]["status"] == "wired"
     assert by_name["DataSourceAdapter"]["status"] == "wired"
-    assert by_name["ExecutionAdapter"]["status"] == "not_wired"
+    assert by_name["ExecutionAdapter"]["status"] == "wired"
+    assert by_name["AlertService"]["status"] == "wired"
     assert "baostock" not in sys.modules
     assert "akshare" not in sys.modules
 

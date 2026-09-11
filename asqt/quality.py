@@ -325,7 +325,17 @@ def format_issue_diff(diff: str | None, *, check_type: str | None = None) -> str
     if text.startswith("bar_after_delist_date="):
         return f"退市后仍有行情（退市日 {text.split('=', 1)[-1]}）。"
     if check_type == "cross_source":
-        return f"主源与对照源不一致：{text}"
+        if "adj_factor" in text.lower() and "close" not in text.lower():
+            return (
+                f"主源与对照源复权因子水平不同（多为基准差异，警告不拦交易）：{text}"
+            )
+        return (
+            f"主源与对照源行情不一致（警告级，不单独阻断交易）：{text}"
+        )
+    if check_type == "adj_conflict":
+        return (
+            f"复权因子跳变且无已核实公司行为解释（可在 docs/p0/corporate_actions.csv 补 verified=1）：{text}"
+        )
     return text
 
 

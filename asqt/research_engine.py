@@ -15,12 +15,12 @@ from asqt.pipeline import check_market_daily
 from asqt.storage import read_market_daily
 from asqt.strategies import (
     CODE_VERSION,
-    ETF_MA_ROTATE,
-    STOCK_MOMENTUM_TOPK,
     STRATEGY_SPECS,
     adj_close,
     asof_rows,
     factor_rows,
+    market_by_symbol,
+    suspended_keys,
     weights_for,
 )
 
@@ -35,6 +35,10 @@ ALLOWED_TRANSITIONS = {
 
 ORDERABLE = {"paper"}
 RESEARCH_STATUSES = {"draft", "backtest", "candidate", "failed"}
+HOLD_RESEARCH = {"paper", "paused"}
+BLOCK_RESEARCH = {"retired", "archived"}
+FROZEN_FOR_RESEARCH = HOLD_RESEARCH | BLOCK_RESEARCH
+RISK_CONFIG = "docs/p0/risk_defaults.md"
 
 
 def data_version_for(rows: list[dict[str, Any]]) -> str:
@@ -46,10 +50,19 @@ def data_version_for(rows: list[dict[str, Any]]) -> str:
     return digest.hexdigest()[:16]
 
 
-def _nav_metrics(points: list[dict[str, Any]]) -> dict[str, Any]:
+def _nav_metrics(points: list[dict[str, Any]], *, start_nav: float = 1.0) -> dict[str, Any]:
+    """Segment metrics relative to ``start_nav`` (not the first point's nav).
+
+    Backtest points store cumulative NAV from the full-run start. IS therefore
+    uses ``start_nav=1``; OOS uses the last in-sample NAV so
+    ``(1+is)*(1+oos) == final_nav``.
+    """
     if not points:
         return {"n_days": 0, "total_return": 0.0, "max_drawdown": 0.0}
-    navs = [float(item["nav"]) for item in points]
+    baseline = float(start_nav)
+    if baseline <= 0:
+        baseline = 1.0
+    navs = [baseline] + [float(item["nav"]) for item in points]
     peak = navs[0]
     max_dd = 0.0
     for value in navs:
@@ -57,8 +70,8 @@ def _nav_metrics(points: list[dict[str, Any]]) -> dict[str, Any]:
         if peak:
             max_dd = min(max_dd, value / peak - 1.0)
     return {
-        "n_days": len(navs),
-        "total_return": round(navs[-1] / navs[0] - 1.0, 10) if navs[0] else 0.0,
+        "n_days": len(points),
+        "total_return": round(navs[-1] / baseline - 1.0, 10),
         "max_drawdown": round(max_dd, 10),
     }
 
@@ -134,6 +147,69 @@ class LocalStrategyService:
             )
         return records
 
+    def current_version(self, strategy_id: str) -> dict[str, Any] | None:
+        versions = self.list_versions(strategy_id)
+        return versions[-1] if versions else None
+
+    def admit_to_paper(self, strategy_id: str, reason: str, *, actor: str = "operator") -> dict[str, Any]:
+        return self._lifecycle(strategy_id, "paper", reason, actor=actor, require_experiment=True)
+
+    def pause(self, strategy_id: str, reason: str, *, actor: str = "operator") -> dict[str, Any]:
+        return self._lifecycle(strategy_id, "paused", reason, actor=actor)
+
+    def resume(self, strategy_id: str, reason: str, *, actor: str = "operator") -> dict[str, Any]:
+        return self._lifecycle(strategy_id, "paper", reason, actor=actor, require_experiment=True)
+
+    def retire(self, strategy_id: str, reason: str, *, actor: str = "operator") -> dict[str, Any]:
+        return self._lifecycle(strategy_id, "retired", reason, actor=actor)
+
+    def _lifecycle(
+        self,
+        strategy_id: str,
+        new_status: str,
+        reason: str,
+        *,
+        actor: str,
+        require_experiment: bool = False,
+    ) -> dict[str, Any]:
+        from asqt.ops import kill_engaged, quality_gate
+
+        if not (reason or "").strip():
+            raise ValueError("lifecycle change requires a reason")
+        current = self.current_version(strategy_id)
+        if not current:
+            raise PermissionError(f"{strategy_id} has no version")
+        if new_status == "paper":
+            gate = quality_gate(self.settings)
+            if not gate["trade_allowed"]:
+                raise PermissionError("quality_block")
+            if kill_engaged(self.settings):
+                raise PermissionError("kill_switch")
+            if require_experiment:
+                path = self.settings.experiment_dir / f"latest-{strategy_id}.json"
+                if not path.exists():
+                    raise PermissionError("missing_experiment")
+                import json
+
+                report = json.loads(path.read_text(encoding="utf-8"))
+                if not report.get("ok"):
+                    raise PermissionError("experiment_not_ok")
+                if not report.get("parameter_set_id") or not report.get("data_version"):
+                    raise PermissionError("missing_version_pins")
+            execute(
+                """
+                UPDATE strategy_version
+                SET risk_config = ?, effective_date = COALESCE(effective_date, ?)
+                WHERE strategy_id = ? AND version = ?
+                """,
+                (RISK_CONFIG, datetime.now(timezone.utc).date().isoformat(), strategy_id, current["version"]),
+                settings=self.settings,
+            )
+        LocalResearchEngine(self.settings)._transition(strategy_id, new_status, actor, reason)
+        updated = self.current_version(strategy_id)
+        assert updated is not None
+        return updated
+
     def _require_orderable(self, strategy_id: str) -> dict[str, Any]:
         versions = self.list_versions(strategy_id)
         if not versions:
@@ -178,15 +254,47 @@ class LocalResearchEngine:
 
         quality = check_market_daily(settings=self.settings)
         run_id = str(uuid4())
-        self._ensure_version(strategy_id, spec["parameter_set_id"], "draft")
-        self._transition(strategy_id, "backtest", run_id, "start backtest")
+        held = self._held_lifecycle(strategy_id)
+        if held in BLOCK_RESEARCH:
+            raise ValueError(f"{strategy_id} 已{held}，不能重跑回测")
+        if held:
+            self._audit(strategy_id, "research_rerun", held, held, f"keep lifecycle {run_id}")
+            execute(
+                """
+                UPDATE strategy_version
+                SET code_version = ?
+                WHERE strategy_id = ? AND version = 'v1'
+                """,
+                (CODE_VERSION, strategy_id),
+                settings=self.settings,
+            )
+        else:
+            self._ensure_version(strategy_id, spec["parameter_set_id"], "draft")
+            self._transition(strategy_id, "backtest", run_id, "start backtest")
 
         if not quality.get("trade_allowed", False):
+            if held:
+                report = {
+                    "ok": False,
+                    "run_id": run_id,
+                    "strategy_id": strategy_id,
+                    "parameter_set_id": spec["parameter_set_id"],
+                    "code_version": CODE_VERSION,
+                    "data_version": data_version,
+                    "status": held,
+                    "reason": "quality_block",
+                    "quality": {"trade_allowed": False, "issue_count": quality.get("issue_count", 0)},
+                }
+                path = self._write_report(report)
+                report["experiment_path"] = str(path)
+                return report
             report = self._fail(strategy_id, run_id, data_version, "quality_block", quality)
             return report
 
         in_sample_end = self._in_sample_end(rows)
         limits = query_all("SELECT * FROM limit_suspension", settings=self.settings)
+        grouped = market_by_symbol(rows)
+        halted = suspended_keys(limits)
         nav = 1.0
         is_points: list[dict[str, Any]] = []
         oos_points: list[dict[str, Any]] = []
@@ -196,9 +304,24 @@ class LocalResearchEngine:
         by_date_symbol = {(str(row["trade_date"]), str(row["symbol"])): row for row in rows}
         for index, signal_date in enumerate(dates[:-1]):
             fill_date = dates[index + 1]
-            weights = weights_for(strategy_id, rows, signal_date, limits=limits)
+            weights = weights_for(
+                strategy_id,
+                rows,
+                signal_date,
+                limits=limits,
+                market_by_symbol=grouped,
+                suspended=halted,
+            )
             last_weights = weights
-            factor_payload.extend(factor_rows(strategy_id, rows, signal_date, source_run_id=run_id))
+            factor_payload.extend(
+                factor_rows(
+                    strategy_id,
+                    rows,
+                    signal_date,
+                    source_run_id=run_id,
+                    market_by_symbol=grouped,
+                )
+            )
             period_return = 0.0
             for symbol, weight in weights.items():
                 left = by_date_symbol.get((signal_date, symbol))
@@ -221,15 +344,24 @@ class LocalResearchEngine:
         if progress:
             progress(steps, steps, f"{strategy_id} persist")
         self._write_factors(factor_payload)
-        status = "candidate" if oos_points else "failed"
-        reason = "oos isolated" if oos_points else "missing_oos_window"
-        if status == "failed":
-            self._transition(strategy_id, "failed", run_id, reason)
-        else:
+        research_ok = bool(oos_points)
+        if held:
+            status = held
+            reason = "oos isolated" if research_ok else "missing_oos_window"
+        elif research_ok:
+            status = "candidate"
+            reason = "oos isolated"
             self._transition(strategy_id, "candidate", run_id, reason)
+        else:
+            status = "failed"
+            reason = "missing_oos_window"
+            self._transition(strategy_id, "failed", run_id, reason)
 
+        is_metrics = _nav_metrics(is_points, start_nav=1.0)
+        oos_start = float(is_points[-1]["nav"]) if is_points else 1.0
+        oos_metrics = _nav_metrics(oos_points, start_nav=oos_start)
         report = {
-            "ok": status == "candidate",
+            "ok": research_ok,
             "run_id": run_id,
             "strategy_id": strategy_id,
             "kind": spec["kind"],
@@ -240,7 +372,7 @@ class LocalResearchEngine:
             "t_plus_one": True,
             "in_sample_end": in_sample_end,
             "nav": round(nav, 10),
-            "metrics": {"is": _nav_metrics(is_points), "oos": _nav_metrics(oos_points)},
+            "metrics": {"is": is_metrics, "oos": oos_metrics},
             "last_weights": last_weights,
             "quality": {"trade_allowed": True, "issue_count": quality.get("issue_count", 0)},
             "factor_rows": len(factor_payload),
@@ -269,10 +401,19 @@ class LocalResearchEngine:
                 (strategy_id, version, status, parameter_set_id, code_version, risk_config, effective_date)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (strategy_id, "v1", status, parameter_set_id, CODE_VERSION, "docs/p0/risk_defaults.md", None),
+            (strategy_id, "v1", status, parameter_set_id, CODE_VERSION, RISK_CONFIG, None),
             settings=self.settings,
         )
         self._audit(strategy_id, "create", None, status, "register p2 strategy")
+
+    def _held_lifecycle(self, strategy_id: str) -> str | None:
+        current = self.strategies.current_version(strategy_id)
+        if not current:
+            return None
+        status = current["status"]
+        if status in FROZEN_FOR_RESEARCH:
+            return status
+        return None
 
     def _transition(self, strategy_id: str, new_status: str, run_id: str, reason: str) -> None:
         current = query_all(
@@ -283,6 +424,8 @@ class LocalResearchEngine:
         before = current[0]["status"] if current else None
         if before == new_status:
             return
+        if before in FROZEN_FOR_RESEARCH and new_status in RESEARCH_STATUSES | {"backtest"}:
+            raise ValueError(f"{strategy_id} 已是{before}，不能改回测状态")
         allowed = ALLOWED_TRANSITIONS.get(before or "", set())
         if before and new_status not in allowed:
             if before == "candidate" and new_status == "backtest":
@@ -303,7 +446,7 @@ class LocalResearchEngine:
                 self._audit(strategy_id, "rerun", "failed", "draft", run_id)
                 before = "draft"
             else:
-                raise ValueError(f"illegal transition {before} -> {new_status}")
+                raise ValueError(f"{strategy_id} 不允许从 {before} 进入 {new_status}")
         execute(
             "UPDATE strategy_version SET status = ? WHERE strategy_id = ? AND version = ?",
             (new_status, strategy_id, "v1"),
@@ -383,7 +526,7 @@ class LocalResearchEngine:
 def run_p2_acceptance_suite(settings: Settings | None = None) -> dict[str, Any]:
     engine = LocalResearchEngine(settings)
     reports = []
-    for strategy_id in (ETF_MA_ROTATE, STOCK_MOMENTUM_TOPK):
+    for strategy_id in STRATEGY_SPECS:
         reports.append(
             engine.run_backtest(
                 strategy_id,

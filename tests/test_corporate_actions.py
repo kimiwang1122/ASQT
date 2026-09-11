@@ -59,6 +59,20 @@ def test_event_does_not_explain_inconsistent_bars():
     assert any(item["check_type"] == "adj_conflict" and item["severity"] == "block" for item in blocked["issues"])
 
 
+def test_cash_dividend_event_can_explain_small_factor_nudge():
+    action = {
+        "symbol": "600000.SH",
+        "ex_date": "2024-06-18",
+        "share_ratio": 1.0,
+        "cash_per_share": 0.5,
+    }
+    prev = _daily("600000.SH", "2024-06-17", 10.0, 1.0)
+    curr = _daily("600000.SH", "2024-06-18", 9.5, 1.01)
+    assert action_explains_jump(prev, curr, action) is True
+    wild = _daily("600000.SH", "2024-06-18", 9.5, 2.5)
+    assert action_explains_jump(prev, wild, action) is False
+
+
 def test_ratio_only_without_event_still_blocks():
     result = ContractQualityChecker().check(
         "market_daily",

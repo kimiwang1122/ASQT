@@ -1,0 +1,5 @@
+# Weekdays 20:05 — fallback after in-process 16:30 / 18:00.
+# crontab does not expand shell variables; keep absolute paths.
+# Machine TZ should be Asia/Shanghai (or wrap the command with TZ=Asia/Shanghai).
+
+5 20 * * 1-5 /Users/kimi/Documents/ChatGPT/ASQT/scripts/asqt-cron-fallback.sh >> /Users/kimi/Documents/ChatGPT/ASQT/data/logs/cron-fallback.log 2>&1

@@ -16,12 +16,15 @@ from asqt.pipeline import check_market_daily, pull_daily_append
 from asqt.session import session_asof_date
 from asqt.storage import market_daily_span
 from asqt.universe import poc_symbols
+from typing import Any
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 AUTO_HOUR = 16
 AUTO_MINUTE = 30
-DEADLINE_HOUR = 17
-DEADLINE_MINUTE = 30
+DEADLINE_HOUR = 18
+DEADLINE_MINUTE = 0
+CRON_HOUR = 20
+CRON_MINUTE = 5
 STALE_RUNNING_MINUTES = 120
 SYNC_LOCK_ID = "market_daily_sync"
 
@@ -138,10 +141,57 @@ def scheduler_snapshot(settings: Settings | None = None) -> dict:
         "timezone": "Asia/Shanghai",
         "window": f"{AUTO_HOUR:02d}:{AUTO_MINUTE:02d}",
         "deadline": f"{DEADLINE_HOUR:02d}:{DEADLINE_MINUTE:02d}",
+        "cron": f"{CRON_HOUR:02d}:{CRON_MINUTE:02d}",
         "due": _auto_window_open(now) and not done,
         "waiting_for_bars": _auto_window_open(now) and not _deadline_reached(now) and not done,
         "next_at": _next_auto_at(now, done=done).isoformat(),
         "last_auto": last_auto[0] if last_auto else None,
+        "morning_manual_note": (
+            "上午手工「追加行情」若只拉到昨日 K，不会取消当天 16:30 进程内自动；"
+            "只有盖住当日收盘日 K，或 16:30 之后真正跑完的成功/跳过，才算今日自动已完成。"
+        ),
+        "hot_reload_note": (
+            "uvicorn --reload 会打断后台同步/回测/模拟线程；进程重启时未完成任务会被收尸为失败。"
+        ),
+        "lock_note": (
+            f"同步与模拟各有一把 SQLite 租约锁；占用中重复提交返回 409；租约约 {STALE_RUNNING_MINUTES} 分钟过期可接管。"
+        ),
+        "cron_installed": _cron_installed_hint(),
+    }
+
+
+def _cron_installed_hint() -> dict[str, Any]:
+    """Best-effort: whether the example fallback line appears in the user crontab."""
+    import shutil
+    import subprocess
+
+    if not shutil.which("crontab"):
+        return {"checked": False, "installed": None, "detail": "本机无 crontab 命令"}
+    try:
+        result = subprocess.run(
+            ["crontab", "-l"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"checked": False, "installed": None, "detail": str(exc)}
+    if result.returncode != 0:
+        text = (result.stderr or result.stdout or "").strip()
+        if "no crontab" in text.lower():
+            return {
+                "checked": True,
+                "installed": False,
+                "detail": "当前用户没有 crontab；可参考 scripts/crontab.example",
+            }
+        return {"checked": False, "installed": None, "detail": text or "crontab -l 失败"}
+    body = result.stdout or ""
+    hit = "asqt-cron-fallback.sh" in body or "sync-daily --trigger cron" in body
+    return {
+        "checked": True,
+        "installed": hit,
+        "detail": "已找到 cron 兜底行" if hit else "未找到 asqt-cron-fallback；见 scripts/crontab.example",
     }
 
 
@@ -532,6 +582,17 @@ def _execute_sync(
             settings=settings,
         )
         _write_task_run(row, settings)
+        if status in {"success", "skipped"}:
+            from asqt.paper import after_market_ready
+
+            paper_follow = after_market_ready(
+                asof=after_max or row.get("max_trade_date_after"),
+                trigger=str(row.get("trigger") or "manual"),
+                settings=settings,
+            )
+            if paper_follow:
+                row = dict(row)
+                row["paper_daily"] = paper_follow
         return row
     except Exception as exc:
         if _abandoned(run_id, settings):
@@ -685,12 +746,32 @@ def _auto_symbols(settings: Settings | None = None) -> list[str]:
     return symbols or poc_symbols(settings)
 
 
+def _shanghai_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    text = str(value).replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(SHANGHAI)
+
+
 def _auto_qc_done_today(now: datetime, *, settings: Settings | None = None) -> bool:
+    """Stop in-process auto only after today's session asof is covered, or an evening job finished.
+
+    A morning manual pull that only has yesterday's K must not cancel the 16:30 window.
+    """
     today = now.date().isoformat()
+    asof = session_asof_date(now)
+    window_minutes = AUTO_HOUR * 60 + AUTO_MINUTE
     rows = query_all(
         """
-        SELECT status, finished_at, created_at FROM data_sync_run
-        WHERE trigger = 'auto'
+        SELECT status, finished_at, created_at, started_at, max_trade_date_after
+        FROM data_sync_run
+        WHERE status IN ('success', 'skipped')
         """,
         settings=settings,
     )
@@ -698,6 +779,15 @@ def _auto_qc_done_today(now: datetime, *, settings: Settings | None = None) -> b
         day = _shanghai_day(row.get("finished_at") or row.get("created_at"))
         if day != today:
             continue
-        if row.get("status") in {"success", "skipped"}:
+        max_d = str(row.get("max_trade_date_after") or "")[:10]
+        if max_d and max_d >= asof:
+            return True
+        started = _shanghai_dt(row.get("started_at") or row.get("created_at") or row.get("finished_at"))
+        if (
+            _deadline_reached(now)
+            and started
+            and started.date().isoformat() == today
+            and _clock_minutes(started) >= window_minutes
+        ):
             return True
     return False

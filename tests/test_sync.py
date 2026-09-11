@@ -284,6 +284,11 @@ def test_auto_waits_for_vendor_bars_before_deadline(tmp_path):
     }
     waiting = FakeAdapter([_bar("000001.SZ", "2026-09-07")])
     assert should_auto_run(adapter=waiting, **kwargs) is False
+    late_wait = {
+        **kwargs,
+        "now": datetime(2026, 9, 8, 17, 45, tzinfo=SHANGHAI),
+    }
+    assert should_auto_run(adapter=waiting, **late_wait) is False
     ready = FakeAdapter([_bar("000001.SZ", "2026-09-08")])
     assert should_auto_run(adapter=ready, **kwargs) is True
 
@@ -295,7 +300,7 @@ def test_auto_after_deadline_matches_legacy_retry(tmp_path):
 
     settings = make_settings(tmp_path)
     initialize_database(settings)
-    deadline = datetime(2026, 9, 8, 17, 30, tzinfo=SHANGHAI)
+    deadline = datetime(2026, 9, 8, 18, 0, tzinfo=SHANGHAI)
     empty = FakeAdapter([])
     assert should_auto_run(
         settings=settings,
@@ -314,7 +319,7 @@ def test_auto_after_deadline_matches_legacy_retry(tmp_path):
         """,
         settings=settings,
     )
-    later = datetime(2026, 9, 8, 17, 35, tzinfo=SHANGHAI)
+    later = datetime(2026, 9, 8, 18, 5, tzinfo=SHANGHAI)
     assert should_auto_run(
         settings=settings,
         now=later,
@@ -340,3 +345,66 @@ def test_auto_after_deadline_matches_legacy_retry(tmp_path):
         asof="2026-09-08",
         enabled=True,
     ) is False
+
+
+def test_manual_or_cron_success_stops_in_process_auto(tmp_path):
+    from datetime import datetime
+
+    from asqt.session import SHANGHAI
+
+    settings = make_settings(tmp_path)
+    initialize_database(settings)
+    execute(
+        """
+        INSERT INTO data_sync_run
+            (run_id, trigger, status, source, finished_at, created_at, started_at, max_trade_date_after)
+        VALUES ('cron-ok-1', 'cron', 'success', 'baostock',
+                '2026-09-08T10:05:00+00:00', '2026-09-08T10:05:00+00:00',
+                '2026-09-08T10:05:00+00:00', '2026-09-08')
+        """,
+        settings=settings,
+    )
+    assert should_auto_run(
+        settings=settings,
+        now=datetime(2026, 9, 8, 18, 5, tzinfo=SHANGHAI),
+        adapter=FakeAdapter([]),
+        symbols=["000001.SZ"],
+        asof="2026-09-08",
+        enabled=True,
+    ) is False
+
+
+def test_morning_manual_does_not_skip_evening_auto(tmp_path):
+    from datetime import datetime
+
+    from asqt.session import SHANGHAI
+
+    settings = make_settings(tmp_path)
+    initialize_database(settings)
+    execute(
+        """
+        INSERT INTO data_sync_run
+            (run_id, trigger, status, source, finished_at, created_at, started_at, max_trade_date_after)
+        VALUES ('manual-am', 'manual', 'success', 'baostock',
+                '2026-09-10T01:15:20+00:00', '2026-09-10T01:15:06+00:00',
+                '2026-09-10T01:15:06+00:00', '2026-09-09')
+        """,
+        settings=settings,
+    )
+    ready = FakeAdapter([_bar("000001.SZ", "2026-09-10")])
+    kwargs = {
+        "settings": settings,
+        "symbols": ["000001.SZ"],
+        "asof": "2026-09-10",
+        "enabled": True,
+        "adapter": ready,
+    }
+    assert should_auto_run(now=datetime(2026, 9, 10, 16, 45, tzinfo=SHANGHAI), **kwargs) is True
+    assert should_auto_run(
+        now=datetime(2026, 9, 10, 18, 5, tzinfo=SHANGHAI),
+        adapter=FakeAdapter([]),
+        settings=settings,
+        symbols=["000001.SZ"],
+        asof="2026-09-10",
+        enabled=True,
+    ) is True

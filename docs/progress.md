@@ -1,11 +1,12 @@
 # ASQT 实施与验收进度
 
 状态：**现行跟踪件**（代码完成度以本文件为准）  
-修订：2026-09-08  
+修订：2026-09-11  
 阶段定义： [p0/priority.md](p0/priority.md)  
 冻结口径： [p0/README.md](p0/README.md)  
 未决问题： [p0/open_questions.md](p0/open_questions.md)  
-细节台账： [console_fixes.md](console_fixes.md)
+细节台账： [console_fixes.md](console_fixes.md)  
+词汇表： [glossary.md](glossary.md)
 
 改阶段结论时先改本文件（状态、未完成理由、验收证据），再改代码或其它文档。
 
@@ -25,11 +26,11 @@
 | Pre-P0 | 工程基座 | 完成 | FastAPI / SQLite / Parquet / 契约表 / ports / 控制台壳 |
 | P0 | 方案冻结（不写业务代码） | 完成 | 2026-09-03 确认；Q3 于 2026-09-07 关闭 |
 | P1 | 数据中心 + 质量闸门 | 完成 | 日 K、标准化、质检、对账、mock 拒单已验收；模拟撮合属 P3 |
-| P2 | 研究回测 + 策略版本 | 部分完成 | 两策略引擎、策略页、回测归因已验收；模拟 vs 回测偏差等 P3 成交 |
-| P3 | 模拟交易 + 运营 | 未开始 | 订单/账本/急停/调度仅表壳 |
-| P4 | 实接券商通道 | 暂缓 | 等 Q2（QMT/模拟盘权限） |
+| P2 | 研究回测 + 策略版本 | 完成 | 两策略引擎、策略页、回测归因已验收；模拟偏差随 P3 成交 |
+| P3 | 模拟交易 + 运营 | 完成 | PaperBroker、账本、20 日模拟、急停、本地+文件告警、生命周期准入 |
+| P4 | 实接券商通道 | 暂缓 | Q2 未具备；预留 `QmtExecutionAdapter` 恒为不可用，见 [p4/README.md](p4/README.md) |
 
-当前可对外说的进度：**P1 完成（数据可进研究），P2 回测与控制台归因可复现，P3 尚未开做。**
+当前可对外说的进度：**P1 完成，P2 回测可复现，P3 本地模拟盘可连续运行（未接券商）。**
 
 ---
 
@@ -48,7 +49,7 @@
 | ID | 项 | 状态 | 验收 | 未完成理由 |
 |---|---|---|---|---|
 | F1 | 范围、契约、订单状态机、风控默认、适配器边界 | 完成 | [p0/README.md](p0/README.md) 全表已确认 | — |
-| F2 | 未决问题登记 | 完成 | [p0/open_questions.md](p0/open_questions.md) | Q1/Q2/Q4 仍暂缓，不挡实施 |
+| F2 | 未决问题登记 | 完成 | [p0/open_questions.md](p0/open_questions.md) | Q1/Q2 仍暂缓；Q4 已关闭为飞书 |
 
 ---
 
@@ -97,27 +98,30 @@
 |---|---|---|---|---|
 | R1 | `etf_ma_rotate`（规则，ETF 20 日均线） | 完成 | 回测报告 + 实验 JSON | — |
 | R2 | `stock_momentum_topk`（TopK=5，20 日动量） | 完成 | 同上 | — |
+| R2b | `etf_momentum_topk`（TopK=3，40 日动量） | 完成 | 第三套规则策略；新 `parameter_set_id` | 已 paper 参数组不可改 |
 | R3 | 同策略 + 同 `data_version` 可复现 | 完成 | P2 测试 | — |
 | R4 | IS/OOS 时间切开，无未来函数 | 完成 | `asof` 只看 `trade_date <= asof` | — |
 | R5 | 质量 `block` → 策略 `failed` | 完成 | P2 测试 | — |
-| R6 | 仅 `paper` 可写可下单目标仓 | 完成 | `LocalStrategyService.generate_target_positions` | 没有模拟盘消费这些目标仓 |
+| R6 | 仅 `paper` 可写可下单目标仓 | 完成 | `LocalStrategyService.generate_target_positions`；P3 消费目标仓 | — |
 | R7 | 控制台策略 / 实验页 | 完成 | `#strategy` 列出版本与 latest 实验；重跑回测异步 + 进度 | — |
-| R8 | 收益归因 / 回测 vs 模拟偏差 | 部分完成 | `#review`；`GET /api/research/attribution` | 回测按标的贡献已做；`paper_vs_backtest.available=false`，等 P3 成交 |
+| R8 | 收益归因 / 回测 vs 模拟偏差 | 完成 | `#review`；IS/OOS 天数与占比、OOS Top/拖累、参数与样本区间、Paper 对比表 | — |
 | R9 | Qlib bin / 业务层 qlib | 暂缓 | 目录 `data/qlib_data/` 预留 | 本期用 `LocalResearchEngine`，禁止业务层 import qlib |
 
 ---
 
 ## P3 模拟交易与运营
 
+验收入口：[p3/README.md](p3/README.md)、`tests/test_p3_paper.py`、`asqt paper-admit` / `paper-run --days 20`。
+
 | ID | 项 | 状态 | 验收 | 未完成理由 |
 |---|---|---|---|---|
-| T1 | `OrderService`：目标仓 → 标准订单 + 风控 | 部分完成 | MockOrderService 写 `standard_order` | 无目标仓差额、无真实撮合 |
-| T2 | PaperBroker 模拟撮合与账本 | 未开始 | — | 同上；成交回报属账本契约 |
-| T3 | 20 个交易日连续模拟运行 | 未开始 | — | 依赖 T1/T2 |
-| T4 | 急停 / kill switch 可操作 | 未开始 | — | 仅有审计表；见 [p0/risk_defaults.md](p0/risk_defaults.md) |
-| T5 | 调度（CLI/cron → 任务表） | 部分完成 | 控制台异步追加+质检、16:30 等主源当日 K 再质检、17:30 起按原逻辑重试、`data_sync_run` 记录页 | 进程内调度，非独立队列；同库互斥靠 SQLite 租约锁，非 Redis |
-| T6 | 告警通道（本地 + 一种远程） | 暂缓 | — | Q4：P3 前才选定渠道 |
-| T7 | 质检 `block` 禁止新订单 | 部分完成 | Mock 单已拒（D6） | Paper 路径仍待 T1/T2 |
+| T1 | `OrderService`：目标仓 → 标准订单 + 风控 | 完成 | `PaperOrderService.build_orders`；差额、幂等、仓位/停牌/涨跌停/手数 | — |
+| T2 | PaperBroker 模拟撮合与账本 | 完成 | 次日开盘+5bp；佣金/印花税/过户费；`execution_fill` + `account_snapshot` | — |
+| T3 | 20 个交易日连续模拟运行 | 完成 | `paper-run --days 20`；快照天数达标 | 控制台跑模拟改为后台任务 + 进度；急停导致未满窗会回中文 `detail` |
+| T4 | 急停 / kill switch 可操作 | 完成 | `POST /api/ops/kill-switch` 必须写原因；回撤 −12% 自动急停 | — |
+| T5 | 调度（CLI/cron → 任务表） | 完成 | `LocalScheduler`；同步成功后幂等 `paper-daily`；工作日 20:05 cron 兜底 | 仍为进程内 + cron，无 Redis；同步页提示 cron 是否安装 / 热加载收尸 |
+| T6 | 告警通道（本地 + 一种远程） | 完成 | `alert` 表 + `alerts.jsonl` + 飞书 webhook；投递元数据写入 `alerts_remote.jsonl` | 仅 `high`/`critical` 推飞书；`info` 只落本地 |
+| T7 | 质检 `block` 禁止新订单 | 完成 | mock 与 Paper 路径均拒绝 | — |
 
 ---
 
@@ -125,7 +129,7 @@
 
 | ID | 项 | 状态 | 验收 | 未完成理由 |
 |---|---|---|---|---|
-| X1 | QMT / XtQuant 执行适配 | 暂缓 | — | Q2：券商模拟盘权限未具备；P3 Paper 先跑 |
+| X1 | QMT / XtQuant 执行适配 | 暂缓 | [p4/README.md](p4/README.md)；`tests/test_p4_qmt_stub.py` | Q2：券商模拟盘权限未具备；预留适配器 `available=false` |
 | X2 | 付费数据源 | 暂缓 | — | Q1：见 [p0/data_budget.md](p0/data_budget.md) |
 | X3 | 分钟 K / 财务 / 两融 / 北向 | 暂缓 | — | 策略验证后再申请，非 P1 必做 |
 | X4 | Tick / Level2 / 期货 / 港美股 / 北交所 | 暂缓 | — | 一期范围排除，见 [p0/scope.md](p0/scope.md) |
@@ -141,13 +145,16 @@
 | U1 | 总览行情 Top50 + 筛选 | 完成 | 下拉/折叠/模糊搜索/量能排序/序号/同比环比说明 | — |
 | U2 | 质量问题分页 | 完成 | 筛选/排序/中文枚举/拆市场/序号/行悬停 | 细节追加走 [console_fixes.md](console_fixes.md) |
 | U5 | 数据同步页 | 完成 | 追加行情按钮、toast、`#sync` 记录 | 状态列显示进行中百分比；热加载会中断后台任务并收尸 |
-| U3 | 策略 / 交易 / 复盘页 | 部分完成 | 策略页 + 复盘归因已接 | 交易页仍是 mock，完整订单属 P3 |
-| U4 | 端口边界显示真实接线 | 未开始 | — | `/api/ports` 仍被前端一律标「未接入」 |
+| U3 | 策略 / 交易 / 复盘页 | 完成 | 策略生命周期；交易页账户/订单/急停；复盘含模拟偏差 | — |
+| U4 | 端口边界显示真实接线 | 完成 | `/api/ports` 按 WIRED_PORTS 显示；Execution/Alert 已接线 | — |
 
 ---
 
 ## 下次开工建议
 
-1. **P3 主路径**：`OrderService` + PaperBroker（T7 的 mock 闸门已在，接到模拟撮合即可）。  
-2. **数据时效**：控制台「追加行情」或等待 16:30 自动任务；记录在同步页。  
-3. **可选小步**：U4 把 `/api/ports` 真实接线显示到设置页。
+1. **P4 实接**：等 Q2（MiniQMT 权限）再按 [p4/README.md](p4/README.md)「Q2 具备后才开的验收」接线；禁止把预留适配器标成完成。Qlib bin（R9）同理：目录预留，业务层零 `import qlib`。  
+2. **日终闭环**：交易日同步成功后会自动 `paper-daily`；空账本不会自动回放 240 日，需先手工「跑模拟」（现为后台任务，可看进度）。进程外兜底见 `scripts/crontab.example`（20:05）；同步页会提示当前用户 crontab 是否已装。  
+3. **第三套策略准入**：`etf_momentum_topk` 需 `research-backtest` → 生命周期到 paper → 单独「跑模拟」。勿改已 paper 的参数组。  
+4. **Q1**：付费数据源仍暂缓。
+
+修订：2026-09-11

@@ -14,11 +14,12 @@ from asqt.config import Settings, get_settings
 from asqt.db import connect, execute, initialize_database, query_all
 from asqt.research_engine import LocalResearchEngine
 from asqt.storage import read_market_daily
-from asqt.strategies import ETF_MA_ROTATE, STOCK_MOMENTUM_TOPK, STRATEGY_SPECS
+from asqt.strategies import STRATEGY_SPECS
 
 STRATEGY_LABEL = {
-    ETF_MA_ROTATE: "ETF 均线轮动",
-    STOCK_MOMENTUM_TOPK: "股票动量 TopK",
+    "etf_ma_rotate": "ETF 均线轮动",
+    "stock_momentum_topk": "股票动量 TopK",
+    "etf_momentum_topk": "ETF 动量 TopK",
 }
 
 
@@ -137,7 +138,7 @@ def _execute(run_id: str, strategy_id: str, settings: Settings) -> None:
         started_at=_now(),
     )
     try:
-        ids = (ETF_MA_ROTATE, STOCK_MOMENTUM_TOPK) if strategy_id == "all" else (strategy_id,)
+        ids = list(STRATEGY_SPECS) if strategy_id == "all" else (strategy_id,)
         rows = read_market_daily(settings=settings)
         date_steps = max(1, len({str(row["trade_date"]) for row in rows}) - 1)
         grand = date_steps * len(ids)

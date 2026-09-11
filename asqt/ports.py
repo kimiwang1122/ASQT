@@ -120,6 +120,8 @@ WIRED_PORTS: dict[str, str] = {
     "OrderService": "wired",
     "ReviewService": "wired",
     "Scheduler": "wired",
+    "ExecutionAdapter": "wired",
+    "AlertService": "wired",
 }
 
 PORT_NAMES: tuple[str, ...] = (
@@ -141,7 +143,15 @@ def port_entries() -> list[dict[str, str]]:
         {
             "name": name,
             "status": WIRED_PORTS.get(name, "not_wired"),
-            "phase": "p1" if name in {"DataSourceAdapter", "DataNormalizer", "QualityChecker"} else ("p2" if name in WIRED_PORTS else "later"),
+            "phase": (
+                "p1"
+                if name in {"DataSourceAdapter", "DataNormalizer", "QualityChecker"}
+                else (
+                    "p2"
+                    if name in {"ResearchEngine", "StrategyService", "ReviewService"}
+                    else "p3"
+                )
+            ),
         }
         for name in PORT_NAMES
     ]

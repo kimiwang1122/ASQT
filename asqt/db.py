@@ -264,6 +264,13 @@ SCHEMA_SQL: tuple[str, ...] = (
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS runtime_setting (
+        setting_key TEXT PRIMARY KEY,
+        setting_value TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
 )
 
 # Columns that may be missing on databases created before the baseline hardening pass.

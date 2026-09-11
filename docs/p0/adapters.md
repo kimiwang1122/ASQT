@@ -20,7 +20,7 @@
 | ExecutionAdapter  | 提交 / 撤 / 查 / 状态 | PaperBroker；其后 XtQuant / vn.py               | 策略层                 |
 | ReviewService     | 复盘              | MLflow 或自研报表                                 | 研究层写死 MLflow UI     |
 | Scheduler         | 任务编排            | 先 CLI/cron，后队列                               | 任务里绕过质检             |
-| AlertService      | 告警              | 本地 + 一种远程通道（P3）                              | 硬编码单一 IM SDK 到业务    |
+| AlertService      | 告警              | 本地 jsonl + 飞书自定义机器人 webhook（`asqt/adapters/feishu_alert.py`） | 硬编码 IM SDK 到 `api.py` |
 
 
 当前 `asqt/api.py` 只读 SQLite/Parquet，不 import 厂商 SDK。已接线的 port：`DataSourceAdapter` / `DataNormalizer` / `QualityChecker` / `ResearchEngine` / `StrategyService`。P2 研究实现是 `asqt/research_engine.py`，禁止在该层之外 import `qlib`。

@@ -33,6 +33,52 @@ from asqt.sync import (
     start_sync_job,
 )
 
+GATE_DENY_MESSAGES = {
+    "kill_switch": "急停已打开，不能准入或恢复模拟。请先到交易页关闭急停后再试。",
+    "quality_block": "存在未关闭的质量阻断，不能准入或恢复模拟。",
+    "missing_experiment": "缺少最近一次回测报告，不能准入或恢复模拟。请先重跑回测。",
+    "experiment_not_ok": "最近一次回测未通过，不能准入或恢复模拟。",
+    "missing_version_pins": "回测报告缺少参数组或数据版本钉扎，不能准入或恢复模拟。",
+    "lifecycle change requires a reason": "改生命周期必须填写原因。",
+    "paper_busy": "模拟盘运行中，请勿重复提交",
+}
+
+
+def _kill_open_reason(settings) -> str | None:
+    rows = query_all(
+        """
+        SELECT title, detail FROM alert
+        WHERE category = 'kill_switch' AND status = 'open'
+        ORDER BY created_at DESC LIMIT 1
+        """,
+        settings=settings,
+    )
+    if not rows:
+        return None
+    return (rows[0].get("detail") or rows[0].get("title") or "").strip() or None
+
+
+def http_exc_from_gate(exc: Exception, *, status_code: int, settings=None) -> HTTPException:
+    code = str(exc).strip()
+    message = GATE_DENY_MESSAGES.get(code)
+    extra: dict[str, str] = {}
+    if code == "kill_switch":
+        reason = _kill_open_reason(settings)
+        if reason:
+            extra["kill_reason"] = reason
+            message = f"{message} 当前原因：{reason}"
+    if message is None:
+        if "has no version" in code:
+            code = "no_version"
+            message = "该策略还没有版本，不能改生命周期。请先重跑回测。"
+        elif "cannot generate target positions" in code:
+            code = "not_orderable"
+            message = "当前状态不能生成可下单目标仓。仅「模拟」状态可以。"
+        else:
+            message = code
+    return HTTPException(status_code=status_code, detail={"code": code, "message": message, **extra})
+
+
 
 class MockOrderBody(BaseModel):
     symbol: str
@@ -46,6 +92,32 @@ class SyncBody(BaseModel):
     overlap_days: int = Field(default=1, ge=1, le=10)
 
 
+class LifecycleBody(BaseModel):
+    action: str
+    reason: str
+
+
+class KillSwitchBody(BaseModel):
+    engaged: bool
+    reason: str
+
+
+class PaperTradingBody(BaseModel):
+    enabled: bool
+    reason: str = "settings"
+
+
+class PaperConfigBody(BaseModel):
+    initial_cash: float = Field(default=1_000_000, ge=10_000, le=100_000_000)
+    commission_per_myriad: float = Field(default=2.5, ge=0, le=50)
+
+
+class PaperRunBody(BaseModel):
+    strategy_id: str = "all"
+    days: int = Field(default=20, ge=2, le=240)
+    background: bool = True
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
     initialize_database(settings)
@@ -56,6 +128,9 @@ def create_app() -> FastAPI:
         _app.state.sync_stop = stop
         recover_orphaned_sync_runs(settings)
         recover_orphaned_research_runs(settings)
+        from asqt.paper_jobs import recover_orphaned_paper_runs
+
+        recover_orphaned_paper_runs(settings)
         if auto_sync_enabled():
             thread = threading.Thread(
                 target=auto_loop,
@@ -117,6 +192,8 @@ def create_app() -> FastAPI:
         calendar_count = query_all("SELECT COUNT(*) AS c FROM trade_calendar", settings=settings)[0]["c"]
         limit_count = query_all("SELECT COUNT(*) AS c FROM limit_suspension", settings=settings)[0]["c"]
         factor_count = query_all("SELECT COUNT(*) AS c FROM factor_signal", settings=settings)[0]["c"]
+        from asqt.ops import kill_engaged, paper_trading_enabled
+
         return {
             "data_sources": data_sources,
             "instruments": instruments,
@@ -129,6 +206,8 @@ def create_app() -> FastAPI:
             "trade_calendar_rows": calendar_count,
             "limit_suspension_rows": limit_count,
             "factor_signal_rows": factor_count,
+            "kill_switch": kill_engaged(settings),
+            "paper_trading": paper_trading_enabled(settings),
             "ports": port_entries(),
             "layout": settings.layout(),
         }
@@ -385,6 +464,170 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except ResearchBusy as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/strategies/{strategy_id}/lifecycle")
+    def strategy_lifecycle(strategy_id: str, body: LifecycleBody) -> dict:
+        from asqt.research_engine import LocalStrategyService
+
+        service = LocalStrategyService(settings)
+        action = body.action.strip().lower()
+        try:
+            if action == "paper":
+                return service.admit_to_paper(strategy_id, body.reason)
+            if action == "pause":
+                return service.pause(strategy_id, body.reason)
+            if action == "resume":
+                return service.resume(strategy_id, body.reason)
+            if action == "retire":
+                return service.retire(strategy_id, body.reason)
+        except PermissionError as exc:
+            raise http_exc_from_gate(exc, status_code=403, settings=settings) from exc
+        except ValueError as exc:
+            raise http_exc_from_gate(exc, status_code=400, settings=settings) from exc
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "bad_action", "message": "动作只能是准入模拟、暂停、恢复或退役。"},
+        )
+
+    @app.get("/api/ops/kill-switch")
+    def get_kill_switch() -> dict:
+        from asqt.ops import kill_engaged
+
+        engaged = kill_engaged(settings)
+        return {"engaged": engaged, "reason": _kill_open_reason(settings) if engaged else None}
+
+    @app.post("/api/ops/kill-switch")
+    def post_kill_switch(body: KillSwitchBody) -> dict:
+        from asqt.ops import set_kill_switch
+
+        try:
+            return set_kill_switch(body.engaged, body.reason, settings=settings)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/ops/paper-trading")
+    def get_paper_trading() -> dict:
+        from asqt.ops import paper_trading_enabled
+
+        return {"enabled": paper_trading_enabled(settings)}
+
+    @app.post("/api/ops/paper-trading")
+    def post_paper_trading(body: PaperTradingBody) -> dict:
+        from asqt.ops import set_paper_trading
+
+        return set_paper_trading(body.enabled, body.reason, settings=settings)
+
+    @app.get("/api/ops/paper-config")
+    def get_paper_config() -> dict:
+        from asqt.ops import paper_account_config
+
+        return paper_account_config(settings)
+
+    @app.post("/api/ops/paper-config")
+    def post_paper_config(body: PaperConfigBody) -> dict:
+        from asqt.ops import set_paper_account_config
+
+        try:
+            return set_paper_account_config(
+                initial_cash=body.initial_cash,
+                commission_per_myriad=body.commission_per_myriad,
+                settings=settings,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/alerts")
+    def list_alerts(limit: int = Query(default=50, ge=1, le=200)) -> list[dict]:
+        from asqt.ops import LocalAlertService
+
+        return LocalAlertService(settings).list_alerts(limit=limit)
+
+    @app.post("/api/paper/run")
+    def paper_run(body: PaperRunBody | None = None) -> dict:
+        from asqt.paper import PaperBusy
+        from asqt.paper_jobs import start_paper_job
+
+        payload = body or PaperRunBody()
+        try:
+            return start_paper_job(
+                strategy_id=payload.strategy_id,
+                days=payload.days,
+                settings=settings,
+                background=payload.background,
+            )
+        except PaperBusy as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "paper_busy", "message": str(exc)},
+            ) from exc
+        except (ValueError, PermissionError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/paper/run/active")
+    def paper_run_active() -> dict:
+        from asqt.paper_jobs import active_paper_run
+
+        return {"active": active_paper_run(settings)}
+
+    @app.get("/api/paper/run/{run_id}")
+    def paper_run_detail(run_id: str) -> dict:
+        from asqt.paper_jobs import get_paper_run
+
+        row = get_paper_run(run_id, settings=settings)
+        if not row:
+            raise HTTPException(status_code=404, detail="模拟任务不存在")
+        return row
+
+    @app.post("/api/paper/reset")
+    def paper_reset(body: PaperRunBody | None = None) -> dict:
+        from asqt.paper import PaperBusy, reset_paper_account
+
+        payload = body or PaperRunBody()
+        try:
+            return reset_paper_account(strategy_id=payload.strategy_id, settings=settings)
+        except PaperBusy as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "paper_busy", "message": str(exc)},
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/paper/daily")
+    def paper_daily() -> dict:
+        from asqt.paper import advance_paper_session
+
+        return advance_paper_session(trigger="api", settings=settings)
+
+    @app.get("/api/ops/tasks")
+    def list_ops_tasks(limit: int = Query(default=50, ge=1, le=200)) -> list[dict]:
+        from asqt.scheduler import LocalScheduler
+
+        return LocalScheduler(settings).list_tasks(limit=limit)
+
+    @app.post("/api/ops/tasks/{task_name}")
+    def run_ops_task(task_name: str) -> dict:
+        from asqt.scheduler import LocalScheduler
+
+        try:
+            return LocalScheduler(settings).run_task(task_name)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/paper/account")
+    def paper_account(strategy_id: str) -> dict:
+        from asqt.paper import paper_board
+
+        return paper_board(strategy_id, settings)
+
+    @app.get("/api/paper/orders")
+    def paper_orders(
+        limit: int = Query(default=50, ge=1, le=5000),
+        strategy_id: str | None = None,
+    ) -> list[dict]:
+        from asqt.paper import PaperOrderService
+
+        return PaperOrderService(settings).list_orders(limit=limit, strategy_id=strategy_id)
 
     return app
 

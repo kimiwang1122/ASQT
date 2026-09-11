@@ -14,10 +14,11 @@ This repository currently provides the pre-P0 technical base plus the P1 data fo
 - Static frontend console with overview / data / placeholder pages / settings
 - Contract-field, API smoke, and P1 data-gate tests
 
-P2 research is wired (`etf_ma_rotate` + `stock_momentum_topk`) behind `LocalResearchEngine`. Brokers and Qlib bin conversion are still not wired.
+P2 research is wired (`etf_ma_rotate` + `stock_momentum_topk` + `etf_momentum_topk`) behind `LocalResearchEngine`. Execution stays on PaperBroker; QMT stub and Qlib bin remain reserved (`available=false` / no business `import qlib`).
 
 实施与验收进度（完成 / 未完成 / 理由）：[`docs/progress.md`](docs/progress.md)。  
-控制台细节修复（去重分类、可追加）：[`docs/console_fixes.md`](docs/console_fixes.md)。
+控制台细节修复（去重分类、可追加）：[`docs/console_fixes.md`](docs/console_fixes.md)。  
+专业词汇（本仓库口径）：[`docs/glossary.md`](docs/glossary.md)。
 
 ## Quick Start
 
@@ -38,7 +39,7 @@ python3 -m venv .venv
 
 Open `http://127.0.0.1:8000`.
 
-A-share close is ~15:00 CST. While the API process is running, weekdays it waits from 16:30 for the primary vendor to publish that day's bars before append+quality; from 17:30 it retries like before until success/skipped. Use the console **追加行情** button for a manual async run, or:
+A-share close is ~15:00 CST. While the API process is running, weekdays it waits from 16:30 for the primary vendor to publish that day's bars before append+quality; from 18:00 it retries like before until success/skipped. Use the console **追加行情** button for a manual async run, or:
 
 ```bash
 .venv/bin/asqt sync-daily
@@ -46,6 +47,19 @@ A-share close is ~15:00 CST. While the API process is running, weekdays it waits
 
 Disable in-process auto sync with `ASQT_SYNC_AUTO=0`.
 
+High/critical alerts POST to a Feishu custom bot. Override with `ASQT_FEISHU_WEBHOOK`; set empty to disable. Rehearse the full chain without touching the live paper book:
+
+```bash
+.venv/bin/asqt alert-demo
+.venv/bin/asqt alert-demo --dry-run
+```
+
+Process-out fallback (weekdays **20:05** Asia/Shanghai), after in-process 16:30 / 18:00. Same SQLite lock; a daytime success/skipped sync stops further auto retries. Install:
+
+```bash
+chmod +x scripts/asqt-cron-fallback.sh
+crontab scripts/crontab.example
+```
 ## Acceptance
 
 ```bash

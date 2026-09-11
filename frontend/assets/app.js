@@ -8,14 +8,44 @@ const PAGE_TITLES = {
   settings: "设置",
 };
 
+const GATE_DENY_LABEL = {
+  kill_switch: "急停已打开，不能准入或恢复模拟。请先到交易页关闭急停后再试。",
+  quality_block: "存在未关闭的质量阻断，不能准入或恢复模拟。",
+  missing_experiment: "缺少最近一次回测报告，不能准入或恢复模拟。请先重跑回测。",
+  experiment_not_ok: "最近一次回测未通过，不能准入或恢复模拟。",
+  missing_version_pins: "回测报告缺少参数组或数据版本钉扎，不能准入或恢复模拟。",
+  no_version: "该策略还没有版本，不能改生命周期。请先重跑回测。",
+  not_orderable: "当前状态不能生成可下单目标仓。仅「模拟」状态可以。",
+  bad_action: "动作只能是准入模拟、暂停、恢复或退役。",
+  paper_busy: "模拟盘运行中，请勿重复提交",
+};
+
+function formatApiDetail(detail) {
+  if (detail == null || detail === "") {
+    return "";
+  }
+  if (typeof detail === "string") {
+    return GATE_DENY_LABEL[detail] || RISK_TAG_LABEL[detail] || detail;
+  }
+  if (typeof detail === "object") {
+    if (detail.message) {
+      return String(detail.message);
+    }
+    if (detail.code) {
+      return GATE_DENY_LABEL[detail.code] || RISK_TAG_LABEL[detail.code] || String(detail.code);
+    }
+  }
+  return JSON.stringify(detail);
+}
+
 async function requestJson(url, options) {
   const response = await fetch(url, options);
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`;
     try {
       const body = await response.json();
-      if (body.detail) {
-        detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+      if (body.detail != null) {
+        detail = formatApiDetail(body.detail) || detail;
       }
     } catch (_err) {
       /* keep status text */
@@ -97,6 +127,38 @@ const STRATEGY_STATUS_LABEL = {
   retired: "退役",
   archived: "归档",
 };
+const RISK_TAG_LABEL = {
+  positions: "未准入模拟",
+  not_paper: "未准入模拟",
+  quality_block: "质量阻断",
+  kill_switch: "急停",
+  channel_unavailable: "通道不可用",
+  calendar_closed: "非交易日",
+  suspended: "停牌",
+  limit_up: "涨停",
+  limit_down: "跌停",
+  lot_size: "手数不符",
+  name_cap: "超单票上限",
+  gross_limit: "超总仓上限",
+  cash: "现金不足",
+  mock: "演示单",
+  paper: "模拟",
+};
+
+function formatRiskTags(value) {
+  if (value == null || value === "") {
+    return "-";
+  }
+  return String(value)
+    .split(",")
+    .map((part) => {
+      const key = part.trim();
+      return RISK_TAG_LABEL[key] || key;
+    })
+    .filter(Boolean)
+    .join("、") || "-";
+}
+
 const ORDER_STATUS_LABEL = {
   risk_pending: "待风控",
   submit_pending: "待提交",
@@ -611,7 +673,7 @@ function showPage(page) {
   }
   if (page === "orders") {
     loadOrders().catch((error) => {
-      setText("order-result", `加载失败：${error.message}`);
+      setText("paper-account-hint", `加载失败：${error.message}`);
     });
   }
   if (page === "strategy") {
@@ -628,6 +690,9 @@ function showPage(page) {
       setText("review-hint", `加载失败：${error.message}`);
     });
   }
+  if (page === "settings") {
+    loadPaperTradingSwitch().catch(() => {});
+  }
 }
 
 async function refresh() {
@@ -639,7 +704,7 @@ async function refresh() {
   ]);
   await loadMarketSnapshot();
 
-  setText("runtime", health.status === "ok" ? "运行正常 · 模拟交易未开" : "运行异常");
+  setText("runtime", health.status === "ok" ? "运行正常 · 本地模拟盘已接" : "运行异常");
   setText("source-count", status.data_sources);
   setText("instrument-count", status.instruments);
   setText("quality-count", status.open_quality_blocks ?? status.open_quality_issues);
@@ -836,6 +901,53 @@ const syncState = { page: 1, pages: 1, status: "all", trigger: "all", seq: 0 };
 let syncTimer = 0;
 let watchedRunId = "";
 
+const TOAST_HOLD_MS = 5000;
+let confirmResolver = null;
+
+function closeConfirmDialog(ok) {
+  const mask = document.getElementById("confirm-dialog");
+  if (mask) {
+    mask.hidden = true;
+  }
+  const resolve = confirmResolver;
+  confirmResolver = null;
+  if (resolve) {
+    resolve(Boolean(ok));
+  }
+}
+
+function confirmDialog(message) {
+  const mask = document.getElementById("confirm-dialog");
+  const text = document.getElementById("confirm-message");
+  const okBtn = document.getElementById("confirm-ok");
+  if (!mask || !text) {
+    return Promise.resolve(window.confirm(message));
+  }
+  if (confirmResolver) {
+    closeConfirmDialog(false);
+  }
+  text.textContent = message;
+  mask.hidden = false;
+  okBtn?.focus();
+  return new Promise((resolve) => {
+    confirmResolver = resolve;
+  });
+}
+
+document.getElementById("confirm-ok")?.addEventListener("click", () => closeConfirmDialog(true));
+document.getElementById("confirm-cancel")?.addEventListener("click", () => closeConfirmDialog(false));
+document.getElementById("confirm-close")?.addEventListener("click", () => closeConfirmDialog(false));
+document.getElementById("confirm-dialog")?.addEventListener("click", (event) => {
+  if (event.target === event.currentTarget) {
+    closeConfirmDialog(false);
+  }
+});
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && confirmResolver) {
+    closeConfirmDialog(false);
+  }
+});
+
 function showToast(message, tone) {
   const host = document.getElementById("toast-host");
   if (!host || !message) {
@@ -845,8 +957,23 @@ function showToast(message, tone) {
   el.className = "toast";
   el.dataset.tone = tone || "ok";
   el.textContent = message;
+  let timer = 0;
+  const dismiss = () => {
+    window.clearTimeout(timer);
+    timer = 0;
+    el.remove();
+  };
+  const arm = () => {
+    window.clearTimeout(timer);
+    timer = window.setTimeout(dismiss, TOAST_HOLD_MS);
+  };
+  el.addEventListener("mouseenter", () => {
+    window.clearTimeout(timer);
+    timer = 0;
+  });
+  el.addEventListener("mouseleave", arm);
   host.prepend(el);
-  window.setTimeout(() => el.remove(), 5200);
+  arm();
 }
 
 const SYNC_NOW_IDLE = "追加行情";
@@ -866,17 +993,22 @@ function syncBusyLabel(row) {
 }
 
 function setSyncBusy(busy, label) {
+  syncInFlight = Boolean(busy);
   const btn = document.getElementById("sync-now");
   if (!btn) {
     return;
   }
-  const on = Boolean(busy);
-  btn.disabled = on;
-  btn.setAttribute("aria-disabled", on ? "true" : "false");
-  btn.setAttribute("aria-busy", on ? "true" : "false");
-  btn.setAttribute("aria-readonly", on ? "true" : "false");
-  btn.title = on ? label || "正在追加，请稍候" : SYNC_NOW_IDLE;
-  btn.textContent = on ? label || "追加中…" : SYNC_NOW_IDLE;
+  if (busy) {
+    btn.disabled = true;
+    btn.setAttribute("aria-disabled", "true");
+    btn.setAttribute("aria-busy", "true");
+    btn.setAttribute("aria-readonly", "true");
+    btn.title = label || "正在追加，请稍候";
+    btn.textContent = label || "追加中…";
+    return;
+  }
+  btn.setAttribute("aria-busy", "false");
+  refreshHeaderActionLocks();
 }
 
 function syncToastForRun(row) {
@@ -957,9 +1089,45 @@ function syncSchedulerHint(scheduler) {
   }
   const next = scheduler.next_at ? formatDateTime(scheduler.next_at, false) : "-";
   const window = scheduler.window || "16:30";
-  const deadline = scheduler.deadline || "17:30";
+  const deadline = scheduler.deadline || "18:00";
+  const cron = scheduler.cron || "20:05";
   const tz = scheduler.timezone || "Asia/Shanghai";
-  return `人工点「追加行情」立即异步执行；每个交易日 ${window} 起等主源确认当日 K 再质检，${deadline} 起按原逻辑重试直到成功（${tz}）；下次 ${next}。`;
+  return (
+    `人工点「追加行情」立即异步执行（盘前手工通常只盖到昨日 K）。` +
+    `每个交易日 ${window} 起等主源确认当日 K 再质检，${deadline} 起强制重试直到成功（${tz}）；` +
+    `上午手工成功不会取消傍晚自动。进程外 cron 兜底 ${cron}。下次进程内 ${next}。`
+  );
+}
+
+function syncOpsHint(scheduler) {
+  const parts = [];
+  if (scheduler.morning_manual_note) {
+    parts.push(scheduler.morning_manual_note);
+  }
+  const cron = scheduler.cron_installed || {};
+  if (cron.checked) {
+    parts.push(cron.installed ? "当前用户 crontab 已装（含兜底脚本）。" : cron.detail || "当前用户未装 crontab。");
+  }
+  if (scheduler.hot_reload_note) {
+    parts.push(scheduler.hot_reload_note);
+  }
+  if (scheduler.lock_note) {
+    parts.push(scheduler.lock_note);
+  }
+  return parts.join(" ");
+}
+
+function applySchedulerHints(scheduler) {
+  if (!scheduler) {
+    return;
+  }
+  setText("sync-scheduler-hint", syncSchedulerHint(scheduler));
+  const ops = document.getElementById("sync-ops-hint");
+  if (ops) {
+    const text = syncOpsHint(scheduler);
+    ops.hidden = !text;
+    ops.textContent = text;
+  }
 }
 
 async function resumeActiveSync() {
@@ -969,7 +1137,7 @@ async function resumeActiveSync() {
       watchSyncRun(payload.active.run_id);
     }
     if (payload.scheduler) {
-      setText("sync-scheduler-hint", syncSchedulerHint(payload.scheduler));
+      applySchedulerHints(payload.scheduler);
     }
   } catch (_err) {
     /* ignore */
@@ -1027,7 +1195,7 @@ function renderSyncRuns(payload) {
   document.getElementById("sync-prev").disabled = page <= 1;
   document.getElementById("sync-next").disabled = page >= pages || total === 0;
   if (payload.scheduler) {
-    setText("sync-scheduler-hint", syncSchedulerHint(payload.scheduler));
+    applySchedulerHints(payload.scheduler);
   }
 }
 
@@ -1239,38 +1407,136 @@ document.getElementById("tasks-toggle").addEventListener("click", () => {
   applyTasks(!document.querySelector(".overview-workbench")?.classList.contains("tasks-collapsed"));
 });
 
-function renderOrders(rows) {
-  const body = document.getElementById("order-body");
+const TRADE_PAGE_SIZE = 10;
+const tradePages = { daily: 1, positions: 1, fills: 1, orders: 1, mock: 1 };
+const tradeLists = { positions: [], fills: [], orders: [], mock: [] };
+
+function tradePageSlice(rows, page) {
+  const list = rows || [];
+  const total = list.length;
+  const pages = Math.max(1, Math.ceil(total / TRADE_PAGE_SIZE) || 1);
+  const safe = Math.min(Math.max(1, Number(page) || 1), pages);
+  const start = (safe - 1) * TRADE_PAGE_SIZE;
+  return { page: safe, pages, total, start, items: list.slice(start, start + TRADE_PAGE_SIZE) };
+}
+
+function paintTradePager(prefix, info) {
+  setText(
+    `${prefix}-page-label`,
+    info.total ? `${info.page} / ${info.pages} · 共 ${info.total} 条 · 每页 ${TRADE_PAGE_SIZE}` : "共 0 条",
+  );
+  const prev = document.getElementById(`${prefix}-prev`);
+  const next = document.getElementById(`${prefix}-next`);
+  if (prev) {
+    prev.disabled = info.page <= 1 || info.total === 0;
+  }
+  if (next) {
+    next.disabled = info.page >= info.pages || info.total === 0;
+  }
+}
+
+function bindTradePager(prefix, key, redraw) {
+  document.getElementById(`${prefix}-prev`)?.addEventListener("click", () => {
+    tradePages[key] -= 1;
+    redraw();
+  });
+  document.getElementById(`${prefix}-next`)?.addEventListener("click", () => {
+    tradePages[key] += 1;
+    redraw();
+  });
+}
+
+function renderOrders(rows, bodyId = "order-body") {
+  const body = document.getElementById(bodyId);
   if (!body) {
     return;
   }
+  const pagerId = bodyId === "mock-order-body" ? "mock-order" : "paper-order";
+  if (bodyId === "mock-order-body") {
+    tradeLists.mock = rows.slice();
+  } else {
+    tradeLists.orders = rows.slice();
+  }
+  const pageKey = bodyId === "mock-order-body" ? "mock" : "orders";
+  const info = tradePageSlice(tradeLists[pageKey], tradePages[pageKey]);
+  tradePages[pageKey] = info.page;
   body.innerHTML = "";
-  if (!rows.length) {
+  if (!info.total) {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
-    td.colSpan = 6;
+    td.colSpan = bodyId === "order-body" ? 8 : 7;
     td.className = "table-empty";
-    td.textContent = "还没有 mock 订单。";
+    td.textContent = "还没有订单。";
     tr.appendChild(td);
     body.appendChild(tr);
+    paintTradePager(pagerId, info);
     return;
   }
-  for (const row of rows) {
+  info.items.forEach((row, index) => {
     const tr = document.createElement("tr");
-    appendCell(tr, row.created_at || "-");
+    appendCell(tr, String(info.start + index + 1), { className: "num" });
+    appendCell(tr, formatDateTime(row.created_at) || "-");
+    if (bodyId === "order-body") {
+      appendCell(tr, STRATEGY_LABEL[row.strategy_id] || row.strategy_id || "-");
+    }
     appendCell(tr, row.symbol || "-");
     appendCell(tr, row.side === "SELL" ? "卖出" : row.side === "BUY" ? "买入" : row.side || "-");
     appendCell(tr, row.quantity == null ? "-" : String(row.quantity));
     appendCell(tr, ORDER_STATUS_LABEL[row.status] || row.status || "-", { tone: toneForOrder(row.status) });
-    appendCell(tr, row.risk_tags || "-");
+    appendCell(tr, formatRiskTags(row.risk_tags));
     body.appendChild(tr);
-  }
+  });
+  paintTradePager(pagerId, info);
 }
 
 const STRATEGY_LABEL = {
   etf_ma_rotate: "ETF 均线轮动",
   stock_momentum_topk: "股票动量 TopK",
+  etf_momentum_topk: "ETF 动量 TopK",
 };
+
+const PARAM_LABEL = {
+  lookback: "回看天数",
+  top_k: "选取数量",
+  max_weight: "单票上限",
+  gross_limit: "总仓上限",
+  window: "均线窗口",
+};
+
+const PARAM_PCT_KEYS = new Set(["max_weight", "gross_limit"]);
+
+/** 与后端 STRATEGY_SPECS.params 对齐；策略页无 params 字段时用此展示。 */
+const STRATEGY_PARAMS = {
+  etf_ma_rotate: { window: 20, max_weight: 0.2, gross_limit: 0.95 },
+  stock_momentum_topk: { lookback: 20, top_k: 5, max_weight: 0.1, gross_limit: 0.95 },
+  etf_momentum_topk: { lookback: 40, top_k: 3, max_weight: 0.2, gross_limit: 0.95 },
+};
+
+function formatParamValue(key, value) {
+  if (PARAM_PCT_KEYS.has(key) && value != null && value !== "") {
+    const number = Number(value);
+    if (!Number.isNaN(number)) {
+      const pct = number * 100;
+      const text = Number.isInteger(pct) ? String(pct) : pct.toFixed(2).replace(/\.?0+$/, "");
+      return `${text}%`;
+    }
+  }
+  return String(value);
+}
+
+function formatParamsChinese(params, fallbackId) {
+  if (params && typeof params === "object" && Object.keys(params).length) {
+    return Object.entries(params)
+      .map(([key, value]) => `${PARAM_LABEL[key] || key}=${formatParamValue(key, value)}`)
+      .join(" · ");
+  }
+  return fallbackId || "-";
+}
+
+function formatParameterSetDisplay(row) {
+  const params = row?.params || STRATEGY_PARAMS[row?.strategy_id];
+  return formatParamsChinese(params, row?.parameter_set_id);
+}
 function formatPct(value) {
   if (value == null || value === "") {
     return "-";
@@ -1280,6 +1546,25 @@ function formatPct(value) {
     return "-";
   }
   return `${(number * 100).toFixed(2)}%`;
+}
+
+function formatMoney(value) {
+  if (value == null || value === "") {
+    return "-";
+  }
+  const number = Number(value);
+  if (Number.isNaN(number)) {
+    return "-";
+  }
+  return number.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function pnlClass(value) {
+  const number = Number(value);
+  if (Number.isNaN(number) || number === 0) {
+    return "num";
+  }
+  return number < 0 ? "num chg-down" : "num chg-up";
 }
 
 function renderStrategyVersions(rows) {
@@ -1303,7 +1588,7 @@ function renderStrategyVersions(rows) {
     appendCell(tr, STRATEGY_LABEL[row.strategy_id] || row.strategy_id);
     appendCell(tr, row.version || "v1");
     appendCell(tr, STRATEGY_STATUS_LABEL[row.status] || row.status || "-", { tone: toneForStrategy(row.status) });
-    appendCell(tr, row.parameter_set_id || "-");
+    appendCell(tr, formatParameterSetDisplay(row));
     appendCell(tr, row.code_version || "-");
     appendCell(tr, row.effective_date || "-");
     body.appendChild(tr);
@@ -1319,7 +1604,7 @@ function renderExperiments(rows) {
   if (!rows.length) {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
-    td.colSpan = 6;
+    td.colSpan = 7;
     td.className = "table-empty";
     td.textContent = "还没有实验记录。";
     tr.appendChild(td);
@@ -1331,42 +1616,71 @@ function renderExperiments(rows) {
     const isRet = row.metrics?.is?.total_return;
     const oosRet = row.metrics?.oos?.total_return;
     const oosDd = row.metrics?.oos?.max_drawdown;
+    const isDays = row.metrics?.is?.n_days;
+    const oosDays = row.metrics?.oos?.n_days;
     appendCell(tr, STRATEGY_LABEL[row.strategy_id] || row.strategy_id);
     appendCell(tr, STRATEGY_STATUS_LABEL[row.status] || row.status || "-", { tone: toneForStrategy(row.status) });
     appendCell(tr, formatPct(isRet));
     appendCell(tr, formatPct(oosRet));
     appendCell(tr, formatPct(oosDd));
+    appendCell(
+      tr,
+      isDays != null || oosDays != null ? `${isDays ?? "-"} / ${oosDays ?? "-"}` : "-",
+      { className: "num" },
+    );
     appendCell(tr, row.data_version || "-");
     body.appendChild(tr);
   }
 }
 
 async function loadStrategyPage() {
-  const [versions, experiments] = await Promise.all([
+  const [versions, experiments, kill] = await Promise.all([
     requestJson("/api/strategies"),
     requestJson("/api/research/experiments"),
+    requestJson("/api/ops/kill-switch").catch(() => ({ engaged: false })),
   ]);
   renderStrategyVersions(versions);
   renderExperiments(experiments);
+  const gate = document.getElementById("strategy-gate-hint");
+  if (gate) {
+    if (kill?.engaged) {
+      const reason = kill.reason ? ` 当前原因：${kill.reason}` : "";
+      gate.hidden = false;
+      gate.textContent = `急停已打开，不能准入或恢复模拟。请先到交易页关闭急停后再试。${reason}`;
+    } else {
+      gate.hidden = true;
+      gate.textContent = "";
+    }
+  }
 }
 
 function renderAttribution(payload) {
   const body = document.getElementById("review-body");
   const summary = document.getElementById("review-summary");
+  const isoos = document.getElementById("review-isoos");
+  const paperBody = document.getElementById("review-paper-body");
   if (!body || !summary) {
     return;
   }
   summary.innerHTML = "";
+  if (isoos) {
+    isoos.innerHTML = "";
+  }
+  if (paperBody) {
+    paperBody.innerHTML = "";
+  }
   const paper = payload.paper_vs_backtest || {};
+  const sample = payload.sample || {};
+  const params = payload.params || STRATEGY_PARAMS[payload.strategy_id] || {};
+  const paramText = formatParamsChinese(params, payload.parameter_set_id);
   const entries = payload.ok
     ? [
         ["净值", Number(payload.nav || 0).toFixed(4)],
         ["复利收益", formatPct(payload.total_return)],
         ["累加贡献", formatPct(payload.additive_return)],
-        ["样本内贡献", formatPct(payload.is_contribution)],
-        ["样本外贡献", formatPct(payload.oos_contribution)],
-        ["样本内截止", payload.in_sample_end || "-"],
-        ["模拟偏差", paper.available ? "可算" : "尚无模拟成交"],
+        ["参数组", paramText],
+        ["样本区间", sample.start && sample.end ? `${sample.start} ~ ${sample.end}（${sample.n_sessions || "-"} 日）` : "-"],
+        ["模拟偏差", paper.available ? formatPct(paper.items?.[0]?.max_abs_nav_gap) : "尚无模拟成交"],
       ]
     : [
         ["状态", "无法归因"],
@@ -1383,11 +1697,68 @@ function renderAttribution(payload) {
     item.append(k, v);
     summary.appendChild(item);
   }
+  if (isoos && payload.ok) {
+    const isoosEntries = [
+      ["样本内截止", payload.in_sample_end || "-"],
+      ["样本内天数", payload.is_days == null ? "-" : String(payload.is_days)],
+      ["样本外天数", payload.oos_days == null ? "-" : String(payload.oos_days)],
+      ["样本内贡献", formatPct(payload.is_contribution)],
+      ["样本外贡献", formatPct(payload.oos_contribution)],
+      ["样本内占比", payload.is_share == null ? "-" : formatPct(payload.is_share)],
+      ["样本外占比", payload.oos_share == null ? "-" : formatPct(payload.oos_share)],
+      [
+        "样本外 Top",
+        (payload.top_oos || [])
+          .slice(0, 3)
+          .map((row) => `${row.symbol} ${formatPct(row.oos_contribution)}`)
+          .join(" · ") || "-",
+      ],
+      [
+        "样本外拖累",
+        (payload.bottom_oos || [])
+          .slice(0, 3)
+          .map((row) => `${row.symbol} ${formatPct(row.oos_contribution)}`)
+          .join(" · ") || "-",
+      ],
+    ];
+    for (const [label, value] of isoosEntries) {
+      const item = document.createElement("div");
+      item.className = "kv-item";
+      const k = document.createElement("span");
+      const v = document.createElement("strong");
+      k.textContent = label;
+      v.textContent = value;
+      item.append(k, v);
+      isoos.appendChild(item);
+    }
+  }
+  if (paperBody) {
+    const items = paper.available ? paper.items || [] : [];
+    if (!items.length) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 5;
+      td.className = "table-empty";
+      td.textContent = paper.detail || "尚无模拟成交，无法对比。";
+      tr.appendChild(td);
+      paperBody.appendChild(tr);
+    } else {
+      for (const row of items) {
+        const tr = document.createElement("tr");
+        appendCell(tr, STRATEGY_LABEL[row.strategy_id] || row.strategy_id);
+        appendCell(tr, String(row.n_days ?? "-"), { className: "num" });
+        appendCell(tr, formatPct(row.paper_return), { className: pnlClass(row.paper_return) });
+        appendCell(tr, formatPct(row.backtest_return), { className: pnlClass(row.backtest_return) });
+        appendCell(tr, formatPct(row.max_abs_nav_gap), { className: "num" });
+        paperBody.appendChild(tr);
+      }
+    }
+  }
   setText(
     "review-hint",
     paper.available
-      ? "按标的累加每日贡献。"
-      : "按标的累加每日贡献。模拟 vs 回测偏差要等 PaperBroker 成交后才能算。",
+      ? `按标的累加每日贡献。样本内/外已切开；模拟 vs 回测最大净值偏离 ${formatPct(paper.items?.[0]?.max_abs_nav_gap)}。`
+      : "按标的累加每日贡献。样本内/外按时间切开；模拟 vs 回测偏差要等 PaperBroker 成交后才能算。",
   );
   body.innerHTML = "";
   const rows = payload.by_symbol || [];
@@ -1422,18 +1793,84 @@ function renderAttribution(payload) {
 async function loadReviewPage() {
   const select = document.getElementById("review-strategy");
   const strategyId = select?.value || "etf_ma_rotate";
+  setText("review-hint", "正在按日重算归因，请稍候…");
   const payload = await requestJson(`/api/research/attribution?strategy_id=${encodeURIComponent(strategyId)}`);
   renderAttribution(payload);
 }
 
 let backtestTimer = 0;
 let watchedBacktestId = "";
+let backtestBusy = false;
+let paperBusy = false;
+let syncInFlight = false;
+
+function setControlReadonly(el, on, title) {
+  if (!el) {
+    return;
+  }
+  el.disabled = Boolean(on);
+  el.setAttribute("aria-disabled", on ? "true" : "false");
+  el.setAttribute("aria-readonly", on ? "true" : "false");
+  if (on) {
+    el.title = title || "回测进行中，请稍候";
+  } else if (el.title === "回测进行中，请稍候") {
+    el.title = "";
+  }
+}
+
+function lockSelectTriggers(root, on) {
+  if (!root) {
+    return;
+  }
+  root.querySelectorAll(".asqt-select-trigger").forEach((btn) => {
+    setControlReadonly(btn, on);
+  });
+}
+
+function refreshHeaderActionLocks() {
+  const btn = document.getElementById("sync-now");
+  if (!btn) {
+    return;
+  }
+  if (syncInFlight) {
+    return;
+  }
+  const lock = backtestBusy || paperBusy;
+  btn.disabled = lock;
+  btn.setAttribute("aria-disabled", lock ? "true" : "false");
+  btn.setAttribute("aria-readonly", lock ? "true" : "false");
+  btn.textContent = SYNC_NOW_IDLE;
+  btn.title = paperBusy ? "模拟盘运行中，请稍候" : lock ? "回测进行中，请稍候" : SYNC_NOW_IDLE;
+}
+
+function applyTradeLocks() {
+  const locked = backtestBusy || paperBusy;
+  const lockTitle = paperBusy ? "模拟盘运行中，请勿重复提交" : backtestBusy ? "回测进行中，请稍候" : "";
+  const runBtn = document.getElementById("paper-run-submit");
+  setControlReadonly(document.getElementById("strategy-run"), locked, lockTitle);
+  setControlReadonly(document.getElementById("bootstrap"), locked, lockTitle);
+  setControlReadonly(document.getElementById("strategy-life-submit"), locked, lockTitle);
+  setControlReadonly(document.getElementById("strategy-life-reason"), locked, lockTitle);
+  setControlReadonly(runBtn, locked, lockTitle);
+  if (runBtn && !backtestBusy) {
+    runBtn.textContent = paperBusy ? "运行中…" : "跑模拟";
+  }
+  setControlReadonly(document.getElementById("paper-reset"), locked, lockTitle);
+  setControlReadonly(document.getElementById("paper-run-days"), paperBusy, lockTitle);
+  lockSelectTriggers(document.getElementById("paper-run-form"), locked);
+  lockSelectTriggers(document.getElementById("strategy-run-form"), locked);
+  lockSelectTriggers(document.getElementById("strategy-life-form"), locked);
+  refreshHeaderActionLocks();
+}
 
 function setBacktestBusy(busy) {
-  const button = document.getElementById("strategy-run");
-  if (button) {
-    button.disabled = Boolean(busy);
-  }
+  backtestBusy = Boolean(busy);
+  applyTradeLocks();
+}
+
+function setPaperBusy(busy) {
+  paperBusy = Boolean(busy);
+  applyTradeLocks();
 }
 
 function backtestProgressText(row) {
@@ -1537,6 +1974,274 @@ if (strategyRunForm) {
   });
 }
 
+const strategyLifeForm = document.getElementById("strategy-life-form");
+if (strategyLifeForm) {
+  strategyLifeForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const result = document.getElementById("strategy-life-result");
+    const strategyId = document.getElementById("strategy-life-id").value;
+    const action = document.getElementById("strategy-life-action").value;
+    const reason = document.getElementById("strategy-life-reason").value.trim();
+    if (result) {
+      result.hidden = false;
+      result.textContent = "提交中…";
+    }
+    try {
+      const payload = await requestJson(`/api/strategies/${encodeURIComponent(strategyId)}/lifecycle`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, reason }),
+      });
+      if (result) {
+        result.textContent = `${STRATEGY_LABEL[payload.strategy_id] || payload.strategy_id} → ${STRATEGY_STATUS_LABEL[payload.status] || payload.status}`;
+      }
+      showToast("生命周期已更新", "ok");
+      await loadStrategyPage();
+    } catch (error) {
+      if (result) {
+        result.textContent = `失败：${error.message}`;
+      }
+      showToast(error.message || "生命周期失败", "block");
+    }
+  });
+}
+
+const paperRunId = document.getElementById("paper-run-id");
+if (paperRunId) {
+  paperRunId.addEventListener("change", () => {
+    loadOrders().catch((error) => showToast(error.message || "加载模拟账户失败", "block"));
+  });
+}
+
+let paperRunTimer = 0;
+let watchedPaperRunId = "";
+
+function paperProgressText(row) {
+  const pct = row.progress_pct == null || row.progress_pct === "" ? "" : `${Number(row.progress_pct)}%`;
+  const label = row.progress_label || "";
+  if (row.status === "queued") {
+    return pct ? `模拟排队 ${pct}` : "模拟已入队";
+  }
+  if (row.status === "running") {
+    return `模拟盘运行中 ${pct || ""}${label ? ` · ${label}` : ""}`.replace(/\s+/g, " ").trim();
+  }
+  if (row.status === "success") {
+    return (row.detail && row.detail.detail) || label || "模拟已跑完";
+  }
+  return row.fail_reason || (row.detail && row.detail.detail) || label || "模拟未完整";
+}
+
+function finishPaperWatch(row) {
+  const detail = row.detail || {};
+  const ok = row.status === "success" && detail.ok !== false;
+  const message = paperProgressText(row);
+  setText("paper-account-hint", message);
+  showToast(ok ? "模拟已跑完" : message || "模拟未完整", ok ? "ok" : "block");
+  loadOrders().catch(() => {});
+}
+
+function watchPaperRun(runId) {
+  watchedPaperRunId = runId;
+  window.clearInterval(paperRunTimer);
+  setPaperBusy(true);
+  setText("paper-account-hint", "模拟已入队…请勿重复提交。");
+  const tick = () => {
+    requestJson(`/api/paper/run/${runId}`)
+      .then((row) => {
+        if (runId !== watchedPaperRunId) {
+          return;
+        }
+        setText("paper-account-hint", paperProgressText(row));
+        const runBtn = document.getElementById("paper-run-submit");
+        if (runBtn && paperBusy) {
+          const pct = row.progress_pct == null ? "" : ` ${row.progress_pct}%`;
+          runBtn.textContent = row.status === "queued" ? "排队中…" : `运行中…${pct}`;
+        }
+        if (row.status === "success" || row.status === "failed") {
+          window.clearInterval(paperRunTimer);
+          paperRunTimer = 0;
+          watchedPaperRunId = "";
+          setPaperBusy(false);
+          finishPaperWatch(row);
+        }
+      })
+      .catch((error) => {
+        window.clearInterval(paperRunTimer);
+        paperRunTimer = 0;
+        watchedPaperRunId = "";
+        setPaperBusy(false);
+        setText("paper-account-hint", `模拟失败：${error.message}`);
+        showToast(error.message || "模拟失败", "block");
+      });
+  };
+  tick();
+  paperRunTimer = window.setInterval(tick, 1000);
+}
+
+async function resumeActivePaperRun() {
+  try {
+    const payload = await requestJson("/api/paper/run/active");
+    if (payload.active && payload.active.run_id) {
+      watchPaperRun(payload.active.run_id);
+    }
+  } catch (_err) {
+    /* ignore */
+  }
+}
+
+const paperRunForm = document.getElementById("paper-run-form");
+if (paperRunForm) {
+  paperRunForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (paperBusy || backtestBusy) {
+      showToast("模拟盘运行中，请勿重复提交", "warn");
+      return;
+    }
+    setPaperBusy(true);
+    setText("paper-account-hint", "模拟盘入队中…请勿重复提交。");
+    try {
+      const payload = await requestJson("/api/paper/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          strategy_id: document.getElementById("paper-run-id").value,
+          days: Math.min(240, Math.max(2, Number(document.getElementById("paper-run-days").value) || 20)),
+        }),
+      });
+      showToast("模拟已在后台开始", "ok");
+      watchPaperRun(payload.run_id);
+    } catch (error) {
+      setPaperBusy(false);
+      setText("paper-account-hint", `模拟失败：${error.message}`);
+      showToast(error.message || "模拟失败", "block");
+    }
+  });
+}
+
+const paperResetBtn = document.getElementById("paper-reset");
+if (paperResetBtn) {
+  paperResetBtn.addEventListener("click", async () => {
+    if (paperBusy || backtestBusy) {
+      showToast(paperBusy ? "模拟盘运行中，请勿重复提交" : "回测进行中，请稍候", "warn");
+      return;
+    }
+    const strategyId = document.getElementById("paper-run-id")?.value || "all";
+    let cash = Number(lastPaperConfig?.initial_cash) || 1000000;
+    try {
+      lastPaperConfig = await requestJson("/api/ops/paper-config");
+      cash = Number(lastPaperConfig.initial_cash) || cash;
+    } catch {
+      /* keep last known */
+    }
+    const ok = await confirmDialog(
+      `重置模拟账户数据后，所选策略的持仓、成交、快照和模拟订单将清空并回到本金 ${formatMoney(cash)}，此操作不可撤销。是否确定重置？`,
+    );
+    if (!ok) {
+      return;
+    }
+    setControlReadonly(paperResetBtn, true);
+    try {
+      const payload = await requestJson("/api/paper/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ strategy_id: strategyId }),
+      });
+      const deleted = (payload.reports || []).reduce(
+        (sum, item) => sum + Number(item.deleted_snapshots || 0) + Number(item.deleted_orders || 0),
+        0,
+      );
+      showToast(deleted ? "模拟账户已重置" : "没有可清空的模拟数据", "ok");
+      await loadOrders();
+    } catch (error) {
+      showToast(error.message || "重置失败", "block");
+    } finally {
+      if (!backtestBusy && !paperBusy) {
+        setControlReadonly(paperResetBtn, false);
+      }
+    }
+  });
+}
+
+const killSwitchForm = document.getElementById("kill-switch-form");
+if (killSwitchForm) {
+  killSwitchForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const payload = await requestJson("/api/ops/kill-switch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          engaged: document.getElementById("kill-engaged").value === "on",
+          reason: document.getElementById("kill-reason").value.trim(),
+        }),
+      });
+      showToast(payload.engaged ? "急停已开" : "急停已关", payload.engaged ? "block" : "ok");
+      await loadOrders();
+    } catch (error) {
+      showToast(error.message || "急停失败", "block");
+    }
+  });
+}
+
+let lastPaperConfig = { initial_cash: 1000000, commission_per_myriad: 2.5 };
+
+async function loadPaperTradingSwitch() {
+  const [gate, config] = await Promise.all([
+    requestJson("/api/ops/paper-trading"),
+    requestJson("/api/ops/paper-config"),
+  ]);
+  lastPaperConfig = config;
+  const select = document.getElementById("paper-trading-enabled");
+  if (select) {
+    select.value = gate.enabled ? "on" : "off";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  const cash = document.getElementById("paper-initial-cash");
+  if (cash && config.initial_cash != null) {
+    cash.value = String(config.initial_cash);
+  }
+  const wan = document.getElementById("paper-commission-wan");
+  if (wan && config.commission_per_myriad != null) {
+    wan.value = String(config.commission_per_myriad);
+  }
+  setText(
+    "paper-trading-hint",
+    gate.enabled
+      ? `模拟交易已开。初始资金 ${formatMoney(config.initial_cash)}，佣金万分之 ${config.commission_per_myriad}。策略准入后可跑模拟；急停打开时仍会拒单。已有账本请先重置再跑。`
+      : "开关为关时不能跑模拟。急停打开时也会拒绝新订单。初始资金与佣金对之后新开的模拟生效。",
+  );
+}
+
+const paperTradingForm = document.getElementById("paper-trading-form");
+if (paperTradingForm) {
+  paperTradingForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const enabled = document.getElementById("paper-trading-enabled").value === "on";
+      await requestJson("/api/ops/paper-trading", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          enabled,
+          reason: "settings",
+        }),
+      });
+      await requestJson("/api/ops/paper-config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          initial_cash: Number(document.getElementById("paper-initial-cash").value) || 1000000,
+          commission_per_myriad: Number(document.getElementById("paper-commission-wan").value),
+        }),
+      });
+      showToast("模拟交易设置已保存", "ok");
+      await loadPaperTradingSwitch();
+    } catch (error) {
+      showToast(error.message || "保存失败", "block");
+    }
+  });
+}
+
 const reviewFilterForm = document.getElementById("review-filter-form");
 if (reviewFilterForm) {
   reviewFilterForm.addEventListener("submit", async (event) => {
@@ -1550,9 +2255,838 @@ if (reviewFilterForm) {
 }
 
 async function loadOrders() {
-  const rows = await requestJson("/api/orders?limit=20");
-  renderOrders(rows);
+  const strategyId = document.getElementById("paper-run-id")?.value || "stock_momentum_topk";
+  const ids = strategyId === "all" ? Object.keys(STRATEGY_LABEL) : [strategyId];
+  const [mockRows, kill, paperGate, ...accounts] = await Promise.all([
+    requestJson("/api/orders?limit=200"),
+    requestJson("/api/ops/kill-switch"),
+    requestJson("/api/ops/paper-trading"),
+    ...ids.map((id) => requestJson(`/api/paper/account?strategy_id=${encodeURIComponent(id)}`)),
+  ]);
+  paperKillState = kill;
+  paperGateState = paperGate;
+  paperBooks = {};
+  for (const account of accounts) {
+    if (account?.strategy_id) {
+      paperBooks[account.strategy_id] = account;
+    }
+  }
+  if (!paperFocusId || !paperBooks[paperFocusId]) {
+    paperFocusId = ids[0];
+  }
+  renderOrders(mockRows, "mock-order-body");
+  await showPaperFocus();
 }
+
+let paperBooks = {};
+let paperFocusId = null;
+let paperKillState = null;
+let paperGateState = null;
+
+function renderPaperGates(kill, paperGate, account, multi) {
+  const summary = document.getElementById("paper-summary");
+  if (!summary) {
+    return;
+  }
+  summary.innerHTML = "";
+  const gates = [
+    ["模拟交易", paperGate?.enabled ? "开" : "关"],
+    ["急停", kill?.engaged ? "开" : "关"],
+  ];
+  if (!multi && account) {
+    gates.push(["账户", "独立模拟账户"]);
+    gates.push(["策略", STRATEGY_LABEL[account.strategy_id] || account.strategy_id || "-"]);
+  }
+  for (const [label, value] of gates) {
+    const item = document.createElement("div");
+    item.className = "kv-item";
+    const k = document.createElement("span");
+    const v = document.createElement("strong");
+    k.textContent = label;
+    v.textContent = value;
+    item.append(k, v);
+    summary.appendChild(item);
+  }
+}
+
+function renderPaperBookSwitcher(ids) {
+  const host = document.getElementById("paper-books");
+  if (!host) {
+    return;
+  }
+  host.hidden = ids.length < 2;
+  host.innerHTML = "";
+  if (ids.length < 2) {
+    return;
+  }
+  for (const id of ids) {
+    const account = paperBooks[id];
+    const board = account?.summary || {};
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `paper-book${id === paperFocusId ? " is-active" : ""}`;
+    const title = document.createElement("strong");
+    title.textContent = STRATEGY_LABEL[id] || id;
+    const acc = document.createElement("span");
+    acc.className = "paper-book-id";
+    acc.textContent = "独立模拟账户";
+    const meta = document.createElement("span");
+    meta.className = "paper-book-meta";
+    if (board.sessions) {
+      const ret = document.createElement("em");
+      ret.className = pnlClass(board.total_return);
+      ret.textContent = formatPct(board.total_return);
+      meta.append(
+        document.createTextNode(`${board.sessions} 日 · ${formatMoney(board.end_asset)} · `),
+        ret,
+      );
+    } else {
+      meta.textContent = "还没有快照";
+    }
+    btn.append(title, acc, meta);
+    btn.addEventListener("click", () => {
+      if (paperFocusId === id) {
+        return;
+      }
+      paperFocusId = id;
+      showPaperFocus().catch((error) => showToast(error.message || "切换账户失败", "block"));
+    });
+    host.appendChild(btn);
+  }
+}
+
+async function showPaperFocus() {
+  const ids = Object.keys(STRATEGY_LABEL).filter((id) => paperBooks[id]);
+  const account = paperBooks[paperFocusId];
+  const multi = ids.length > 1;
+  renderPaperGates(paperKillState, paperGateState, account, multi);
+  renderPaperBookSwitcher(ids);
+  renderPaperCompare(ids);
+  if (!account) {
+    return;
+  }
+  renderPaperAccount(account, paperKillState, paperGateState, multi);
+  const paperRows = await requestJson(
+    `/api/paper/orders?limit=2000&strategy_id=${encodeURIComponent(paperFocusId)}`,
+  );
+  renderOrders(paperRows, "order-body");
+}
+
+function renderPaperCompare(ids) {
+  const title = document.getElementById("paper-compare-title");
+  const wrap = document.getElementById("paper-compare-wrap");
+  const body = document.getElementById("paper-compare-body");
+  if (!title || !wrap || !body) {
+    return;
+  }
+  const show = ids.length > 1;
+  title.hidden = !show;
+  wrap.hidden = !show;
+  body.innerHTML = "";
+  if (!show) {
+    return;
+  }
+  for (const id of ids) {
+    const account = paperBooks[id];
+    const board = account?.summary || {};
+    const reconcile = account?.reconcile || {};
+    const tr = document.createElement("tr");
+    appendCell(tr, STRATEGY_LABEL[id] || id);
+    appendCell(tr, board.sessions ? String(board.sessions) : "0", { className: "num" });
+    appendCell(tr, board.end_asset == null ? "-" : formatMoney(board.end_asset), { className: "num" });
+    appendCell(tr, formatPct(board.total_return), { className: pnlClass(board.total_return) });
+    appendCell(tr, formatPct(board.max_drawdown), { className: pnlClass(board.max_drawdown) });
+    appendCell(tr, !board.sessions ? "尚无" : reconcile.ok ? "通过" : "不一致", {
+      tone: !board.sessions ? "muted" : reconcile.ok ? "ok" : "block",
+    });
+    body.appendChild(tr);
+  }
+}
+
+function renderPaperAccount(account, kill, paperGate, multi = false) {
+  const body = document.getElementById("paper-curve-body");
+  if (!body) {
+    return;
+  }
+  const board = account.summary || {};
+  const timeline = account.timeline || [];
+  renderPaperBoard(board);
+  renderPaperReconcile(account.reconcile || {});
+  renderPaperChart(timeline, board);
+  paperDailyState.rows = timeline;
+  paperDailyState.fillsByDate = groupFillsByDate(account.fills || []);
+  paperDailyState.expanded = null;
+  tradePages.daily = 1;
+  tradePages.positions = 1;
+  tradePages.fills = 1;
+  tradePages.orders = 1;
+  renderPaperDaily();
+  if (timeline.length) {
+    selectPaperDay(timeline[timeline.length - 1].trade_date, "table");
+  }
+  renderPaperPositions(account.positions || []);
+  renderPaperFills(account.fills || []);
+  const windowText = board.window_start && board.window_end
+    ? `${board.window_start} ~ ${board.window_end}，共 ${board.sessions || 0} 个交易日`
+    : "还没有模拟快照";
+  const bookName = STRATEGY_LABEL[account.strategy_id] || account.strategy_id || "当前账户";
+  const cashText = formatMoney(board.initial_cash);
+  if (!paperGate?.enabled) {
+    setText("paper-account-hint", "设置页「模拟交易」为关，跑模拟不会成功。请先到设置打开开关。");
+  } else if (kill?.engaged) {
+    setText(
+      "paper-account-hint",
+      multi
+        ? `急停已开，禁止新的模拟订单。点选账户查看各自曲线。当前 ${bookName}：${windowText}。`
+        : `急停已开，禁止新的模拟订单。当前窗口 ${windowText}。`,
+    );
+  } else if (multi) {
+    setText(
+      "paper-account-hint",
+      `两本账独立资金、互不占仓。当前查看 ${bookName}：${windowText}。收益相对该账本金 ${cashText}。`,
+    );
+  } else {
+    setText("paper-account-hint", `${windowText}。收益相对本金 ${cashText}；折线与下表可对每日盈亏和成交。`);
+  }
+}
+
+function renderPaperReconcile(reconcile) {
+  const status = document.getElementById("paper-reconcile-status");
+  const hint = document.getElementById("paper-reconcile-hint");
+  const summary = document.getElementById("paper-reconcile-summary");
+  const body = document.getElementById("paper-reconcile-body");
+  if (!body) {
+    return;
+  }
+  const checks = reconcile.checks || [];
+  const mismatches = reconcile.qty_mismatches || [];
+  const hasData = Boolean(checks.length);
+  if (status) {
+    status.textContent = !hasData ? "尚无对账" : reconcile.ok ? "对账通过" : "对账不一致";
+    status.className = !hasData ? "" : reconcile.ok ? "ok" : "warn";
+  }
+  if (hint) {
+    hint.textContent = reconcile.formula
+      || "期末现金 = 本金 − 买入额 + 卖出额 − 费用；持仓数量 = 各标的买入数量 − 卖出数量。现金不含持仓市值浮盈。";
+  }
+  if (summary) {
+    summary.innerHTML = "";
+    const cards = [
+      ["本金", formatMoney(reconcile.initial_cash)],
+      ["买入额 / 量", `${formatMoney(reconcile.buy_notional)} / ${reconcile.buy_qty ?? 0}`],
+      ["卖出额 / 量", `${formatMoney(reconcile.sell_notional)} / ${reconcile.sell_qty ?? 0}`],
+      ["费用", formatMoney(reconcile.fees)],
+      ["成交推算现金", formatMoney(reconcile.expected_cash)],
+      ["账本现金", formatMoney(reconcile.actual_cash)],
+      ["现金差额", formatMoney(reconcile.cash_diff), pnlClass(reconcile.cash_diff)],
+    ];
+    for (const [label, value, className] of cards) {
+      const item = document.createElement("div");
+      item.className = "kv-item";
+      const k = document.createElement("span");
+      const v = document.createElement("strong");
+      k.textContent = label;
+      v.textContent = hasData ? value : "-";
+      if (className) {
+        v.className = className;
+      }
+      item.append(k, v);
+      summary.appendChild(item);
+    }
+  }
+  body.innerHTML = "";
+  if (!hasData) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 5;
+    td.className = "table-empty";
+    td.textContent = "还没有账本可对。跑完模拟后会按成交回推现金和持仓数量。";
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+  const qtyName = (name) => String(name || "").includes("数量");
+  const formatValue = (name, value) => (qtyName(name) ? String(Math.round(Number(value) || 0)) : formatMoney(value));
+  for (const row of checks) {
+    const tr = document.createElement("tr");
+    appendCell(tr, row.name || "-");
+    appendCell(tr, formatValue(row.name, row.expected), { className: "num" });
+    appendCell(tr, formatValue(row.name, row.actual), { className: "num" });
+    appendCell(tr, formatValue(row.name, row.diff), { className: pnlClass(row.diff) });
+    appendCell(tr, row.ok ? "通过" : "不一致", { tone: row.ok ? "ok" : "warn" });
+    body.appendChild(tr);
+  }
+  for (const row of mismatches) {
+    const tr = document.createElement("tr");
+    appendCell(tr, `持仓数量 · ${row.symbol}`);
+    appendCell(tr, String(row.expected ?? 0), { className: "num" });
+    appendCell(tr, String(row.actual ?? 0), { className: "num" });
+    appendCell(tr, String(row.diff ?? 0), { className: "num warn" });
+    appendCell(tr, "不一致", { tone: "warn" });
+    body.appendChild(tr);
+  }
+}
+
+function renderPaperBoard(board) {
+  const host = document.getElementById("paper-board");
+  if (!host) {
+    return;
+  }
+  host.innerHTML = "";
+  if (!board.sessions) {
+    const empty = document.createElement("p");
+    empty.className = "hint";
+    empty.textContent = "还没有模拟快照，跑完连续交易日后这里会给出区间收益、回撤和成交汇总。";
+    host.appendChild(empty);
+    return;
+  }
+  const cards = [
+    ["区间", `${board.window_start} ~ ${board.window_end}`],
+    ["本金", formatMoney(board.initial_cash)],
+    ["期末总资产", formatMoney(board.end_asset)],
+    ["区间收益", formatPct(board.total_return), pnlClass(board.total_return)],
+    ["最大回撤", formatPct(board.max_drawdown), pnlClass(board.max_drawdown)],
+    ["现金 / 市值", `${formatMoney(board.cash)} / ${formatMoney(board.market_value)}`],
+    ["成交 / 拒单", `${board.orders_filled || 0} / ${board.orders_rejected || 0}`],
+    ["买额 / 卖额", `${formatMoney(board.buy_notional)} / ${formatMoney(board.sell_notional)}`],
+    ["费用", formatMoney(board.fees)],
+    ["持仓只数", String(board.position_count || 0)],
+  ];
+  for (const [label, value, className] of cards) {
+    const item = document.createElement("div");
+    item.className = "kv-item";
+    const k = document.createElement("span");
+    const v = document.createElement("strong");
+    k.textContent = label;
+    v.textContent = value;
+    if (className) {
+      v.className = className;
+    }
+    item.append(k, v);
+    host.appendChild(item);
+  }
+}
+
+let paperChartView = null;
+
+function smoothLinePath(points) {
+  if (!points.length) {
+    return "";
+  }
+  if (points.length === 1) {
+    return `M ${points[0].x} ${points[0].y}`;
+  }
+  if (points.length === 2) {
+    return `M ${points[0].x} ${points[0].y} L ${points[1].x} ${points[1].y}`;
+  }
+  let d = `M ${points[0].x} ${points[0].y}`;
+  for (let i = 0; i < points.length - 1; i += 1) {
+    const p0 = points[i - 1] || points[i];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = points[i + 2] || p2;
+    const c1x = p1.x + (p2.x - p0.x) / 6;
+    const c1y = p1.y + (p2.y - p0.y) / 6;
+    const c2x = p2.x - (p3.x - p1.x) / 6;
+    const c2y = p2.y - (p3.y - p1.y) / 6;
+    d += ` C ${c1x} ${c1y} ${c2x} ${c2y} ${p2.x} ${p2.y}`;
+  }
+  return d;
+}
+
+function formatAxisMoney(value) {
+  const number = Number(value);
+  if (Number.isNaN(number)) {
+    return "-";
+  }
+  if (Math.abs(number) >= 10000) {
+    return `${(number / 10000).toFixed(2)}万`;
+  }
+  return number.toFixed(0);
+}
+
+function shortMd(date) {
+  const parts = String(date || "").split("-");
+  return parts.length === 3 ? `${parts[1]}-${parts[2]}` : date || "";
+}
+
+function xTickIndexes(count) {
+  if (count <= 6) {
+    return [...Array(count).keys()];
+  }
+  const step = Math.ceil((count - 1) / 6);
+  const indexes = [];
+  for (let i = 0; i < count; i += step) {
+    indexes.push(i);
+  }
+  const last = count - 1;
+  if (indexes[indexes.length - 1] !== last) {
+    if (last - indexes[indexes.length - 1] <= 1) {
+      indexes[indexes.length - 1] = last;
+    } else {
+      indexes.push(last);
+    }
+  }
+  return indexes;
+}
+
+function selectPaperDay(date, origin = "hover") {
+  if (!paperChartView || !date) {
+    return;
+  }
+  const point = paperChartView.points.find((item) => item.date === date);
+  if (!point) {
+    return;
+  }
+  paperChartView.selected = date;
+  const { cursor, hCursor, marker, axisDot, yAxisDot, yValueLabel, yValueBg, tooltip, host, width, pad, height } = paperChartView;
+  cursor.setAttribute("x1", String(point.x));
+  cursor.setAttribute("x2", String(point.x));
+  cursor.setAttribute("y1", String(pad.top));
+  cursor.setAttribute("y2", String(height - pad.bottom + 8));
+  cursor.setAttribute("visibility", "visible");
+  if (hCursor) {
+    hCursor.setAttribute("x1", String(pad.left - 8));
+    hCursor.setAttribute("x2", String(width - pad.right));
+    hCursor.setAttribute("y1", String(point.y));
+    hCursor.setAttribute("y2", String(point.y));
+    hCursor.setAttribute("visibility", "visible");
+  }
+  marker.setAttribute("cx", String(point.x));
+  marker.setAttribute("cy", String(point.y));
+  marker.setAttribute("visibility", "visible");
+  axisDot.setAttribute("cx", String(point.x));
+  axisDot.setAttribute("cy", String(height - pad.bottom + 8));
+  axisDot.setAttribute("visibility", "visible");
+  if (yAxisDot) {
+    yAxisDot.setAttribute("cx", String(pad.left));
+    yAxisDot.setAttribute("cy", String(point.y));
+    yAxisDot.setAttribute("visibility", "visible");
+  }
+  if (yValueLabel) {
+    yValueLabel.textContent = formatAxisMoney(point.row.total_asset);
+    yValueLabel.setAttribute("x", String(pad.left - 10));
+    yValueLabel.setAttribute("y", String(point.y + 3));
+    yValueLabel.setAttribute("visibility", "visible");
+    if (yValueBg) {
+      yValueBg.setAttribute("visibility", "visible");
+      try {
+        const box = yValueLabel.getBBox();
+        yValueBg.setAttribute("x", String(box.x - 3));
+        yValueBg.setAttribute("y", String(box.y - 1));
+        yValueBg.setAttribute("width", String(box.width + 6));
+        yValueBg.setAttribute("height", String(box.height + 2));
+      } catch (_err) {
+        yValueBg.setAttribute("visibility", "hidden");
+      }
+    }
+  }
+  const buys = Number(point.row.buys || 0);
+  const sells = Number(point.row.sells || 0);
+  tooltip.innerHTML = "";
+  const title = document.createElement("strong");
+  title.textContent = point.date;
+  tooltip.appendChild(title);
+  const lines = [
+    ["总资产", formatMoney(point.row.total_asset), ""],
+    ["日盈亏", formatMoney(point.row.daily_pnl), pnlClass(point.row.daily_pnl)],
+    ["买入", `${buys} 条`, "side-buy"],
+    ["卖出", `${sells} 条`, "side-sell"],
+    ["累计", formatPct(point.row.total_return), pnlClass(point.row.total_return)],
+  ];
+  for (const [label, value, className] of lines) {
+    const p = document.createElement("p");
+    p.className = className || "";
+    p.textContent = `${label} ${value}`;
+    tooltip.appendChild(p);
+  }
+  tooltip.hidden = false;
+  const hostW = host.clientWidth || width;
+  const scale = hostW / width;
+  const tipW = tooltip.offsetWidth || 148;
+  const left = Math.min(Math.max(point.x * scale - tipW / 2, 8), hostW - tipW - 8);
+  const top = Math.max(point.y * ((host.clientHeight || height) / height) - tooltip.offsetHeight - 14, 8);
+  tooltip.style.left = `${left}px`;
+  tooltip.style.top = `${top}px`;
+  document.querySelectorAll("#paper-curve-body tr[data-date]").forEach((tr) => {
+    tr.classList.toggle("is-selected", tr.dataset.date === date);
+  });
+  if (origin === "chart") {
+    const newestFirst = (paperDailyState.rows || []).slice().reverse();
+    const idx = newestFirst.findIndex((row) => row.trade_date === date);
+    if (idx >= 0) {
+      const nextPage = Math.floor(idx / TRADE_PAGE_SIZE) + 1;
+      if (nextPage !== tradePages.daily) {
+        tradePages.daily = nextPage;
+        renderPaperDaily();
+        document.querySelectorAll("#paper-curve-body tr[data-date]").forEach((tr) => {
+          tr.classList.toggle("is-selected", tr.dataset.date === date);
+        });
+      }
+    }
+  }
+}
+
+let paperDailyState = { rows: [], fillsByDate: {}, expanded: null };
+
+function groupFillsByDate(fills) {
+  const map = {};
+  for (const fill of fills) {
+    const day = String(fill.trade_date || "");
+    if (!day) {
+      continue;
+    }
+    if (!map[day]) {
+      map[day] = [];
+    }
+    map[day].push(fill);
+  }
+  return map;
+}
+
+function togglePaperDayExpand(date) {
+  paperDailyState.expanded = paperDailyState.expanded === date ? null : date;
+  renderPaperDaily();
+  selectPaperDay(date, "table");
+}
+
+function buildPaperDayDetailRow(date) {
+  const tr = document.createElement("tr");
+  tr.className = "paper-day-detail";
+  tr.addEventListener("click", (event) => event.stopPropagation());
+  const td = document.createElement("td");
+  td.colSpan = 9;
+  const fills = paperDailyState.fillsByDate[date] || [];
+  if (!fills.length) {
+    const empty = document.createElement("p");
+    empty.className = "hint";
+    empty.textContent = "当日无成交";
+    td.appendChild(empty);
+    tr.appendChild(td);
+    return tr;
+  }
+  const grid = document.createElement("div");
+  grid.className = "paper-day-fills";
+  grid.setAttribute("role", "table");
+  for (const label of ["代码", "方向", "数量", "成交价", "成交额", "费用"]) {
+    const head = document.createElement("div");
+    head.className = "paper-day-fills-h";
+    head.setAttribute("role", "columnheader");
+    head.textContent = label;
+    grid.appendChild(head);
+  }
+  for (const fill of fills) {
+    const cells = [
+      [fill.symbol || "-", ""],
+      [fill.side === "SELL" ? "卖出" : "买入", fill.side === "SELL" ? "side-sell" : "side-buy"],
+      [String(fill.filled_qty ?? "-"), ""],
+      [formatMoney(fill.filled_price), ""],
+      [formatMoney(fill.notional), ""],
+      [formatMoney(fill.fee), ""],
+    ];
+    for (const [text, className] of cells) {
+      const cell = document.createElement("div");
+      cell.className = className ? `paper-day-fills-c ${className}` : "paper-day-fills-c";
+      cell.setAttribute("role", "cell");
+      cell.textContent = text;
+      grid.appendChild(cell);
+    }
+  }
+  td.appendChild(grid);
+  tr.appendChild(td);
+  return tr;
+}
+
+function renderPaperDaily() {
+  const body = document.getElementById("paper-curve-body");
+  if (!body) {
+    return;
+  }
+  const rows = paperDailyState.rows || [];
+  body.innerHTML = "";
+  if (!rows.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 9;
+    td.className = "table-empty";
+    td.textContent = "还没有模拟快照。";
+    tr.appendChild(td);
+    body.appendChild(tr);
+    paintTradePager("paper-daily", tradePageSlice([], 1));
+    return;
+  }
+  const newestFirst = rows.slice().reverse();
+  const info = tradePageSlice(newestFirst, tradePages.daily);
+  tradePages.daily = info.page;
+  if (!info.total) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 9;
+    td.className = "table-empty";
+    td.textContent = "还没有模拟快照。";
+    tr.appendChild(td);
+    body.appendChild(tr);
+    paintTradePager("paper-daily", info);
+    return;
+  }
+  info.items.forEach((row, index) => {
+    const tr = document.createElement("tr");
+    const expanded = paperDailyState.expanded === row.trade_date;
+    tr.dataset.date = row.trade_date;
+    tr.setAttribute("aria-expanded", expanded ? "true" : "false");
+    tr.addEventListener("click", () => togglePaperDayExpand(row.trade_date));
+    const seq = document.createElement("td");
+    seq.className = "num paper-day-seq";
+    const caret = document.createElement("span");
+    caret.className = "paper-day-caret";
+    caret.textContent = expanded ? "▾" : "▸";
+    seq.append(caret, document.createTextNode(String(info.start + index + 1)));
+    tr.appendChild(seq);
+    appendCell(tr, row.trade_date || "-");
+    appendCell(tr, formatMoney(row.total_asset), { className: "num" });
+    appendCell(tr, formatMoney(row.daily_pnl), { className: pnlClass(row.daily_pnl) });
+    appendCell(tr, formatPct(row.daily_return), { className: pnlClass(row.daily_return) });
+    appendCell(tr, formatPct(row.total_return), { className: pnlClass(row.total_return) });
+    appendCell(tr, formatMoney(row.buy_notional), { className: "num" });
+    appendCell(tr, formatMoney(row.sell_notional), { className: "num" });
+    appendCell(tr, String((row.buys || 0) + (row.sells || 0)), { className: "num" });
+    body.appendChild(tr);
+    if (expanded) {
+      body.appendChild(buildPaperDayDetailRow(row.trade_date));
+    }
+  });
+  paintTradePager("paper-daily", info);
+  const selected = paperChartView?.selected;
+  if (selected) {
+    document.querySelectorAll("#paper-curve-body tr[data-date]").forEach((tr) => {
+      tr.classList.toggle("is-selected", tr.dataset.date === selected);
+    });
+  }
+}
+
+function renderPaperPositions(rows) {
+  const body = document.getElementById("paper-position-body");
+  if (!body) {
+    return;
+  }
+  if (Array.isArray(rows)) {
+    tradeLists.positions = rows.slice();
+  }
+  const info = tradePageSlice(tradeLists.positions, tradePages.positions);
+  tradePages.positions = info.page;
+  body.innerHTML = "";
+  if (!info.total) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 6;
+    td.className = "table-empty";
+    td.textContent = "当前空仓。";
+    tr.appendChild(td);
+    body.appendChild(tr);
+    paintTradePager("paper-position", info);
+    return;
+  }
+  info.items.forEach((row, index) => {
+    const tr = document.createElement("tr");
+    appendCell(tr, String(info.start + index + 1), { className: "num" });
+    appendCell(tr, row.symbol || "-");
+    appendCell(tr, String(row.qty ?? "-"), { className: "num" });
+    appendCell(tr, formatMoney(row.cost), { className: "num" });
+    appendCell(tr, formatMoney(row.market_price), { className: "num" });
+    appendCell(tr, formatMoney(row.market_value), { className: "num" });
+    body.appendChild(tr);
+  });
+  paintTradePager("paper-position", info);
+}
+
+function renderPaperFills(rows) {
+  const body = document.getElementById("paper-fill-body");
+  if (!body) {
+    return;
+  }
+  if (Array.isArray(rows)) {
+    tradeLists.fills = rows.slice().reverse();
+  }
+  const info = tradePageSlice(tradeLists.fills, tradePages.fills);
+  tradePages.fills = info.page;
+  body.innerHTML = "";
+  if (!info.total) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 8;
+    td.className = "table-empty";
+    td.textContent = "还没有成交。";
+    tr.appendChild(td);
+    body.appendChild(tr);
+    paintTradePager("paper-fill", info);
+    return;
+  }
+  info.items.forEach((row, index) => {
+    const tr = document.createElement("tr");
+    appendCell(tr, String(info.start + index + 1), { className: "num" });
+    appendCell(tr, row.trade_date || "-");
+    appendCell(tr, row.symbol || "-");
+    appendCell(tr, row.side === "SELL" ? "卖出" : "买入", {
+      className: row.side === "SELL" ? "side-sell" : "side-buy",
+    });
+    appendCell(tr, String(row.filled_qty ?? "-"), { className: "num" });
+    appendCell(tr, formatMoney(row.filled_price), { className: "num" });
+    appendCell(tr, formatMoney(row.notional), { className: "num" });
+    appendCell(tr, formatMoney(row.fee), { className: "num" });
+    body.appendChild(tr);
+  });
+  paintTradePager("paper-fill", info);
+}
+
+function renderPaperChart(rows, board) {
+  const host = document.getElementById("paper-equity-chart");
+  const meta = document.getElementById("paper-chart-meta");
+  paperChartView = null;
+  if (!host) {
+    return;
+  }
+  host.innerHTML = "";
+  if (meta) {
+    meta.textContent = board.window_start
+      ? `${board.window_start} ~ ${board.window_end} · 本金 ${formatMoney(board.initial_cash)} · 区间 ${formatPct(board.total_return)}`
+      : "相对本金 1,000,000";
+  }
+  if (!rows.length) {
+    host.textContent = "暂无净值曲线";
+    return;
+  }
+  const width = 720;
+  const height = 248;
+  const pad = { top: 16, right: 36, bottom: 28, left: 58 };
+  const innerW = width - pad.left - pad.right;
+  const innerH = height - pad.top - pad.bottom;
+  const assets = rows.map((row) => Number(row.total_asset));
+  const minY = Math.min(...assets);
+  const maxY = Math.max(...assets);
+  const spanY = maxY - minY || Math.abs(maxY) * 0.02 || 1;
+  const xAt = (index) => pad.left + (rows.length === 1 ? innerW / 2 : (index / (rows.length - 1)) * innerW);
+  const yAt = (value) => pad.top + (1 - (value - minY) / spanY) * innerH;
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("class", "paper-chart-svg");
+  const ticks = [maxY, (maxY + minY) / 2, minY];
+  ticks.forEach((value, tickIndex) => {
+    const y = yAt(value);
+    const grid = document.createElementNS(ns, "line");
+    grid.setAttribute("x1", String(pad.left));
+    grid.setAttribute("x2", String(width - pad.right));
+    grid.setAttribute("y1", String(y));
+    grid.setAttribute("y2", String(y));
+    grid.setAttribute("class", "paper-chart-grid");
+    svg.appendChild(grid);
+    const label = document.createElementNS(ns, "text");
+    label.setAttribute("x", String(pad.left - 8));
+    label.setAttribute("y", String(tickIndex === 0 ? y + 9 : tickIndex === ticks.length - 1 ? y - 2 : y + 3));
+    label.setAttribute("text-anchor", "end");
+    label.setAttribute("class", "paper-chart-label");
+    label.textContent = formatAxisMoney(value);
+    svg.appendChild(label);
+  });
+  const points = rows.map((row, index) => ({
+    date: row.trade_date,
+    x: xAt(index),
+    y: yAt(Number(row.total_asset)),
+    row,
+  }));
+  const lineD = smoothLinePath(points);
+  const area = document.createElementNS(ns, "path");
+  area.setAttribute(
+    "d",
+    `${lineD} L ${points[points.length - 1].x} ${height - pad.bottom} L ${points[0].x} ${height - pad.bottom} Z`,
+  );
+  area.setAttribute("class", "paper-chart-area");
+  svg.appendChild(area);
+  const line = document.createElementNS(ns, "path");
+  line.setAttribute("d", lineD);
+  line.setAttribute("class", "paper-chart-line");
+  svg.appendChild(line);
+  const tickIndexes = xTickIndexes(rows.length);
+  tickIndexes.forEach((index, order) => {
+    const text = document.createElementNS(ns, "text");
+    text.setAttribute("x", String(xAt(index)));
+    text.setAttribute("y", String(height - 8));
+    text.setAttribute(
+      "text-anchor",
+      order === 0 ? "start" : order === tickIndexes.length - 1 ? "end" : "middle",
+    );
+    text.setAttribute("class", "paper-chart-label");
+    text.textContent = shortMd(rows[index].trade_date);
+    svg.appendChild(text);
+  });
+  points.forEach((point) => {
+    const dot = document.createElementNS(ns, "circle");
+    dot.setAttribute("cx", String(point.x));
+    dot.setAttribute("cy", String(point.y));
+    dot.setAttribute("r", "3.4");
+    dot.setAttribute("class", "paper-chart-dot");
+    svg.appendChild(dot);
+  });
+  const cursor = document.createElementNS(ns, "line");
+  cursor.setAttribute("class", "paper-chart-cursor");
+  cursor.setAttribute("visibility", "hidden");
+  svg.appendChild(cursor);
+  const hCursor = document.createElementNS(ns, "line");
+  hCursor.setAttribute("class", "paper-chart-cursor");
+  hCursor.setAttribute("visibility", "hidden");
+  svg.appendChild(hCursor);
+  const marker = document.createElementNS(ns, "circle");
+  marker.setAttribute("r", "5");
+  marker.setAttribute("class", "paper-chart-marker");
+  marker.setAttribute("visibility", "hidden");
+  svg.appendChild(marker);
+  const axisDot = document.createElementNS(ns, "circle");
+  axisDot.setAttribute("r", "5");
+  axisDot.setAttribute("class", "paper-chart-axis-dot");
+  axisDot.setAttribute("visibility", "hidden");
+  svg.appendChild(axisDot);
+  const yAxisDot = document.createElementNS(ns, "circle");
+  yAxisDot.setAttribute("r", "5");
+  yAxisDot.setAttribute("class", "paper-chart-axis-dot");
+  yAxisDot.setAttribute("visibility", "hidden");
+  svg.appendChild(yAxisDot);
+  const yValueBg = document.createElementNS(ns, "rect");
+  yValueBg.setAttribute("class", "paper-chart-y-value-bg");
+  yValueBg.setAttribute("rx", "3");
+  yValueBg.setAttribute("visibility", "hidden");
+  svg.appendChild(yValueBg);
+  const yValueLabel = document.createElementNS(ns, "text");
+  yValueLabel.setAttribute("class", "paper-chart-y-value");
+  yValueLabel.setAttribute("text-anchor", "end");
+  yValueLabel.setAttribute("visibility", "hidden");
+  svg.appendChild(yValueLabel);
+  const hit = document.createElementNS(ns, "g");
+  const band = rows.length === 1 ? innerW : innerW / (rows.length - 1);
+  points.forEach((point) => {
+    const rect = document.createElementNS(ns, "rect");
+    rect.setAttribute("x", String(point.x - band / 2));
+    rect.setAttribute("y", String(pad.top));
+    rect.setAttribute("width", String(band));
+    rect.setAttribute("height", String(innerH + 16));
+    rect.setAttribute("class", "paper-chart-hit");
+    rect.addEventListener("mouseenter", () => selectPaperDay(point.date, "hover"));
+    rect.addEventListener("click", () => selectPaperDay(point.date, "chart"));
+    hit.appendChild(rect);
+  });
+  svg.appendChild(hit);
+  const tooltip = document.createElement("div");
+  tooltip.className = "paper-chart-tooltip";
+  tooltip.hidden = true;
+  host.appendChild(svg);
+  host.appendChild(tooltip);
+  paperChartView = { points, selected: null, cursor, hCursor, marker, axisDot, yAxisDot, yValueLabel, yValueBg, tooltip, host, width, height, pad };
+}
+
+bindTradePager("paper-daily", "daily", renderPaperDaily);
+bindTradePager("paper-position", "positions", () => renderPaperPositions());
+bindTradePager("paper-fill", "fills", () => renderPaperFills());
+bindTradePager("paper-order", "orders", () => renderOrders(tradeLists.orders, "order-body"));
+bindTradePager("mock-order", "mock", () => renderOrders(tradeLists.mock, "mock-order-body"));
 
 document.getElementById("mock-order-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -1649,3 +3183,4 @@ refresh().catch((error) => {
 });
 resumeActiveSync();
 resumeActiveBacktest();
+resumeActivePaperRun();
