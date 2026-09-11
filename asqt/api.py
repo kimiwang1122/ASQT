@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import json
 import threading
 
 from fastapi import FastAPI, HTTPException, Query
@@ -40,6 +41,7 @@ GATE_DENY_MESSAGES = {
     "experiment_not_ok": "最近一次回测未通过，不能准入或恢复模拟。",
     "missing_version_pins": "回测报告缺少参数组或数据版本钉扎，不能准入或恢复模拟。",
     "lifecycle change requires a reason": "改生命周期必须填写原因。",
+    "kill switch change requires a reason": "请填写急停原因（不能全是空格）。",
     "paper_busy": "模拟盘运行中，请勿重复提交",
 }
 
@@ -118,6 +120,11 @@ class PaperRunBody(BaseModel):
     background: bool = True
 
 
+class AlertCloseBatchBody(BaseModel):
+    alert_ids: list[str] = Field(default_factory=list)
+    reason: str | None = None
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
     initialize_database(settings)
@@ -129,8 +136,12 @@ def create_app() -> FastAPI:
         recover_orphaned_sync_runs(settings)
         recover_orphaned_research_runs(settings)
         from asqt.paper_jobs import recover_orphaned_paper_runs
+        from asqt.paper_reconcile_jobs import recover_orphaned_cash_reconcile_runs
+        from asqt.reconcile_jobs import recover_orphaned_reconcile_runs
 
         recover_orphaned_paper_runs(settings)
+        recover_orphaned_reconcile_runs(settings)
+        recover_orphaned_cash_reconcile_runs(settings)
         if auto_sync_enabled():
             thread = threading.Thread(
                 target=auto_loop,
@@ -184,9 +195,30 @@ def create_app() -> FastAPI:
             settings=settings,
         )[0]["c"]
         open_quality_issues = open_quality_blocks + open_quality_warns
-        tasks = query_all("SELECT * FROM task_run ORDER BY created_at DESC LIMIT 5", settings=settings)
+        raw_tasks = query_all(
+            "SELECT * FROM task_run ORDER BY created_at DESC LIMIT 40",
+            settings=settings,
+        )
+        # paper-run is a shadow ledger when paper-run-job already exists; hide it from the overview.
+        tasks = []
+        for row in raw_tasks:
+            if row.get("task_name") == "paper-run":
+                continue
+            item = dict(row)
+            if item.get("task_name") == "paper-run-job" and item.get("status") == "failed":
+                try:
+                    message = json.loads(item.get("message") or "{}")
+                except (TypeError, json.JSONDecodeError):
+                    message = {}
+                reasons = (message.get("result") or {}).get("incomplete_reasons") or []
+                fail = str(message.get("fail_reason") or "")
+                if reasons or "急停" in fail or "未完整" in fail:
+                    item["status"] = "partial"
+            tasks.append(item)
+            if len(tasks) >= 5:
+                break
         open_alerts = query_all(
-            "SELECT COUNT(*) AS c FROM alert WHERE status != 'closed'",
+            "SELECT COUNT(*) AS c FROM alert WHERE status = 'open'",
             settings=settings,
         )[0]["c"]
         calendar_count = query_all("SELECT COUNT(*) AS c FROM trade_calendar", settings=settings)[0]["c"]
@@ -503,7 +535,14 @@ def create_app() -> FastAPI:
         try:
             return set_kill_switch(body.engaged, body.reason, settings=settings)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            code = str(exc).strip()
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": code,
+                    "message": GATE_DENY_MESSAGES.get(code, "请填写急停原因（不能全是空格）。"),
+                },
+            ) from exc
 
     @app.get("/api/ops/paper-trading")
     def get_paper_trading() -> dict:
@@ -537,10 +576,45 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/alerts")
-    def list_alerts(limit: int = Query(default=50, ge=1, le=200)) -> list[dict]:
+    def list_alerts(
+        limit: int = Query(default=50, ge=1, le=200),
+        status: str | None = Query(default="open"),
+    ) -> list[dict]:
         from asqt.ops import LocalAlertService
 
-        return LocalAlertService(settings).list_alerts(limit=limit)
+        wanted = (status or "").strip().lower() or None
+        if wanted == "all":
+            wanted = None
+        return LocalAlertService(settings).list_alerts(limit=limit, status=wanted)
+
+    @app.get("/api/alerts/analysis")
+    def alert_analysis(limit: int = Query(default=200, ge=1, le=500)) -> dict:
+        from asqt.ops import LocalAlertService
+
+        return LocalAlertService(settings).analyze_open_alerts(limit=limit)
+
+    @app.post("/api/alerts/close-batch")
+    def close_alerts_batch(payload: AlertCloseBatchBody) -> dict:
+        from asqt.ops import LocalAlertService
+
+        if not payload.alert_ids:
+            raise HTTPException(status_code=400, detail="alert_ids 不能为空")
+        return LocalAlertService(settings).close_alerts(
+            payload.alert_ids,
+            reason=payload.reason or "batch closed from console",
+        )
+
+    @app.post("/api/alerts/{alert_id}/close")
+    def close_alert(alert_id: str, body: dict | None = None) -> dict:
+        from asqt.ops import LocalAlertService
+
+        reason = None
+        if isinstance(body, dict):
+            reason = body.get("reason")
+        row = LocalAlertService(settings).close_alert(alert_id, reason=reason or "closed from console")
+        if not row:
+            raise HTTPException(status_code=404, detail="告警不存在")
+        return row
 
     @app.post("/api/paper/run")
     def paper_run(body: PaperRunBody | None = None) -> dict:

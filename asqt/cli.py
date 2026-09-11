@@ -88,15 +88,26 @@ def cmd_sync_daily(
     sync = run_sync_job(trigger=kind, source=source, settings=settings, overlap_days=overlap_days)
     reconcile = None
     if not skip_reconcile and sync.get("status") in {"success", "skipped"}:
-        symbols = poc_symbols(settings)
-        end = date.today().isoformat()
-        start = (date.today() - timedelta(days=lookback_days)).isoformat()
-        reconcile = reconcile_daily(symbols, start, end, settings=settings, peer_source="auto")
+        from asqt.reconcile_jobs import run_reconcile_job
+
+        reconcile = run_reconcile_job(
+            trigger=kind,
+            lookback_days=lookback_days,
+            peer_source="auto",
+            settings=settings,
+        )
     print(json.dumps(_jsonable({"sync": sync, "reconcile": reconcile}), ensure_ascii=False, indent=2))
 
 
 def cmd_reconcile(symbols: list[str], start: str, end: str, peer: str) -> None:
-    result = reconcile_daily(symbols, start, end, settings=get_settings(), peer_source=peer)
+    result = reconcile_daily(
+        symbols,
+        start,
+        end,
+        settings=get_settings(),
+        peer_source=peer,
+        notify=True,
+    )
     print(json.dumps(_jsonable(result), ensure_ascii=False, indent=2))
 
 
@@ -133,6 +144,13 @@ def cmd_paper_daily() -> None:
     from asqt.paper import advance_paper_session
 
     result = advance_paper_session(trigger="cli", settings=get_settings())
+    print(json.dumps(_jsonable(result), ensure_ascii=False, indent=2))
+
+
+def cmd_cash_reconcile() -> None:
+    from asqt.paper_reconcile_jobs import run_cash_reconcile_job
+
+    result = run_cash_reconcile_job(trigger="manual", settings=get_settings(), notify=True)
     print(json.dumps(_jsonable(result), ensure_ascii=False, indent=2))
 
 
@@ -217,6 +235,7 @@ def main() -> None:
     paper.add_argument("--strategy", default="all", choices=("all", *STRATEGY_SPECS.keys()))
     paper.add_argument("--days", type=int, default=20)
     daily = subparsers.add_parser("paper-daily")
+    subparsers.add_parser("cash-reconcile")
     reset = subparsers.add_parser("paper-reset")
     reset.add_argument("--strategy", default="all", choices=("all", *STRATEGY_SPECS.keys()))
     kill = subparsers.add_parser("kill-switch")
@@ -290,6 +309,8 @@ def main() -> None:
         cmd_paper_run(args.strategy, args.days)
     elif args.command == "paper-daily":
         cmd_paper_daily()
+    elif args.command == "cash-reconcile":
+        cmd_cash_reconcile()
     elif args.command == "paper-reset":
         cmd_paper_reset(args.strategy)
     elif args.command == "kill-switch":

@@ -157,7 +157,21 @@ def scheduler_snapshot(settings: Settings | None = None) -> dict:
             f"同步与模拟各有一把 SQLite 租约锁；占用中重复提交返回 409；租约约 {STALE_RUNNING_MINUTES} 分钟过期可接管。"
         ),
         "cron_installed": _cron_installed_hint(),
+        "reconcile": _reconcile_snapshot(settings),
+        "cash_reconcile": _cash_reconcile_snapshot(settings),
     }
+
+
+def _reconcile_snapshot(settings: Settings | None = None) -> dict:
+    from asqt.reconcile_jobs import reconcile_snapshot
+
+    return reconcile_snapshot(settings=settings)
+
+
+def _cash_reconcile_snapshot(settings: Settings | None = None) -> dict:
+    from asqt.paper_reconcile_jobs import cash_reconcile_snapshot
+
+    return cash_reconcile_snapshot(settings=settings)
 
 
 def _cron_installed_hint() -> dict[str, Any]:
@@ -187,11 +201,16 @@ def _cron_installed_hint() -> dict[str, Any]:
             }
         return {"checked": False, "installed": None, "detail": text or "crontab -l 失败"}
     body = result.stdout or ""
-    hit = "asqt-cron-fallback.sh" in body or "sync-daily --trigger cron" in body
+    hit = (
+        "asqt-cron-fallback.sh" in body
+        or "sync-daily --trigger cron" in body
+        or "asqt reconcile" in body
+        or "reconcile --universe" in body
+    )
     return {
         "checked": True,
         "installed": hit,
-        "detail": "已找到 cron 兜底行" if hit else "未找到 asqt-cron-fallback；见 scripts/crontab.example",
+        "detail": "已找到 cron 兜底/对账行" if hit else "未找到 asqt-cron-fallback；见 scripts/crontab.example",
     }
 
 
@@ -460,7 +479,21 @@ def auto_loop(stop: threading.Event, settings: Settings) -> None:
             if should_auto_run(settings):
                 start_sync_job(trigger="auto", settings=settings, background=True)
         except Busy:
-            continue
+            pass
+        except Exception:
+            pass
+        try:
+            from asqt.reconcile_jobs import run_reconcile_job, should_auto_reconcile
+
+            if should_auto_reconcile(settings):
+                run_reconcile_job(trigger="auto", settings=settings)
+        except Exception:
+            pass
+        try:
+            from asqt.paper_reconcile_jobs import run_cash_reconcile_job, should_auto_cash_reconcile
+
+            if should_auto_cash_reconcile(settings):
+                run_cash_reconcile_job(trigger="auto", settings=settings)
         except Exception:
             continue
 

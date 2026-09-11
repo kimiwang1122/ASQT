@@ -36,9 +36,9 @@ def test_feishu_formats_text_and_skips_info():
         "detail": "api halt",
     }
     text = format_feishu_text(row)
-    assert "【ASQT告警】critical" in text
-    assert "急停" in text
-    assert "api halt" in text
+    assert "【ASQT告警】严重 · 急停" in text
+    assert "急停已打开" in text
+    assert "原因：api halt" in text
     assert should_push_feishu(row) is True
     assert should_push_feishu({"level": "info"}) is False
 
@@ -61,7 +61,67 @@ def test_post_feishu_alert_sends_msg_type_text(monkeypatch):
     assert captured["url"] == DEFAULT_FEISHU_WEBHOOK
     body = captured["body"]
     assert body["msg_type"] == "text"
-    assert "paper started" in body["content"]["text"]
+    text = body["content"]["text"]
+    assert "【ASQT告警】重要 · 运维" in text
+    assert "事件：paper started" in text
+    assert "说明：p3" in text
+
+
+def test_feishu_drawdown_matches_console_template():
+    from asqt.alert_format import build_drawdown_payload, encode_alert_detail, format_alert_full
+
+    detail = encode_alert_detail(
+        build_drawdown_payload(
+            dd=-0.12,
+            peak=100_000,
+            total_asset=88_000,
+            cash=8_000,
+            market_value=80_000,
+            initial_cash=100_000,
+            account_id="paper:etf_ma_rotate",
+            strategy_id="etf_ma_rotate",
+            trade_date="2024-03-01",
+            kind="stop",
+        )
+    )
+    row = {
+        "level": "critical",
+        "category": "drawdown",
+        "title": "max drawdown stop",
+        "detail": detail,
+    }
+    full = format_alert_full(row)
+    text = format_feishu_text(row)
+    assert "账户峰值：100,000.00" in full
+    assert "当前总资产：88,000.00" in full
+    assert full in text
+    assert "【ASQT告警】严重 · 回撤" in text
+
+
+def test_feishu_reconcile_hides_absolute_report_path():
+    from asqt.alert_format import encode_alert_detail, format_alert_full, format_feishu_text
+
+    detail = encode_alert_detail(
+        {
+            "schema": "asqt.alert.v1",
+            "kind": "cross_source_reconcile",
+            "summary": "跨源对账待复核 · 差异 341",
+            "report_path": "/Users/kimi/Documents/ChatGPT/ASQT/data/logs/reconcile_20260911T123848Z.json",
+            "mismatch_count": 341,
+        }
+    )
+    row = {
+        "level": "high",
+        "category": "reconcile",
+        "title": "跨源对账待复核",
+        "detail": detail,
+    }
+    text = format_feishu_text(row)
+    full = format_alert_full(row)
+    assert "/Users/kimi/" not in text
+    assert "Documents/ChatGPT" not in text
+    assert "报告：reconcile_20260911T123848Z.json" in text
+    assert "报告：reconcile_20260911T123848Z.json" in full
 
 
 def test_post_feishu_alert_failure_does_not_raise(monkeypatch):

@@ -68,7 +68,7 @@
 | D6 | 质量失败阻断**新订单** | 完成 | `POST /api/orders/mock`；开放 `block` → `rejected` | PaperBroker 撮合属 P3，不挡本项 |
 | D7 | 交易日历 / 停牌 / 涨跌停 | 完成 | 随 `pull-daily` 写入；回测停牌不进新权重 | P1 口径见下节，不做独立全市场日更产品 |
 | D8 | 已核实公司行为 CSV | 完成 | [p0/corporate_actions.md](p0/corporate_actions.md) | 只抑制 `adj_conflict`，不改 OHLC；完整事件主数据不做 |
-| D9 | 跨源 reconcile | 完成 | `reconcile --universe --peer tushare` 全历史 | 收盘价对齐；因子基准不同只写 `warn`，不翻转闸门 |
+| D9 | 跨源 reconcile | 完成 | 定时 19:15 + CLI；因子按标的 `median(stored/peer)` 对齐后再比；恒定基准记 `adj_baselines`，不改 parquet | 对齐后落入阈值不记差异；残差仍 `warn`，不翻转闸门 |
 | D10 | 控制台行情不全量加载 | 完成 | `/api/market/daily` 默认 limit | — |
 | D11 | 质量问题分页列表 | 完成 | `/api/quality/issues`；代码/市场拆列；检查类型中文；序号 | 见 [console_fixes.md](console_fixes.md) C3/C5/C6/C8 |
 
@@ -119,8 +119,8 @@
 | T2 | PaperBroker 模拟撮合与账本 | 完成 | 次日开盘+5bp；佣金/印花税/过户费；`execution_fill` + `account_snapshot` | — |
 | T3 | 20 个交易日连续模拟运行 | 完成 | `paper-run --days 20`；快照天数达标 | 控制台跑模拟改为后台任务 + 进度；急停导致未满窗会回中文 `detail` |
 | T4 | 急停 / kill switch 可操作 | 完成 | `POST /api/ops/kill-switch` 必须写原因；回撤 −12% 自动急停 | — |
-| T5 | 调度（CLI/cron → 任务表） | 完成 | `LocalScheduler`；同步成功后幂等 `paper-daily`；工作日 20:05 cron 兜底 | 仍为进程内 + cron，无 Redis；同步页提示 cron 是否安装 / 热加载收尸 |
-| T6 | 告警通道（本地 + 一种远程） | 完成 | `alert` 表 + `alerts.jsonl` + 飞书 webhook；投递元数据写入 `alerts_remote.jsonl` | 仅 `high`/`critical` 推飞书；`info` 只落本地 |
+| T5 | 调度（CLI/cron → 任务表） | 完成 | `LocalScheduler`；同步后幂等 `paper-daily`；跨源 19:15 / 财务对账 19:45 / cron 20:05 | 仍为进程内 + cron，无 Redis；同步页提示 crontab / 热加载收尸 |
+| T6 | 告警通道（本地 + 一种远程） | 完成 | `alert` 表 + jsonl + 飞书；回撤/对账结构化模版；列表摘要可点开 | 仅 `high`/`critical` 推飞书；正文不露本机绝对路径 |
 | T7 | 质检 `block` 禁止新订单 | 完成 | mock 与 Paper 路径均拒绝 | — |
 
 ---
@@ -153,8 +153,10 @@
 ## 下次开工建议
 
 1. **P4 实接**：等 Q2（MiniQMT 权限）再按 [p4/README.md](p4/README.md)「Q2 具备后才开的验收」接线；禁止把预留适配器标成完成。Qlib bin（R9）同理：目录预留，业务层零 `import qlib`。  
-2. **日终闭环**：交易日同步成功后会自动 `paper-daily`；空账本不会自动回放 240 日，需先手工「跑模拟」（现为后台任务，可看进度）。进程外兜底见 `scripts/crontab.example`（20:05）；同步页会提示当前用户 crontab 是否已装。  
-3. **第三套策略准入**：`etf_momentum_topk` 需 `research-backtest` → 生命周期到 paper → 单独「跑模拟」。勿改已 paper 的参数组。  
-4. **Q1**：付费数据源仍暂缓。
+2. **日终闭环**：交易日同步成功后会自动 `paper-daily`；空账本不会自动回放长窗口，需先手工「跑模拟」。进程外兜底见 `scripts/crontab.example`（跨源 19:15、财务对账 19:45、同步兜底 20:05）。  
+3. **财务对账**：`asqt cash-reconcile` / 进程内 `ASQT_CASH_RECONCILE_AUTO`；无账本记「跳过」；有账本才验现金/持仓。  
+4. **跨源对账**：因子恒定基准差已对齐后再比；真残差仍 warn。方案 2（入库统一权威因子）暂不做。  
+5. **第三套策略**：`etf_momentum_topk` 需回测 → paper → 单独跑模拟；勿改已 paper 参数组。  
+6. **Q1**：付费数据源仍暂缓。
 
 修订：2026-09-11

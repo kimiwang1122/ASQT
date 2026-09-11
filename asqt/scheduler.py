@@ -28,4 +28,12 @@ class LocalScheduler:
             return run_sync_job(trigger="scheduler", settings=self.settings)
         if name == "paper-daily":
             return advance_paper_session(trigger="scheduler", settings=self.settings)
+        if name == "reconcile-daily":
+            from asqt.reconcile_jobs import run_reconcile_job
+
+            return run_reconcile_job(trigger="scheduler", settings=self.settings)
+        if name == "cash-reconcile":
+            from asqt.paper_reconcile_jobs import run_cash_reconcile_job
+
+            return run_cash_reconcile_job(trigger="scheduler", settings=self.settings)
         raise ValueError(f"unknown task: {task_name}")

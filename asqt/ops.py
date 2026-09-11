@@ -67,12 +67,43 @@ class LocalAlertService:
         self._fanout(row)
         return row
 
-    def list_alerts(self, limit: int = 50) -> list[dict[str, Any]]:
-        return query_all(
-            "SELECT * FROM alert ORDER BY created_at DESC LIMIT ?",
-            (limit,),
-            settings=self.settings,
-        )
+    def list_alerts(
+        self,
+        limit: int = 50,
+        *,
+        status: str | None = "open",
+    ) -> list[dict[str, Any]]:
+        from asqt.alert_format import hydrate_alert_row
+
+        limit = max(1, min(200, int(limit)))
+        if status:
+            rows = query_all(
+                """
+                SELECT * FROM alert
+                WHERE status = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (status, limit),
+                settings=self.settings,
+            )
+        else:
+            rows = query_all(
+                "SELECT * FROM alert ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+                settings=self.settings,
+            )
+        hydrated: list[dict[str, Any]] = []
+        for row in rows:
+            upgraded = hydrate_alert_row(row, settings=self.settings)
+            if upgraded.get("detail") != row.get("detail"):
+                execute(
+                    "UPDATE alert SET detail = ?, updated_at = ? WHERE alert_id = ?",
+                    (upgraded.get("detail"), _now(), row["alert_id"]),
+                    settings=self.settings,
+                )
+            hydrated.append(upgraded)
+        return hydrated
 
     def close_alert(self, alert_id: str, *, reason: str | None = None) -> dict[str, Any] | None:
         rows = query_all(
@@ -90,6 +121,144 @@ class LocalAlertService:
         rows[0]["status"] = "closed"
         return rows[0]
 
+    def close_alerts(
+        self,
+        alert_ids: list[str],
+        *,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        ids = [str(item).strip() for item in alert_ids if str(item).strip()]
+        closed = 0
+        missing: list[str] = []
+        for alert_id in ids:
+            row = self.close_alert(alert_id, reason=reason)
+            if row:
+                closed += 1
+            else:
+                missing.append(alert_id)
+        return {"ok": True, "closed": closed, "missing": missing, "requested": len(ids)}
+
+    def analyze_open_alerts(self, *, limit: int = 200) -> dict[str, Any]:
+        rows = self.list_alerts(limit=limit, status="open")
+        kill_on = kill_engaged(self.settings)
+        groups_map: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            key = f"{row.get('category')}|{row.get('title')}|{row.get('level')}"
+            bucket = groups_map.setdefault(
+                key,
+                {
+                    "key": key,
+                    "category": row.get("category"),
+                    "title": row.get("title"),
+                    "level": row.get("level"),
+                    "items": [],
+                },
+            )
+            bucket["items"].append(row)
+
+        groups: list[dict[str, Any]] = []
+        noise_ids: list[str] = []
+        state_ids: list[str] = []
+        signal_ids: list[str] = []
+
+        for bucket in groups_map.values():
+            items = sorted(
+                bucket["items"],
+                key=lambda item: str(item.get("created_at") or ""),
+                reverse=True,
+            )
+            category = str(bucket["category"] or "")
+            level = str(bucket["level"] or "")
+            title = str(bucket["title"] or "")
+            ids = [str(item["alert_id"]) for item in items]
+            latest = items[0]
+            if category == PAPER_TRADING_CATEGORY and level == "info":
+                kind = "state"
+                keep = ids[:1]
+                noise = ids[1:]
+                advice = "模拟开关状态提示，不是故障；若开关本意就是开着，可保留。"
+                state_ids.extend(ids)
+            elif category in {KILL_CATEGORY, "drawdown"} and len(ids) > 1:
+                kind = "dup"
+                keep = ids[:1]
+                noise = ids[1:]
+                advice = f"同主题重复 {len(ids)} 条，建议只留最新 1 条，其余视为噪音。"
+                signal_ids.extend(keep)
+                noise_ids.extend(noise)
+            elif category == "drawdown" and level == "critical" and not kill_on:
+                kind = "stale"
+                keep = []
+                noise = ids
+                advice = "急停已解除，这些回撤急停记录已过期，可一键关闭。"
+                noise_ids.extend(noise)
+            elif category == KILL_CATEGORY and not kill_on:
+                kind = "stale"
+                keep = []
+                noise = ids
+                advice = "急停当前为关，残留急停告警可关闭。"
+                noise_ids.extend(noise)
+            elif level in {"critical", "high"}:
+                kind = "actionable"
+                keep = ids
+                noise = []
+                advice = "高等级告警，请确认当前风险后再关闭。"
+                signal_ids.extend(keep)
+            else:
+                kind = "info"
+                keep = ids[:1]
+                noise = ids[1:]
+                advice = "一般提示；重复项可清理。"
+                signal_ids.extend(keep)
+                noise_ids.extend(noise)
+
+            groups.append(
+                {
+                    "key": bucket["key"],
+                    "category": category,
+                    "title": title,
+                    "level": level,
+                    "count": len(ids),
+                    "kind": kind,
+                    "keep_ids": keep,
+                    "noise_ids": noise,
+                    "all_ids": ids,
+                    "latest_at": latest.get("created_at"),
+                    "detail_sample": latest.get("detail"),
+                    "advice": advice,
+                }
+            )
+
+        groups.sort(key=lambda item: (-_level_rank(item["level"]), -int(item["count"])))
+        open_count = len(rows)
+        noise_count = len(dict.fromkeys(noise_ids))
+        state_count = len(dict.fromkeys(state_ids))
+        signal_count = len(dict.fromkeys(signal_ids))
+        if open_count == 0:
+            verdict = "当前无开放告警。"
+        elif noise_count and signal_count:
+            verdict = (
+                f"开放 {open_count} 条：有效关注约 {signal_count} 条，"
+                f"重复/过期噪音 {noise_count} 条"
+                + (f"，状态提示 {state_count} 条" if state_count else "")
+                + "。建议先清噪音，再处理高等级。"
+            )
+        elif noise_count:
+            verdict = f"开放 {open_count} 条，主要为重复或过期噪音（{noise_count}），可一键清理。"
+        else:
+            verdict = f"开放 {open_count} 条，暂无明显重复噪音；请按级别逐条确认。"
+
+        return {
+            "open_count": open_count,
+            "signal_count": signal_count,
+            "noise_count": noise_count,
+            "state_count": state_count,
+            "kill_engaged": kill_on,
+            "verdict": verdict,
+            "noise_ids": list(dict.fromkeys(noise_ids)),
+            "groups": groups,
+            "analyzed_at": _now(),
+        }
+
     def _fanout(self, row: dict[str, Any]) -> None:
         from asqt.adapters.feishu_alert import post_feishu_alert
 
@@ -104,6 +273,10 @@ class LocalAlertService:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
         with remote.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
+
+
+def _level_rank(level: str | None) -> int:
+    return {"critical": 3, "high": 2, "info": 1}.get(str(level or ""), 0)
 
 
 def kill_engaged(settings: Settings | None = None) -> bool:
@@ -133,7 +306,10 @@ def set_kill_switch(
             alerts.raise_alert("critical", KILL_CATEGORY, "kill switch on", reason)
     else:
         open_rows = query_all(
-            "SELECT alert_id FROM alert WHERE category = ? AND status = 'open'",
+            """
+            SELECT alert_id FROM alert
+            WHERE status = 'open' AND category IN (?, 'drawdown')
+            """,
             (KILL_CATEGORY,),
             settings=settings,
         )
@@ -202,12 +378,31 @@ def maybe_drawdown_halt(
     *,
     peak: float,
     total_asset: float,
+    cash: float | None = None,
+    market_value: float | None = None,
+    initial_cash: float | None = None,
+    account_id: str | None = None,
+    strategy_id: str | None = None,
+    trade_date: str | None = None,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
+    from asqt.alert_format import build_drawdown_payload, encode_alert_detail
+
     if peak <= 0:
         return {"halt": False, "dd": 0.0}
     dd = total_asset / peak - 1.0
     alerts = LocalAlertService(settings)
+    common = {
+        "dd": dd,
+        "peak": peak,
+        "total_asset": total_asset,
+        "cash": cash,
+        "market_value": market_value,
+        "initial_cash": initial_cash,
+        "account_id": account_id,
+        "strategy_id": strategy_id,
+        "trade_date": trade_date,
+    }
     if dd <= DRAWDOWN_STOP and not kill_engaged(settings):
         set_kill_switch(
             True,
@@ -215,7 +410,20 @@ def maybe_drawdown_halt(
             actor="risk",
             settings=settings,
         )
-        alerts.raise_alert("critical", "drawdown", "max drawdown stop", f"dd={dd:.6f}")
+        open_stop = query_all(
+            """
+            SELECT COUNT(*) AS c FROM alert
+            WHERE category = 'drawdown' AND status = 'open' AND level = 'critical'
+            """,
+            settings=settings,
+        )
+        if int(open_stop[0]["c"] if open_stop else 0) == 0:
+            alerts.raise_alert(
+                "critical",
+                "drawdown",
+                "max drawdown stop",
+                encode_alert_detail(build_drawdown_payload(**common, kind="stop")),
+            )
         return {"halt": True, "dd": dd}
     if dd <= DRAWDOWN_WARN:
         open_warn = query_all(
@@ -223,7 +431,12 @@ def maybe_drawdown_halt(
             settings=settings,
         )
         if int(open_warn[0]["c"] if open_warn else 0) == 0:
-            alerts.raise_alert("high", "drawdown", "max drawdown warning", f"dd={dd:.6f}")
+            alerts.raise_alert(
+                "high",
+                "drawdown",
+                "max drawdown warning",
+                encode_alert_detail(build_drawdown_payload(**common, kind="warn")),
+            )
     return {"halt": False, "dd": dd}
 
 

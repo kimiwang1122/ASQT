@@ -3,6 +3,10 @@
 Does not replace the corporate-action catalog. Later phases can ingest a full
 event master; this job only checks that stored bars still match a second vendor
 and that sub-threshold factor jumps are internally consistent.
+
+Adj-factor levels often differ by a near-constant vendor baseline. Before
+comparing factors we estimate a per-symbol median scale (stored/peer) and only
+flag residual differences after alignment.
 """
 
 from __future__ import annotations
@@ -11,6 +15,8 @@ from typing import Any
 
 CLOSE_TOLERANCE = 0.02
 ADJ_TOLERANCE = 0.03
+# Relative spread of stored/peer ratios; within this → treat as constant baseline.
+ADJ_SCALE_SPREAD_TOL = 0.03
 SILENT_FACTOR_MIN = 1.03
 SILENT_FACTOR_GATE = 1.5
 PRICE_FACTOR_ALIGN = 0.20
@@ -22,31 +28,60 @@ def compare_market_daily(
     *,
     close_tol: float = CLOSE_TOLERANCE,
     adj_tol: float = ADJ_TOLERANCE,
+    scale_spread_tol: float = ADJ_SCALE_SPREAD_TOL,
 ) -> dict[str, Any]:
     left = {(row["symbol"], str(row["trade_date"])[:10]): row for row in stored}
     right = {(row["symbol"], str(row["trade_date"])[:10]): row for row in peer}
     keys = sorted(set(left) & set(right))
+    scales = estimate_adj_scales(left, right, keys, spread_tol=scale_spread_tol)
     mismatches: list[dict[str, Any]] = []
     for key in keys:
         a, b = left[key], right[key]
+        symbol = key[0]
         close_rel = _rel(a.get("close"), b.get("close"))
-        adj_rel = _rel(a.get("adj_factor"), b.get("adj_factor"))
         fields: list[str] = []
         if close_rel is None or close_rel > close_tol:
             fields.append(f"close stored={a.get('close')} peer={b.get('close')} rel={close_rel}")
-        if a.get("adj_factor") is not None and b.get("adj_factor") is not None:
+        stored_adj = a.get("adj_factor")
+        peer_adj = b.get("adj_factor")
+        if stored_adj is not None and peer_adj is not None:
+            scale_info = scales.get(symbol)
+            peer_for_cmp: Any = peer_adj
+            if scale_info and scale_info.get("stable"):
+                peer_for_cmp = float(peer_adj) * float(scale_info["scale"])
+            adj_rel = _rel(stored_adj, peer_for_cmp)
             if adj_rel is None or adj_rel > adj_tol:
-                fields.append(f"adj_factor stored={a.get('adj_factor')} peer={b.get('adj_factor')} rel={adj_rel}")
+                note = ""
+                if scale_info and scale_info.get("stable"):
+                    note = f" aligned_peer={peer_for_cmp} scale={scale_info['scale']}"
+                elif scale_info and not scale_info.get("stable"):
+                    note = f" scale_unstable spread={scale_info.get('spread')}"
+                fields.append(
+                    f"adj_factor stored={stored_adj} peer={peer_adj} rel={adj_rel}{note}"
+                )
         if fields:
             mismatches.append(
                 {
-                    "symbol": key[0],
+                    "symbol": symbol,
                     "trade_date": key[1],
                     "stored_source": a.get("source"),
                     "peer_source": b.get("source"),
                     "diff": "; ".join(fields),
                 }
             )
+    baselines = [
+        {
+            "symbol": symbol,
+            "scale": info["scale"],
+            "n": info["n"],
+            "spread": info["spread"],
+            "rel_from_unity": abs(float(info["scale"]) - 1.0),
+            "stored_source": info.get("stored_source"),
+            "peer_source": info.get("peer_source"),
+        }
+        for symbol, info in sorted(scales.items())
+        if info.get("stable") and abs(float(info["scale"]) - 1.0) > adj_tol
+    ]
     stored_n = len(left)
     peer_n = len(right)
     matched = len(keys)
@@ -57,7 +92,50 @@ def compare_market_daily(
         "match_rate": (matched / stored_n) if stored_n else 0.0,
         "mismatch_count": len(mismatches),
         "mismatches": mismatches,
+        "adj_baselines": baselines,
+        "adj_baseline_count": len(baselines),
+        "adj_scales": scales,
     }
+
+
+def estimate_adj_scales(
+    left: dict[tuple[str, str], dict[str, Any]],
+    right: dict[tuple[str, str], dict[str, Any]],
+    keys: list[tuple[str, str]],
+    *,
+    spread_tol: float = ADJ_SCALE_SPREAD_TOL,
+) -> dict[str, dict[str, Any]]:
+    """Per-symbol median(stored/peer). Stable when ratio spread is small."""
+    ratios: dict[str, list[float]] = {}
+    meta: dict[str, dict[str, Any]] = {}
+    for key in keys:
+        a, b = left[key], right[key]
+        stored_adj = _num(a.get("adj_factor"))
+        peer_adj = _num(b.get("adj_factor"))
+        if stored_adj is None or peer_adj is None or peer_adj == 0:
+            continue
+        symbol = key[0]
+        ratios.setdefault(symbol, []).append(stored_adj / peer_adj)
+        meta[symbol] = {
+            "stored_source": a.get("source"),
+            "peer_source": b.get("source"),
+        }
+    out: dict[str, dict[str, Any]] = {}
+    for symbol, values in ratios.items():
+        scale = _median(values)
+        if scale is None or scale == 0:
+            continue
+        rmin, rmax = min(values), max(values)
+        spread = (rmax - rmin) / max(abs(scale), 1e-9)
+        out[symbol] = {
+            "scale": round(scale, 12),
+            "n": len(values),
+            "spread": round(spread, 12),
+            "stable": spread <= spread_tol,
+            "stored_source": meta.get(symbol, {}).get("stored_source"),
+            "peer_source": meta.get(symbol, {}).get("peer_source"),
+        }
+    return out
 
 
 def scan_silent_factor_jumps(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -120,6 +198,17 @@ def _rel(left: Any, right: Any) -> float | None:
         return None
     scale = max(abs(a), abs(b), 1e-9)
     return abs(a - b) / scale
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    n = len(ordered)
+    mid = n // 2
+    if n % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
 
 
 def collapse_adj_scale_mismatches(mismatches: list[dict[str, Any]]) -> list[dict[str, Any]]:

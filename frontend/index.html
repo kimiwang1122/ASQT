@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ASQT 控制台</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=p3-ui28" />
+    <link rel="stylesheet" href="/assets/styles.css?v=p3-ui47" />
   </head>
   <body>
     <div class="shell">
@@ -69,11 +69,11 @@
               <strong id="quality-count" class="num">-</strong>
               <p class="metric-hint" id="quality-hint">检查数据能否进研究或交易</p>
             </a>
-            <article class="metric metric-hero" id="metric-alerts" data-tone="neutral">
+            <a class="metric metric-hero" id="metric-alerts" data-tone="neutral" href="#overview-alerts">
               <span>开放告警</span>
               <strong id="alert-count" class="num">-</strong>
               <p class="metric-hint" id="alert-hint">阻断项会停在质量门</p>
-            </article>
+            </a>
             <article class="metric">
               <span>数据源</span>
               <strong id="source-count" class="num">-</strong>
@@ -84,73 +84,26 @@
             </article>
           </section>
 
-          <div class="overview-workbench">
-            <section class="panel">
+          <div class="overview-alerts-row" id="overview-alerts-row">
+            <section class="panel" id="overview-alerts">
               <div class="panel-title">
-                <h2>行情 Top50</h2>
-                <span id="market-file">未加载</span>
+                <h2>开放告警</h2>
+                <span id="overview-alert-meta">来自 alert 表 · 总览计数同源</span>
               </div>
-              <form class="filters filters-inline" id="market-filters">
-                <label class="filter-inline">
-                  日期
-                  <input id="market-date" type="date" />
-                </label>
-                <label class="filter-inline">
-                  市场
-                  <select id="market-exchange" data-asqt-select>
-                    <option value="">全部</option>
-                    <option value="SH">SH</option>
-                    <option value="SZ">SZ</option>
-                  </select>
-                </label>
-                <label class="filter-inline">
-                  类型
-                  <select id="market-type" data-asqt-select>
-                    <option value="">全部</option>
-                    <option value="stock">股票</option>
-                    <option value="etf">ETF</option>
-                  </select>
-                </label>
-                <label class="filter-inline">
-                  代码
-                  <input id="market-code" type="search" placeholder="代码或名称" autocomplete="off" />
-                </label>
-                <label class="filter-action">
-                  <button type="submit">筛选</button>
-                </label>
-              </form>
+              <p class="hint">列表为摘要；点击行查看账户峰值/现价/现金等明细。飞书推送正文与展开模版一致。</p>
               <div class="table-wrap">
                 <table>
                   <thead>
                     <tr>
-                      <th class="num">#</th>
-                      <th>日期</th>
-                      <th>代码</th>
-                      <th>市场</th>
-                      <th>名称</th>
-                      <th>开盘</th>
-                      <th>最高</th>
-                      <th>最低</th>
-                      <th>收盘</th>
-                      <th>
-                        <button type="button" class="sort-btn" data-sort-scope="market" data-sort="volume">成交量</button>
-                      </th>
-                      <th>
-                        <span class="th-with-tip">
-                          <button type="button" class="sort-btn" data-sort-scope="market" data-sort="dod">环比</button>
-                          <span class="tip" tabindex="0" aria-label="环比说明" data-tip="环比：相对上一交易日成交量的变化。">i</span>
-                        </span>
-                      </th>
-                      <th>
-                        <span class="th-with-tip">
-                          <button type="button" class="sort-btn" data-sort-scope="market" data-sort="yoy">同比</button>
-                          <span class="tip" tabindex="0" aria-label="同比说明" data-tip="同比：相对约一年前最近交易日成交量的变化。">i</span>
-                        </span>
-                      </th>
-                      <th>来源</th>
+                      <th>级别</th>
+                      <th>类别</th>
+                      <th>标题</th>
+                      <th>详情</th>
+                      <th>时间</th>
+                      <th></th>
                     </tr>
                   </thead>
-                  <tbody id="market-body"></tbody>
+                  <tbody id="overview-alert-body"></tbody>
                 </table>
               </div>
             </section>
@@ -163,6 +116,108 @@
               <ul id="task-list" class="task-list"></ul>
             </section>
           </div>
+
+          <section class="panel" id="overview-alert-intel">
+            <div class="panel-title">
+              <h2>告警智能分析</h2>
+              <span id="alert-intel-meta">按实时开放告警汇总</span>
+            </div>
+            <p class="hint" id="alert-intel-verdict">加载中…</p>
+            <div class="kv-grid" id="alert-intel-summary"></div>
+            <div class="filters filters-inline" id="alert-intel-actions">
+              <label class="filter-action">
+                <button type="button" id="alert-close-noise">一键关闭噪音</button>
+              </label>
+              <label class="filter-action">
+                <button type="button" class="secondary" id="alert-close-all">关闭全部开放</button>
+              </label>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>归类</th>
+                    <th>级别</th>
+                    <th>主题</th>
+                    <th>条数</th>
+                    <th>建议</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="alert-intel-body"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel" id="overview-market">
+            <div class="panel-title">
+              <h2>行情 Top50</h2>
+              <span id="market-file">未加载</span>
+            </div>
+            <form class="filters filters-inline" id="market-filters">
+              <label class="filter-inline">
+                日期
+                <input id="market-date" type="date" />
+              </label>
+              <label class="filter-inline">
+                市场
+                <select id="market-exchange" data-asqt-select>
+                  <option value="">全部</option>
+                  <option value="SH">SH</option>
+                  <option value="SZ">SZ</option>
+                </select>
+              </label>
+              <label class="filter-inline">
+                类型
+                <select id="market-type" data-asqt-select>
+                  <option value="">全部</option>
+                  <option value="stock">股票</option>
+                  <option value="etf">ETF</option>
+                </select>
+              </label>
+              <label class="filter-inline">
+                代码
+                <input id="market-code" type="search" placeholder="代码或名称" autocomplete="off" />
+              </label>
+              <label class="filter-action">
+                <button type="submit">筛选</button>
+              </label>
+            </form>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th class="num">#</th>
+                    <th>日期</th>
+                    <th>代码</th>
+                    <th>市场</th>
+                    <th>名称</th>
+                    <th>开盘</th>
+                    <th>最高</th>
+                    <th>最低</th>
+                    <th>收盘</th>
+                    <th>
+                      <button type="button" class="sort-btn" data-sort-scope="market" data-sort="volume">成交量</button>
+                    </th>
+                    <th>
+                      <span class="th-with-tip">
+                        <button type="button" class="sort-btn" data-sort-scope="market" data-sort="dod">环比</button>
+                        <span class="tip" tabindex="0" aria-label="环比说明" data-tip="环比：相对上一交易日成交量的变化。">i</span>
+                      </span>
+                    </th>
+                    <th>
+                      <span class="th-with-tip">
+                        <button type="button" class="sort-btn" data-sort-scope="market" data-sort="yoy">同比</button>
+                        <span class="tip" tabindex="0" aria-label="同比说明" data-tip="同比：相对约一年前最近交易日成交量的变化。">i</span>
+                      </span>
+                    </th>
+                    <th>来源</th>
+                  </tr>
+                </thead>
+                <tbody id="market-body"></tbody>
+              </table>
+            </div>
+          </section>
         </section>
 
         <section class="page hidden" id="page-data">
@@ -276,7 +331,7 @@
               <h2>数据同步记录</h2>
               <span id="sync-page-meta">未加载</span>
             </div>
-            <p class="hint" id="sync-scheduler-hint">人工点「追加行情」立即异步执行；每个交易日 16:30 起等主源当日 K 再质检，18:00 起按原逻辑重试直到成功；进程外 cron 兜底 20:05。</p>
+            <p class="hint" id="sync-scheduler-hint">人工点「追加行情」立即异步执行；每个交易日 16:30 起等主源当日 K 再质检，18:00 起按原逻辑重试直到成功；跨源对账 19:15；财务对账 19:45；进程外 cron 兜底 20:05。</p>
             <p class="hint" id="sync-ops-hint" hidden></p>
             <form class="filters filters-inline" id="sync-filters">
               <label class="filter-inline">
@@ -457,11 +512,12 @@
               </label>
               <label class="filter-inline">
                 原因
-                <input id="kill-reason" type="text" placeholder="必填" required />
+                <input id="kill-reason" type="text" placeholder="必填" required autocomplete="off" />
               </label>
               <label class="filter-action">
                 <button type="submit">提交急停</button>
               </label>
+              <p id="kill-reason-error" class="field-error" hidden></p>
             </form>
             <div class="kv-grid" id="paper-summary"></div>
             <div class="paper-books" id="paper-books" hidden></div>
@@ -815,6 +871,6 @@
         </div>
       </div>
     </div>
-    <script src="/assets/app.js?v=p3-ui31"></script>
+    <script src="/assets/app.js?v=p3-ui47"></script>
   </body>
 </html>

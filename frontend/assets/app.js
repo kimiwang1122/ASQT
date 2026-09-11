@@ -18,6 +18,8 @@ const GATE_DENY_LABEL = {
   not_orderable: "当前状态不能生成可下单目标仓。仅「模拟」状态可以。",
   bad_action: "动作只能是准入模拟、暂停、恢复或退役。",
   paper_busy: "模拟盘运行中，请勿重复提交",
+  "kill switch change requires a reason": "请填写急停原因（不能全是空格）",
+  "lifecycle change requires a reason": "改生命周期必须填写原因。",
 };
 
 function formatApiDetail(detail) {
@@ -95,8 +97,9 @@ function formatDateTime(value, withSeconds = true) {
 }
 
 function currentPage() {
-  const hash = (location.hash || "#overview").replace("#", "");
-  return PAGE_TITLES[hash] ? hash : "overview";
+  const raw = (location.hash || "#overview").replace("#", "");
+  const page = raw.split(/[/?]/)[0];
+  return PAGE_TITLES[page] ? page : "overview";
 }
 
 function setTone(id, count) {
@@ -115,7 +118,31 @@ const SYNC_STATUS_LABEL = {
   skipped: "已是最新",
   quality_failed: "质检未通过",
   failed: "失败",
+  partial: "未完整",
+  review: "待复核",
   blocked: "质检未通过",
+};
+
+const TASK_NAME_LABEL = {
+  "paper-run-job": "跑模拟",
+  "paper-run": "跑模拟",
+  "paper-daily": "日终模拟",
+  "research-backtest": "回测",
+  "research_backtest": "回测",
+  "sync-daily": "同步行情",
+  sync_daily: "同步行情",
+  "check-quality": "质检",
+  check_quality: "质检",
+  pull_daily: "拉取日K",
+  "pull-daily": "拉取日K",
+  reconcile_daily: "跨源对账",
+  "reconcile-daily": "跨源对账",
+  cash_reconcile: "财务对账",
+  "cash-reconcile": "财务对账",
+  seed_demo: "初始化演示",
+  "seed-demo": "初始化演示",
+  universe_load: "加载股票池",
+  "universe-load": "加载股票池",
 };
 const STRATEGY_STATUS_LABEL = {
   draft: "草稿",
@@ -205,7 +232,7 @@ function toneForSync(status) {
   if (status === "success") {
     return "ok";
   }
-  if (status === "skipped") {
+  if (status === "skipped" || status === "partial" || status === "review") {
     return "accent";
   }
   if (status === "quality_failed" || status === "failed" || status === "blocked") {
@@ -417,6 +444,17 @@ async function loadMarketSnapshot() {
   renderMarket(payload);
 }
 
+function formatTaskName(name) {
+  if (!name) {
+    return "-";
+  }
+  if (TASK_NAME_LABEL[name]) {
+    return TASK_NAME_LABEL[name];
+  }
+  const alt = name.includes("_") ? name.replaceAll("_", "-") : name.replaceAll("-", "_");
+  return TASK_NAME_LABEL[alt] || name;
+}
+
 function renderTasks(tasks) {
   const list = document.getElementById("task-list");
   list.innerHTML = "";
@@ -430,10 +468,19 @@ function renderTasks(tasks) {
     const li = document.createElement("li");
     const left = document.createElement("span");
     const status = task.status || "";
-    left.textContent = `${task.task_name} ${formatDateTime(task.started_at)}`;
-    const tag = makeTag(SYNC_STATUS_LABEL[status] || status || "-", toneForSync(status));
+    const statusLabel =
+      (
+        task.task_name === "reconcile-daily" ||
+        task.task_name === "reconcile_daily" ||
+        task.task_name === "cash-reconcile" ||
+        task.task_name === "cash_reconcile"
+      ) && status === "partial"
+        ? "待复核"
+        : SYNC_STATUS_LABEL[status] || status || "-";
+    left.textContent = `${formatTaskName(task.task_name)} ${formatDateTime(task.started_at)}`;
+    const tag = makeTag(statusLabel, toneForSync(status));
     if (task.message) {
-      tag.title = task.message;
+      tag.title = typeof task.message === "string" ? task.message : JSON.stringify(task.message);
     }
     li.append(left, tag);
     list.appendChild(li);
@@ -653,6 +700,834 @@ async function loadQualityIssues() {
   renderQualityIssues(payload);
 }
 
+const ALERT_LEVEL_LABEL = {
+  info: "提示",
+  high: "重要",
+  critical: "严重",
+};
+
+const ALERT_CATEGORY_LABEL = {
+  drawdown: "回撤",
+  kill_switch: "急停",
+  paper_trading: "模拟开关",
+  quality: "质量",
+  ops: "运维",
+  reconcile: "跨源对账",
+  cash_reconcile: "财务对账",
+  paper_daily: "日终模拟",
+};
+
+const ALERT_TITLE_LABEL = {
+  "max drawdown stop": "回撤触发急停",
+  "max drawdown warning": "回撤预警",
+  "kill switch on": "急停已打开",
+  "paper trading on": "模拟交易已开启",
+  "跨源对账完成": "跨源对账完成",
+  "跨源对账待复核": "跨源对账待复核",
+  "跨源对账失败": "跨源对账失败",
+  "财务对账通过": "财务对账通过",
+  "财务对账跳过": "财务对账跳过",
+  "财务对账不一致": "财务对账不一致",
+  "财务对账失败": "财务对账失败",
+};
+
+const ALERT_KIND_LABEL = {
+  actionable: "需关注",
+  dup: "重复主题",
+  stale: "已过期",
+  state: "状态提示",
+  info: "一般提示",
+  noise: "噪音",
+};
+
+let alertIntelState = { noise_ids: [], groups: [], open_ids: [] };
+let alertListState = { expandedId: "" };
+
+function formatAlertTitle(row) {
+  return ALERT_TITLE_LABEL[row.title] || row.title || "-";
+}
+
+function moneyText(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return "-";
+  }
+  return number.toLocaleString("zh-CN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+function pctText(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return "-";
+  }
+  return `${(Math.abs(number) * 100).toFixed(2)}%`;
+}
+
+function parseAlertDetail(row) {
+  const raw = String(row?.detail || "").trim();
+  if (!raw) {
+    return {};
+  }
+  if (raw.startsWith("{")) {
+    try {
+      const data = JSON.parse(raw);
+      if (data && typeof data === "object") {
+        return data;
+      }
+    } catch (_error) {
+      /* legacy plain text */
+    }
+  }
+  const out = { raw };
+  const ddMatch = raw.match(/dd\s*=\s*(-?[0-9.]+)/i);
+  if (ddMatch) {
+    const dd = Number(ddMatch[1]);
+    if (Number.isFinite(dd)) {
+      out.dd = dd;
+      out.dd_pct = Math.abs(dd) * 100;
+      out.summary = `回撤 ${pctText(dd)}`;
+    }
+  }
+  const parts = raw
+    .split(/[;；]/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const readable = parts.filter((part) => !/^dd\s*=/i.test(part));
+  if (readable.length) {
+    out.legacy_text = readable.join("；");
+    if (!out.summary) {
+      out.summary = readable[0];
+    }
+  }
+  return out;
+}
+
+function formatAlertSummary(row) {
+  const payload = parseAlertDetail(row);
+  if (payload.summary) {
+    return payload.summary;
+  }
+  if (payload.legacy_text) {
+    return payload.legacy_text;
+  }
+  const title = formatAlertTitle(row);
+  if (payload.dd != null) {
+    const stop =
+      row?.level === "critical" ||
+      String(payload.kind || "").endsWith("stop") ||
+      String(row?.title || "").includes("stop");
+    const warn =
+      String(payload.kind || "").endsWith("warn") || String(row?.title || "").includes("warning");
+    if (stop) {
+      return `回撤 ${pctText(payload.dd)} 触发急停`;
+    }
+    if (warn) {
+      return `回撤 ${pctText(payload.dd)} 触及预警`;
+    }
+    return `回撤 ${pctText(payload.dd)}`;
+  }
+  const raw = String(row?.detail || "").trim();
+  if (/^dd\s*=/i.test(raw)) {
+    return title;
+  }
+  return raw || title;
+}
+
+function appendAlertSummaryCell(tr, row) {
+  const td = document.createElement("td");
+  td.className = "alert-detail-cell cell-clip";
+  const payload = parseAlertDetail(row);
+  const summary = formatAlertSummary(row);
+  td.title = summary;
+  if (payload.dd != null) {
+    const match = summary.match(/^(.*?)(回撤\s*)([0-9.]+%)(.*)$/);
+    if (match) {
+      if (match[1]) {
+        td.append(match[1]);
+      }
+      td.append(match[2]);
+      const span = document.createElement("span");
+      span.className = "alert-dd";
+      span.textContent = match[3];
+      td.appendChild(span);
+      if (match[4]) {
+        td.append(match[4]);
+      }
+    } else {
+      td.textContent = summary;
+    }
+  } else {
+    td.textContent = summary;
+  }
+  tr.appendChild(td);
+}
+
+function appendAlertFullDetail(container, row) {
+  container.innerHTML = "";
+  const wrap = document.createElement("div");
+  wrap.className = "alert-detail-full";
+  const payload = parseAlertDetail(row);
+  const category = row?.category || "";
+  const lines = [];
+  const push = (label, value, { tone } = {}) => {
+    if (value == null || value === "") {
+      return;
+    }
+    lines.push({ label, value: String(value), tone });
+  };
+  push("级别", ALERT_LEVEL_LABEL[row?.level] || row?.level || "-");
+  push("类别", ALERT_CATEGORY_LABEL[category] || category || "-");
+  push("事件", formatAlertTitle(row));
+
+  const strategyLabel = {
+    etf_ma_rotate: "ETF 均线轮动",
+    stock_momentum_topk: "股票动量 TopK",
+    etf_momentum_topk: "ETF 动量 TopK",
+  };
+  const isDrawdown =
+    String(payload.kind || "").startsWith("drawdown") ||
+    category === "drawdown" ||
+    String(row?.title || "").includes("drawdown");
+
+  if (isDrawdown) {
+    if (payload.strategy_id) {
+      push("策略", strategyLabel[payload.strategy_id] || payload.strategy_id);
+    }
+    if (payload.account_id) {
+      push("账户", payload.account_id);
+    }
+    if (payload.trade_date) {
+      push("成交日", payload.trade_date);
+    }
+    if (payload.dd != null) {
+      const stop = row?.level === "critical" || String(payload.kind || "").endsWith("stop");
+      const threshold =
+        payload.threshold != null
+          ? pctText(payload.threshold)
+          : stop
+            ? "12.00%"
+            : "8.00%";
+      push(
+        "回撤",
+        `${pctText(payload.dd)}（相对账户峰值；${stop ? "急停线" : "预警线"} ${threshold}）`,
+        { tone: "dd" },
+      );
+    }
+    if (payload.peak_asset != null) {
+      push("账户峰值", moneyText(payload.peak_asset));
+    }
+    if (payload.total_asset != null) {
+      push("当前总资产", moneyText(payload.total_asset));
+    }
+    if (payload.cash != null) {
+      push("现金", moneyText(payload.cash));
+    }
+    if (payload.market_value != null) {
+      push("持仓市值", moneyText(payload.market_value));
+    }
+    if (payload.initial_cash != null) {
+      push("本金", moneyText(payload.initial_cash));
+    }
+    if (payload.pnl_vs_peak != null) {
+      push("较峰值盈亏", moneyText(payload.pnl_vs_peak));
+    }
+    if (payload.pnl_vs_initial != null) {
+      push("较本金盈亏", moneyText(payload.pnl_vs_initial));
+    }
+    if (payload.action) {
+      push("处置", payload.action);
+    } else if (payload.legacy_text) {
+      push("说明", payload.legacy_text);
+    } else if (payload.dd != null) {
+      const stop = row?.level === "critical" || String(payload.kind || "").endsWith("stop");
+      push(
+        "处置",
+        stop ? "已触发急停，停止新开仓与继续模拟成交。" : "未达急停线，请关注回撤与仓位。",
+      );
+    }
+  } else if (category === "reconcile" || payload.kind === "cross_source_reconcile") {
+    if (payload.summary) {
+      push("摘要", payload.summary);
+    }
+    if (payload.window) {
+      push("窗口", payload.window);
+    }
+    if (payload.trigger) {
+      push("触发", payload.trigger);
+    }
+    if (payload.symbols != null) {
+      push("标的数", payload.symbols);
+    }
+    if (payload.match_rate != null) {
+      push("匹配率", `${(Number(payload.match_rate) * 100).toFixed(2)}%`);
+    } else if (payload.match_rate_pct != null) {
+      push("匹配率", `${payload.match_rate_pct}%`);
+    }
+    if (payload.matched_rows != null) {
+      push("匹配行", `${payload.matched_rows}/${payload.stored_rows}（对照 ${payload.peer_rows}）`);
+    }
+    if (payload.mismatch_count != null) {
+      push("价差差异", payload.mismatch_count);
+    }
+    if (payload.adj_baseline_count) {
+      push("因子基准已对齐", `${payload.adj_baseline_count} 标的`);
+    }
+    if (payload.silent_inconsistent != null) {
+      push("静默跳变异常", payload.silent_inconsistent);
+    }
+    if (payload.peer_error_count != null) {
+      push("对照源错误", payload.peer_error_count);
+    }
+    if (payload.report || payload.report_path) {
+      const raw = String(payload.report || payload.report_path || "");
+      const name = raw.split(/[/\\]/).filter(Boolean).pop() || raw;
+      push("报告", name);
+    }
+    if (payload.action) {
+      push("处置", payload.action);
+    }
+  } else if (category === "cash_reconcile" || payload.kind === "cash_reconcile") {
+    if (payload.summary) {
+      push("摘要", payload.summary);
+    }
+    if (payload.trigger) {
+      push("触发", payload.trigger);
+    }
+    if (payload.checked != null) {
+      push(
+        "已核对",
+        `${payload.checked} · 不一致 ${payload.mismatch_count ?? 0} · 跳过 ${payload.skipped_count ?? 0}`,
+      );
+    }
+    for (const item of payload.books || []) {
+      const label = item.strategy_label || item.strategy_id || "策略";
+      if (item.skipped) {
+        push(label, "尚无账本");
+        continue;
+      }
+      const status = item.ok ? "通过" : "不一致";
+      push(
+        label,
+        `${status} · ${item.asof || "-"} · 本金 ${moneyText(item.initial_cash)} · 峰值 ${moneyText(item.peak_asset)}` +
+          ` · 现金 ${moneyText(item.actual_cash)}（差额 ${moneyText(item.cash_diff)}）` +
+          ` · 市值 ${moneyText(item.market_value)} · 总资产 ${moneyText(item.end_asset)}`,
+      );
+      if (item.failed_checks?.length) {
+        push("失败项", item.failed_checks.join("、"));
+      }
+      if (item.qty_mismatches) {
+        push("持仓数量不一致", item.qty_mismatches);
+      }
+    }
+    if (payload.action) {
+      push("处置", payload.action);
+    }
+  } else {
+    const text = formatAlertFull(row)
+      .split("\n")
+      .slice(3)
+      .filter(Boolean);
+    text.forEach((line) => {
+      const idx = line.indexOf("：");
+      if (idx > 0) {
+        push(line.slice(0, idx), line.slice(idx + 1));
+      } else {
+        push("说明", line);
+      }
+    });
+  }
+
+  for (const item of lines) {
+    const line = document.createElement("div");
+    line.className = "alert-detail-line";
+    const label = document.createElement("span");
+    label.className = "alert-detail-label";
+    label.textContent = `${item.label}：`;
+    line.appendChild(label);
+    if (item.tone === "dd") {
+      const match = String(item.value).match(/^([0-9.]+%)(.*)$/);
+      if (match) {
+        const dd = document.createElement("span");
+        dd.className = "alert-dd";
+        dd.textContent = match[1];
+        line.appendChild(dd);
+        if (match[2]) {
+          line.append(match[2]);
+        }
+      } else {
+        const dd = document.createElement("span");
+        dd.className = "alert-dd";
+        dd.textContent = item.value;
+        line.appendChild(dd);
+      }
+    } else {
+      line.append(item.value);
+    }
+    wrap.appendChild(line);
+  }
+  container.appendChild(wrap);
+}
+
+function formatAlertFull(row) {
+  const payload = parseAlertDetail(row);
+  const category = row?.category || "";
+  const title = formatAlertTitle(row);
+  const level = ALERT_LEVEL_LABEL[row?.level] || row?.level || "-";
+  const lines = [
+    `级别：${level}`,
+    `类别：${ALERT_CATEGORY_LABEL[category] || category || "-"}`,
+    `事件：${title}`,
+  ];
+  const strategyLabel = {
+    etf_ma_rotate: "ETF 均线轮动",
+    stock_momentum_topk: "股票动量 TopK",
+    etf_momentum_topk: "ETF 动量 TopK",
+  };
+
+  if (
+    String(payload.kind || "").startsWith("drawdown") ||
+    category === "drawdown" ||
+    String(row?.title || "").includes("drawdown")
+  ) {
+    if (payload.strategy_id) {
+      lines.push(`策略：${strategyLabel[payload.strategy_id] || payload.strategy_id}`);
+    }
+    if (payload.account_id) {
+      lines.push(`账户：${payload.account_id}`);
+    }
+    if (payload.trade_date) {
+      lines.push(`成交日：${payload.trade_date}`);
+    }
+    if (payload.dd != null) {
+      const stop = row?.level === "critical" || String(payload.kind || "").endsWith("stop");
+      const threshold =
+        payload.threshold != null
+          ? pctText(payload.threshold)
+          : stop
+            ? "12.00%"
+            : "8.00%";
+      lines.push(
+        `回撤：${pctText(payload.dd)}（相对账户峰值；${stop ? "急停线" : "预警线"} ${threshold}）`,
+      );
+    }
+    if (payload.peak_asset != null) {
+      lines.push(`账户峰值：${moneyText(payload.peak_asset)}`);
+    }
+    if (payload.total_asset != null) {
+      lines.push(`当前总资产：${moneyText(payload.total_asset)}`);
+    }
+    if (payload.cash != null) {
+      lines.push(`现金：${moneyText(payload.cash)}`);
+    }
+    if (payload.market_value != null) {
+      lines.push(`持仓市值：${moneyText(payload.market_value)}`);
+    }
+    if (payload.initial_cash != null) {
+      lines.push(`本金：${moneyText(payload.initial_cash)}`);
+    }
+    if (payload.pnl_vs_peak != null) {
+      lines.push(`较峰值盈亏：${moneyText(payload.pnl_vs_peak)}`);
+    }
+    if (payload.pnl_vs_initial != null) {
+      lines.push(`较本金盈亏：${moneyText(payload.pnl_vs_initial)}`);
+    }
+    if (payload.action) {
+      lines.push(`处置：${payload.action}`);
+    } else if (payload.legacy_text) {
+      lines.push(`说明：${payload.legacy_text}`);
+    } else if (payload.dd != null) {
+      const stop = row?.level === "critical" || String(payload.kind || "").endsWith("stop");
+      lines.push(
+        stop
+          ? "处置：已触发急停，停止新开仓与继续模拟成交。"
+          : "处置：未达急停线，请关注回撤与仓位。",
+      );
+    }
+    return lines.join("\n");
+  }
+
+  if (category === "kill_switch" || String(row?.title || "").includes("kill switch")) {
+    let reason = payload.legacy_text || row?.detail || "操作员或风控触发";
+    if (/^dd\s*=/i.test(String(reason))) {
+      reason = "操作员或风控触发";
+    }
+    lines.push(`原因：${reason}`);
+    lines.push("影响：解除前不能准入/恢复模拟，也不能继续有效成交。");
+    return lines.join("\n");
+  }
+
+  if (category === "paper_trading" || String(row?.title || "").includes("paper trading")) {
+    let reason = payload.legacy_text || row?.detail || "settings";
+    if (reason === "settings") {
+      reason = "设置页开启模拟交易";
+    }
+    lines.push(`原因：${reason}`);
+    lines.push("说明：这是状态提示，不是故障。");
+    return lines.join("\n");
+  }
+
+  const detail = payload.legacy_text || row?.detail;
+  if (detail && !/^dd\s*=/i.test(String(detail))) {
+    lines.push(`说明：${detail}`);
+  } else {
+    lines.push("说明：无附加字段。");
+  }
+  return lines.join("\n");
+}
+
+function formatAlertDetail(row) {
+  return formatAlertSummary(row);
+}
+
+function alertNeedsConfirm(level) {
+  return level === "critical" || level === "high";
+}
+
+async function confirmCloseAlerts({ count, level, label }) {
+  const high = alertNeedsConfirm(level) || level === "mixed-high";
+  if (!high) {
+    return true;
+  }
+  const title = document.getElementById("confirm-title");
+  if (title) {
+    title.textContent = "关闭高等级告警";
+  }
+  const text =
+    count > 1
+      ? `即将关闭 ${count} 条告警（含重要/严重级${label ? `：${label}` : ""}）。确认继续？`
+      : `即将关闭 1 条高等级告警${label ? `（${label}）` : ""}。确认继续？`;
+  const ok = await confirmDialog(text);
+  if (title) {
+    title.textContent = "提示";
+  }
+  return ok;
+}
+
+async function closeAlertIds(ids, reason, { level = "info", label = "" } = {}) {
+  const alertIds = [...new Set((ids || []).filter(Boolean))];
+  if (!alertIds.length) {
+    showToast("没有可关闭的告警", "warn");
+    return false;
+  }
+  const confirmed = await confirmCloseAlerts({
+    count: alertIds.length,
+    level: alertIds.length > 1 && alertNeedsConfirm(level) ? "mixed-high" : level,
+    label,
+  });
+  if (!confirmed) {
+    return false;
+  }
+  if (alertIds.length === 1) {
+    await requestJson(`/api/alerts/${encodeURIComponent(alertIds[0])}/close`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason }),
+    });
+  } else {
+    await requestJson("/api/alerts/close-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ alert_ids: alertIds, reason }),
+    });
+  }
+  showToast(alertIds.length > 1 ? `已关闭 ${alertIds.length} 条告警` : "已关闭告警", "ok");
+  if (alertIds.includes(alertListState.expandedId)) {
+    alertListState.expandedId = "";
+  }
+  await refresh();
+  return true;
+}
+
+function renderOverviewAlerts(rows) {
+  const body = document.getElementById("overview-alert-body");
+  const meta = document.getElementById("overview-alert-meta");
+  if (!body) {
+    return;
+  }
+  body.innerHTML = "";
+  if (meta) {
+    meta.textContent = rows.length ? `开放 ${rows.length} 条 · 与上方计数同源` : "当前无开放告警";
+  }
+  if (!rows.length) {
+    alertListState.expandedId = "";
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 6;
+    td.className = "table-empty";
+    td.textContent = "没有开放告警。";
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+  const ids = new Set(rows.map((row) => String(row.alert_id || "")).filter(Boolean));
+  if (alertListState.expandedId && !ids.has(alertListState.expandedId)) {
+    alertListState.expandedId = "";
+  }
+  for (const row of rows) {
+    const alertId = String(row.alert_id || "");
+    const open = alertListState.expandedId === alertId;
+    const tr = document.createElement("tr");
+    tr.className = open ? "alert-row is-open" : "alert-row";
+    tr.dataset.alertId = alertId;
+    tr.dataset.alertLevel = row.level || "";
+    tr.dataset.alertTitle = formatAlertTitle(row);
+    tr.setAttribute("aria-expanded", open ? "true" : "false");
+    appendCell(tr, ALERT_LEVEL_LABEL[row.level] || row.level || "-", {
+      tone: row.level === "critical" ? "block" : row.level === "high" ? "warn" : "muted",
+    });
+    appendCell(tr, ALERT_CATEGORY_LABEL[row.category] || row.category || "-");
+    appendCell(tr, formatAlertTitle(row));
+    appendAlertSummaryCell(tr, row);
+    appendCell(tr, formatDateTime(row.created_at) || "-");
+    const td = document.createElement("td");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "secondary";
+    btn.dataset.closeAlert = alertId;
+    btn.textContent = "关闭";
+    td.appendChild(btn);
+    tr.appendChild(td);
+
+    const expandTr = document.createElement("tr");
+    expandTr.className = "alert-detail";
+    expandTr.hidden = !open;
+    const expandTd = document.createElement("td");
+    expandTd.colSpan = 6;
+    appendAlertFullDetail(expandTd, row);
+    expandTr.appendChild(expandTd);
+
+    body.appendChild(tr);
+    body.appendChild(expandTr);
+  }
+}
+
+function syncAlertRowExpansion() {
+  document.querySelectorAll("#overview-alert-body tr.alert-row").forEach((item) => {
+    const open = item.dataset.alertId === alertListState.expandedId;
+    item.classList.toggle("is-open", open);
+    item.setAttribute("aria-expanded", open ? "true" : "false");
+    const detail = item.nextElementSibling;
+    if (detail && detail.classList.contains("alert-detail")) {
+      detail.hidden = !open;
+    }
+  });
+}
+
+function renderAlertIntel(payload) {
+  const verdict = document.getElementById("alert-intel-verdict");
+  const meta = document.getElementById("alert-intel-meta");
+  const summary = document.getElementById("alert-intel-summary");
+  const body = document.getElementById("alert-intel-body");
+  const noiseBtn = document.getElementById("alert-close-noise");
+  const allBtn = document.getElementById("alert-close-all");
+  if (!body || !summary) {
+    return;
+  }
+  const groups = payload.groups || [];
+  const noiseIds = payload.noise_ids || [];
+  const openIds = groups.flatMap((group) => group.all_ids || []);
+  alertIntelState = { noise_ids: noiseIds, groups, open_ids: openIds };
+
+  if (verdict) {
+    verdict.textContent = payload.verdict || "暂无分析结果";
+  }
+  if (meta) {
+    meta.textContent = payload.analyzed_at
+      ? `实时汇总 · ${formatDateTime(payload.analyzed_at)}`
+      : "按实时开放告警汇总";
+  }
+
+  summary.innerHTML = "";
+  const cards = [
+    ["开放总数", String(payload.open_count ?? 0)],
+    ["有效关注", String(payload.signal_count ?? 0)],
+    ["重复/过期噪音", String(payload.noise_count ?? 0)],
+    ["状态提示", String(payload.state_count ?? 0)],
+    ["急停开关", payload.kill_engaged ? "开" : "关"],
+  ];
+  for (const [label, value] of cards) {
+    const item = document.createElement("div");
+    item.className = "kv-item";
+    const k = document.createElement("span");
+    const v = document.createElement("strong");
+    k.textContent = label;
+    v.textContent = value;
+    item.append(k, v);
+    summary.appendChild(item);
+  }
+
+  if (noiseBtn) {
+    noiseBtn.disabled = !noiseIds.length;
+    noiseBtn.textContent = noiseIds.length ? `一键关闭噪音（${noiseIds.length}）` : "一键关闭噪音";
+  }
+  if (allBtn) {
+    allBtn.disabled = !openIds.length;
+    allBtn.textContent = openIds.length ? `关闭全部开放（${openIds.length}）` : "关闭全部开放";
+  }
+
+  body.innerHTML = "";
+  if (!groups.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 6;
+    td.className = "table-empty";
+    td.textContent = "没有可汇总的开放告警。";
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+
+  for (const group of groups) {
+    const tr = document.createElement("tr");
+    const kindTone =
+      group.kind === "actionable" || group.kind === "dup"
+        ? group.level === "critical"
+          ? "block"
+          : "warn"
+        : group.kind === "stale"
+          ? "accent"
+          : "muted";
+    appendCell(tr, ALERT_KIND_LABEL[group.kind] || group.kind || "-", { tone: kindTone });
+    appendCell(tr, ALERT_LEVEL_LABEL[group.level] || group.level || "-", {
+      tone: group.level === "critical" ? "block" : group.level === "high" ? "warn" : "muted",
+    });
+    appendCell(
+      tr,
+      `${ALERT_CATEGORY_LABEL[group.category] || group.category || "-"} · ${ALERT_TITLE_LABEL[group.title] || group.title || "-"}`,
+    );
+    appendCell(tr, String(group.count ?? 0), { className: "num" });
+    appendCell(tr, group.advice || "-");
+    const td = document.createElement("td");
+    const wrap = document.createElement("div");
+    wrap.className = "alert-intel-actions";
+    if ((group.noise_ids || []).length) {
+      const noise = document.createElement("button");
+      noise.type = "button";
+      noise.className = "secondary";
+      noise.textContent = `关重复 ${group.noise_ids.length}`;
+      noise.addEventListener("click", async () => {
+        noise.disabled = true;
+        try {
+          const ok = await closeAlertIds(group.noise_ids, "close duplicate noise", {
+            level: group.level,
+            label: ALERT_TITLE_LABEL[group.title] || group.title,
+          });
+          if (!ok) {
+            noise.disabled = false;
+          }
+        } catch (error) {
+          showToast(error.message || "关闭失败", "warn");
+          noise.disabled = false;
+        }
+      });
+      wrap.appendChild(noise);
+    }
+    const closeGroup = document.createElement("button");
+    closeGroup.type = "button";
+    closeGroup.className = "secondary";
+    closeGroup.textContent = "关闭本组";
+    closeGroup.addEventListener("click", async () => {
+      closeGroup.disabled = true;
+      try {
+        const ok = await closeAlertIds(group.all_ids, "close alert group", {
+          level: group.level,
+          label: ALERT_TITLE_LABEL[group.title] || group.title,
+        });
+        if (!ok) {
+          closeGroup.disabled = false;
+        }
+      } catch (error) {
+        showToast(error.message || "关闭失败", "warn");
+        closeGroup.disabled = false;
+      }
+    });
+    wrap.appendChild(closeGroup);
+    td.appendChild(wrap);
+    tr.appendChild(td);
+    body.appendChild(tr);
+  }
+}
+
+async function loadOverviewAlerts() {
+  const [rows, analysis] = await Promise.all([
+    requestJson("/api/alerts?status=open&limit=100"),
+    requestJson("/api/alerts/analysis?limit=200"),
+  ]);
+  renderOverviewAlerts(rows);
+  renderAlertIntel(analysis);
+  return rows;
+}
+
+function focusOverviewAlerts() {
+  const panel = document.getElementById("overview-alerts");
+  if (!panel) {
+    return;
+  }
+  panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  panel.classList.add("panel-flash");
+  window.setTimeout(() => panel.classList.remove("panel-flash"), 1200);
+}
+
+document.getElementById("alert-close-noise")?.addEventListener("click", async () => {
+  const ids = alertIntelState.noise_ids || [];
+  const hasHigh = (alertIntelState.groups || []).some(
+    (group) => (group.noise_ids || []).length && alertNeedsConfirm(group.level),
+  );
+  try {
+    await closeAlertIds(ids, "one-click close noise", {
+      level: hasHigh ? "critical" : "info",
+      label: "重复/过期噪音",
+    });
+  } catch (error) {
+    showToast(error.message || "关闭失败", "warn");
+  }
+});
+
+document.getElementById("overview-alert-body")?.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-close-alert]");
+  if (button) {
+    const alertId = button.dataset.closeAlert || "";
+    const row = button.closest("tr.alert-row");
+    button.disabled = true;
+    try {
+      const ok = await closeAlertIds([alertId], "closed from overview", {
+        level: row?.dataset.alertLevel || "info",
+        label: row?.dataset.alertTitle || "",
+      });
+      if (!ok) {
+        button.disabled = false;
+      }
+    } catch (error) {
+      showToast(error.message || "关闭失败", "warn");
+      button.disabled = false;
+    }
+    return;
+  }
+  const row = event.target.closest("tr.alert-row");
+  if (!row) {
+    return;
+  }
+  const alertId = row.dataset.alertId || "";
+  alertListState.expandedId = alertListState.expandedId === alertId ? "" : alertId;
+  syncAlertRowExpansion();
+});
+
+document.getElementById("alert-close-all")?.addEventListener("click", async () => {
+  const ids = alertIntelState.open_ids || [];
+  const hasHigh = (alertIntelState.groups || []).some((group) => alertNeedsConfirm(group.level));
+  try {
+    await closeAlertIds(ids, "one-click close all open", {
+      level: hasHigh ? "critical" : "info",
+      label: "全部开放告警",
+    });
+  } catch (error) {
+    showToast(error.message || "关闭失败", "warn");
+  }
+});
+
 function showPage(page) {
   document.querySelectorAll(".page").forEach((section) => {
     section.classList.toggle("hidden", section.id !== `page-${page}`);
@@ -661,6 +1536,12 @@ function showPage(page) {
     link.classList.toggle("active", link.dataset.page === page);
   });
   setText("page-title", PAGE_TITLES[page]);
+  if (page === "overview") {
+    loadOverviewAlerts().catch(() => {});
+    if ((location.hash || "").includes("overview-alerts")) {
+      window.setTimeout(focusOverviewAlerts, 80);
+    }
+  }
   if (page === "data") {
     loadQualityIssues().catch((error) => {
       setText("quality-page-meta", `加载失败：${error.message}`);
@@ -725,12 +1606,16 @@ async function refresh() {
   setText("quality-hint", qualityHint);
   setText(
     "alert-hint",
-    Number(status.open_alerts) > 0 ? "有开放告警，先看阻断项再拉数" : "当前无开放告警",
+    Number(status.open_alerts) > 0 ? "点击查看下方告警列表" : "当前无开放告警",
   );
   document.querySelector(".metrics")?.classList.remove("is-loading");
   renderTasks(status.recent_tasks || []);
   renderSources(sources);
   renderPorts(ports);
+  await loadOverviewAlerts().catch(() => {});
+  if ((location.hash || "").includes("overview-alerts")) {
+    window.setTimeout(focusOverviewAlerts, 80);
+  }
   renderKv("data-summary", [
     ["交易日历行数", status.trade_calendar_rows],
     ["涨跌停/停牌行数", status.limit_suspension_rows],
@@ -1092,10 +1977,19 @@ function syncSchedulerHint(scheduler) {
   const deadline = scheduler.deadline || "18:00";
   const cron = scheduler.cron || "20:05";
   const tz = scheduler.timezone || "Asia/Shanghai";
+  const reconcile = scheduler.reconcile || {};
+  const reconcileWindow = reconcile.window || "19:15";
+  const reconcileNext = reconcile.next_at ? formatDateTime(reconcile.next_at, false) : "-";
+  const reconcileTimeout = reconcile.timeout_s ? `${reconcile.timeout_s}s` : "900s";
+  const cash = scheduler.cash_reconcile || {};
+  const cashWindow = cash.window || "19:45";
+  const cashNext = cash.next_at ? formatDateTime(cash.next_at, false) : "-";
   return (
     `人工点「追加行情」立即异步执行（盘前手工通常只盖到昨日 K）。` +
     `每个交易日 ${window} 起等主源确认当日 K 再质检，${deadline} 起强制重试直到成功（${tz}）；` +
-    `上午手工成功不会取消傍晚自动。进程外 cron 兜底 ${cron}。下次进程内 ${next}。`
+    `上午手工成功不会取消傍晚自动。跨源对账 ${reconcileWindow}（优先 Tushare，超时 ${reconcileTimeout}，下次 ${reconcileNext}）；` +
+    `财务对账 ${cashWindow}（下次 ${cashNext}）。` +
+    `进程外 cron 兜底 ${cron}。下次进程内同步 ${next}。`
   );
 }
 
@@ -1391,11 +2285,13 @@ function applySidebar(collapsed) {
 }
 
 function applyTasks(collapsed) {
+  document.querySelector(".overview-alerts-row")?.classList.toggle("tasks-collapsed", collapsed);
   document.querySelector(".overview-workbench")?.classList.toggle("tasks-collapsed", collapsed);
   localStorage.setItem("asqt-tasks", collapsed ? "1" : "0");
   const btn = document.getElementById("tasks-toggle");
   if (btn) {
     btn.textContent = collapsed ? "⟨" : "⟩";
+    btn.setAttribute("aria-label", collapsed ? "展开任务" : "收起任务");
   }
 }
 
@@ -1404,7 +2300,8 @@ document.getElementById("sidebar-toggle").addEventListener("click", () => {
 });
 
 document.getElementById("tasks-toggle").addEventListener("click", () => {
-  applyTasks(!document.querySelector(".overview-workbench")?.classList.contains("tasks-collapsed"));
+  const row = document.querySelector(".overview-alerts-row") || document.querySelector(".overview-workbench");
+  applyTasks(!row?.classList.contains("tasks-collapsed"));
 });
 
 const TRADE_PAGE_SIZE = 10;
@@ -2034,9 +2931,10 @@ function paperProgressText(row) {
 function finishPaperWatch(row) {
   const detail = row.detail || {};
   const ok = row.status === "success" && detail.ok !== false;
+  const partial = row.status === "partial";
   const message = paperProgressText(row);
   setText("paper-account-hint", message);
-  showToast(ok ? "模拟已跑完" : message || "模拟未完整", ok ? "ok" : "block");
+  showToast(ok ? "模拟已跑完" : message || "模拟未完整", ok ? "ok" : partial ? "warn" : "block");
   loadOrders().catch(() => {});
 }
 
@@ -2057,7 +2955,7 @@ function watchPaperRun(runId) {
           const pct = row.progress_pct == null ? "" : ` ${row.progress_pct}%`;
           runBtn.textContent = row.status === "queued" ? "排队中…" : `运行中…${pct}`;
         }
-        if (row.status === "success" || row.status === "failed") {
+        if (row.status === "success" || row.status === "failed" || row.status === "partial") {
           window.clearInterval(paperRunTimer);
           paperRunTimer = 0;
           watchedPaperRunId = "";
@@ -2164,21 +3062,69 @@ if (paperResetBtn) {
 
 const killSwitchForm = document.getElementById("kill-switch-form");
 if (killSwitchForm) {
+  const killReason = document.getElementById("kill-reason");
+  const killReasonError = document.getElementById("kill-reason-error");
+  const KILL_REASON_HINT = "请填写原因（不能全是空格）";
+
+  function showKillReasonError(message) {
+    if (killReasonError) {
+      killReasonError.hidden = !message;
+      killReasonError.textContent = message || "";
+    }
+    if (killReason) {
+      killReason.setCustomValidity(message || "");
+      killReason.classList.toggle("is-invalid", Boolean(message));
+    }
+  }
+
+  function validateKillReason() {
+    const value = (killReason?.value || "").trim();
+    if (!value) {
+      showKillReasonError(KILL_REASON_HINT);
+      return false;
+    }
+    showKillReasonError("");
+    return true;
+  }
+
+  killReason?.addEventListener("input", () => {
+    if (killReasonError && !killReasonError.hidden) {
+      validateKillReason();
+    } else if (killReason) {
+      killReason.setCustomValidity("");
+      killReason.classList.remove("is-invalid");
+    }
+  });
+
   killSwitchForm.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (!validateKillReason()) {
+      killReason?.focus();
+      killReason?.reportValidity();
+      return;
+    }
     try {
       const payload = await requestJson("/api/ops/kill-switch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           engaged: document.getElementById("kill-engaged").value === "on",
-          reason: document.getElementById("kill-reason").value.trim(),
+          reason: killReason.value.trim(),
         }),
       });
+      showKillReasonError("");
+      killReason.value = "";
       showToast(payload.engaged ? "急停已开" : "急停已关", payload.engaged ? "block" : "ok");
       await loadOrders();
     } catch (error) {
-      showToast(error.message || "急停失败", "block");
+      const message = error.message || "急停失败";
+      if (/reason|原因/i.test(message)) {
+        showKillReasonError(KILL_REASON_HINT);
+        killReason?.focus();
+        killReason?.reportValidity();
+        return;
+      }
+      showToast(message, "block");
     }
   });
 }
@@ -2462,7 +3408,12 @@ function renderPaperReconcile(reconcile) {
   const mismatches = reconcile.qty_mismatches || [];
   const hasData = Boolean(checks.length);
   if (status) {
-    status.textContent = !hasData ? "尚无对账" : reconcile.ok ? "对账通过" : "对账不一致";
+    const asof = reconcile.asof ? ` · 截至 ${reconcile.asof}` : "";
+    status.textContent = !hasData
+      ? "尚无对账"
+      : reconcile.ok
+        ? `对账通过${asof}`
+        : `对账不一致${asof}`;
     status.className = !hasData ? "" : reconcile.ok ? "ok" : "warn";
   }
   if (hint) {
@@ -2472,13 +3423,17 @@ function renderPaperReconcile(reconcile) {
   if (summary) {
     summary.innerHTML = "";
     const cards = [
+      ["对账日", reconcile.asof || "-"],
       ["本金", formatMoney(reconcile.initial_cash)],
+      ["账户峰值", formatMoney(reconcile.peak_asset)],
       ["买入额 / 量", `${formatMoney(reconcile.buy_notional)} / ${reconcile.buy_qty ?? 0}`],
       ["卖出额 / 量", `${formatMoney(reconcile.sell_notional)} / ${reconcile.sell_qty ?? 0}`],
       ["费用", formatMoney(reconcile.fees)],
       ["成交推算现金", formatMoney(reconcile.expected_cash)],
       ["账本现金", formatMoney(reconcile.actual_cash)],
       ["现金差额", formatMoney(reconcile.cash_diff), pnlClass(reconcile.cash_diff)],
+      ["持仓市值", formatMoney(reconcile.market_value)],
+      ["当前总资产", formatMoney(reconcile.end_asset)],
     ];
     for (const [label, value, className] of cards) {
       const item = document.createElement("div");

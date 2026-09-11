@@ -328,11 +328,31 @@ class PaperLedger:
                 round(market_value, 4),
                 total,
                 json.dumps(detail, ensure_ascii=False),
-                None,
+                json.dumps(
+                    {
+                        "asof": trade_date,
+                        "cash": cash,
+                        "market_value": round(market_value, 4),
+                        "total_asset": total,
+                        "peak_asset": peak,
+                        "initial_cash": float(detail.get("initial_cash") or 0),
+                    },
+                    ensure_ascii=False,
+                ),
             ),
             settings=self.settings,
         )
-        maybe_drawdown_halt(peak=peak, total_asset=total, settings=self.settings)
+        maybe_drawdown_halt(
+            peak=peak,
+            total_asset=total,
+            cash=cash,
+            market_value=round(market_value, 4),
+            initial_cash=float(detail.get("initial_cash") or 0),
+            account_id=self.account_id,
+            strategy_id=self.strategy_id,
+            trade_date=trade_date,
+            settings=self.settings,
+        )
         return {"cash": cash, "market_value": round(market_value, 4), "total_asset": total, "peak_asset": peak}
 
 
@@ -686,6 +706,7 @@ def run_paper_days(
     days: int = 20,
     settings: Settings | None = None,
     progress: Any | None = None,
+    record_task: bool = True,
 ) -> dict[str, Any]:
     settings = ensure_runtime_dirs(settings or get_settings())
     initialize_database(settings)
@@ -695,6 +716,7 @@ def run_paper_days(
             days=days,
             settings=settings,
             progress=progress,
+            record_task=record_task,
         )
 
 
@@ -704,6 +726,7 @@ def _run_paper_days_locked(
     days: int,
     settings: Settings,
     progress: Any | None = None,
+    record_task: bool = True,
 ) -> dict[str, Any]:
     ids = list(STRATEGY_SPECS) if strategy_id == "all" else [strategy_id]
     rows = read_market_daily(settings=settings)
@@ -831,28 +854,29 @@ def _run_paper_days_locked(
         "incomplete_reasons": reasons,
         "detail": detail,
     }
-    execute(
-        """
-        INSERT INTO task_run (run_id, task_name, status, started_at, finished_at, message)
-        VALUES (?, 'paper-run', ?, ?, ?, ?)
-        """,
-        (
-            str(uuid4()),
-            "success" if summary["ok"] else "failed",
-            started,
-            _now(),
-            json.dumps(
-                {
-                    "days": days,
-                    "window": summary["window"],
-                    "incomplete_reasons": reasons,
-                    "detail": detail,
-                },
-                ensure_ascii=False,
+    if record_task:
+        execute(
+            """
+            INSERT INTO task_run (run_id, task_name, status, started_at, finished_at, message)
+            VALUES (?, 'paper-run', ?, ?, ?, ?)
+            """,
+            (
+                str(uuid4()),
+                "success" if summary["ok"] else "partial" if reasons else "failed",
+                started,
+                _now(),
+                json.dumps(
+                    {
+                        "days": days,
+                        "window": summary["window"],
+                        "incomplete_reasons": reasons,
+                        "detail": detail,
+                    },
+                    ensure_ascii=False,
+                ),
             ),
-        ),
-        settings=settings,
-    )
+            settings=settings,
+        )
     return summary
 
 
@@ -1417,6 +1441,7 @@ def paper_cash_reconcile(
     ok = all(row["ok"] for row in checks) and not qty_mismatches
     return {
         "ok": ok,
+        "asof": summary.get("window_end"),
         "initial_cash": initial,
         "buy_notional": round(buy_notional, 4),
         "sell_notional": round(sell_notional, 4),
@@ -1426,9 +1451,12 @@ def paper_cash_reconcile(
         "expected_cash": expected_cash,
         "actual_cash": actual_cash,
         "cash_diff": round(actual_cash - expected_cash, 4),
+        "market_value": actual_mv,
+        "end_asset": actual_asset,
+        "peak_asset": round(float(summary.get("peak_asset") or state.get("peak_asset") or initial), 4),
         "checks": checks,
         "qty_mismatches": qty_mismatches,
-        "formula": "期末现金 = 本金 − 买入额 + 卖出额 − 费用；持仓数量 = 买入数量 − 卖出数量",
+        "formula": "期末现金 = 本金 − 买入额 + 卖出额 − 费用；持仓数量 = 买入数量 − 卖出数量；总资产 = 现金 + 持仓市值",
     }
 
 

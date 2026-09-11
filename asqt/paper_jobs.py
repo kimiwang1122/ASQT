@@ -152,15 +152,28 @@ def _execute(run_id: str, strategy_id: str, days: int, settings: Settings) -> No
             days=days,
             settings=settings,
             progress=progress,
+            record_task=False,
         )
+        if summary.get("ok"):
+            finish_status = "success"
+            fail_reason = None
+            label = "模拟完成"
+        elif summary.get("incomplete_reasons"):
+            finish_status = "partial"
+            fail_reason = summary.get("detail") or "模拟未完整"
+            label = "模拟未完整"
+        else:
+            finish_status = "failed"
+            fail_reason = summary.get("detail") or "模拟失败"
+            label = "模拟失败"
         _finish(
             run_id,
-            status="success" if summary.get("ok") else "failed",
+            status=finish_status,
             detail=summary,
-            fail_reason=None if summary.get("ok") else (summary.get("detail") or "模拟未完整"),
+            fail_reason=fail_reason,
             settings=settings,
             progress_pct=100,
-            progress_label="模拟完成" if summary.get("ok") else "模拟未完整",
+            progress_label=label,
         )
     except PaperBusy as exc:
         _finish(run_id, status="failed", fail_reason=str(exc), settings=settings)

@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from hashlib import sha1
 import inspect
 import json
+import os
 from uuid import uuid4
 
 from asqt.config import Settings, get_settings
@@ -251,6 +252,54 @@ def build_adapter(source: str):
     raise ValueError(f"unknown data source: {source}")
 
 
+def tushare_peer_available() -> bool:
+    try:
+        from asqt.adapters.tushare_source import resolve_tushare_token
+
+        resolve_tushare_token()
+        return True
+    except Exception:
+        return False
+
+
+def choose_auto_peer(stored_sources: set[str]) -> str:
+    """Pick a second vendor. Prefer Tushare when token exists; avoid relying on AkShare first."""
+    sources = {str(item or "").strip() for item in stored_sources if str(item or "").strip()}
+    has_tushare = tushare_peer_available()
+    if has_tushare:
+        return "tushare"
+    if sources == {"baostock"}:
+        return "akshare"
+    if sources == {"akshare"}:
+        return "baostock"
+    if "baostock" in sources:
+        return "akshare"
+    return "baostock"
+
+
+def _fetch_peer_rows(adapter, symbols: list[str], start: str, end: str, *, timeout_s: float) -> list:
+    """Run vendor fetch with a hard timeout so one hung peer cannot block the job forever."""
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FuturesTimeout
+
+    timeout_s = max(30.0, float(timeout_s))
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="asqt-reconcile-peer") as pool:
+        future = pool.submit(adapter.fetch_market_daily, symbols, start, end)
+        try:
+            return future.result(timeout=timeout_s)
+        except FuturesTimeout as exc:
+            source_id = getattr(adapter, "source_id", "peer")
+            errors = getattr(adapter, "last_errors", None)
+            if isinstance(errors, list):
+                errors.append(
+                    {
+                        "symbol": "*",
+                        "error": f"peer {source_id} timed out after {int(timeout_s)}s",
+                    }
+                )
+            raise TimeoutError(f"peer {source_id} timed out after {int(timeout_s)}s") from exc
+
+
 def check_market_daily(*, settings: Settings | None = None, expected_symbols: list[str] | None = None) -> dict:
     settings = settings or get_settings()
     initialize_database(settings)
@@ -329,12 +378,20 @@ def reconcile_daily(
     settings: Settings | None = None,
     peer_source: str = "auto",
     peer_adapter=None,
+    record_task: bool = True,
+    notify: bool = False,
+    peer_timeout_s: float | None = None,
 ) -> dict:
     """Authenticate stored bars against a second vendor. Does not rewrite parquet."""
     from asqt.reconcile import compare_market_daily, scan_silent_factor_jumps
 
     settings = settings or get_settings()
     initialize_database(settings)
+    timeout_s = float(
+        peer_timeout_s
+        if peer_timeout_s is not None
+        else os.environ.get("ASQT_RECONCILE_PEER_TIMEOUT_S", "600")
+    )
     stored = [
         row
         for row in read_market_daily(settings=settings)
@@ -351,7 +408,7 @@ def reconcile_daily(
             by_symbol.setdefault(row["symbol"], set()).add(str(row.get("source") or ""))
         for symbol in symbols:
             sources = by_symbol.get(symbol, set())
-            peer = "akshare" if sources == {"baostock"} else "baostock"
+            peer = choose_auto_peer(sources)
             groups.setdefault(peer, []).append(symbol)
 
     peer_rows: list[dict] = []
@@ -362,8 +419,14 @@ def reconcile_daily(
     for source_id, group in groups.items():
         adapter = peer_adapter or build_adapter(source_id)
         _upsert_source(adapter, settings)
-        raw_rows = adapter.fetch_market_daily(group, start, end)
-        peer_errors.extend(getattr(adapter, "last_errors", []) or [])
+        try:
+            raw_rows = _fetch_peer_rows(adapter, group, start, end, timeout_s=timeout_s)
+        except TimeoutError as exc:
+            peer_errors.append({"symbol": "*", "error": str(exc)[:300]})
+            peer_errors.extend(getattr(adapter, "last_errors", []) or [])
+            raw_rows = []
+        else:
+            peer_errors.extend(getattr(adapter, "last_errors", []) or [])
         joined = "-".join(group)
         stem = f"reconcile_{start}_{end}_{source_id}"
         if len(joined) <= 40:
@@ -396,37 +459,57 @@ def reconcile_daily(
             "matched_rows": comparison["matched_rows"],
             "match_rate": comparison["match_rate"],
             "mismatch_count": comparison["mismatch_count"],
+            "adj_baseline_count": comparison.get("adj_baseline_count") or 0,
         },
         "silent_factor_jumps": {
             "consistent_count": silent["consistent_count"],
             "inconsistent_count": silent["inconsistent_count"],
         },
         "mismatches": comparison["mismatches"][:200],
+        "adj_baselines": (comparison.get("adj_baselines") or [])[:200],
         "inconsistent_review": silent["inconsistent_review"][:200],
         "consistent_ex_right_sample": silent["consistent_ex_right"][:50],
     }
     persist_reconcile_result(report, comparison["mismatches"], silent["inconsistent_review"], settings=settings)
-    execute(
-        """
-        INSERT INTO task_run (run_id, task_name, status, started_at, finished_at, message)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (
-            str(uuid4()),
-            "reconcile_daily",
-            "success" if not comparison["mismatches"] and not silent["inconsistent_review"] else "review",
-            started,
-            datetime.now(timezone.utc).isoformat(),
-            f"matched={comparison['matched_rows']} mismatch={comparison['mismatch_count']} silent_inconsistent={silent['inconsistent_count']}",
-        ),
-        settings=settings,
-    )
+    if record_task:
+        mismatch = int(comparison["mismatch_count"] or 0)
+        inconsistent = int(silent["inconsistent_count"] or 0)
+        peer_error_count = len(peer_errors)
+        baseline = int(comparison.get("adj_baseline_count") or 0)
+        status = "success" if mismatch == 0 and inconsistent == 0 and peer_error_count == 0 else "partial"
+        match_rate = comparison.get("match_rate")
+        rate_text = f"{float(match_rate) * 100:.2f}%" if match_rate is not None else "-"
+        baseline_note = f"; 因子基准已对齐 {baseline} 标的" if baseline else ""
+        execute(
+            """
+            INSERT INTO task_run (run_id, task_name, status, started_at, finished_at, message)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid4()),
+                "reconcile-daily",
+                status,
+                started,
+                datetime.now(timezone.utc).isoformat(),
+                (
+                    f"{start}~{end}; "
+                    f"匹配 {comparison['matched_rows']}/{comparison['stored_rows']} ({rate_text}); "
+                    f"差异 {mismatch}; 静默跳变异常 {inconsistent}; peer错误 {peer_error_count}"
+                    f"{baseline_note}"
+                ),
+            ),
+            settings=settings,
+        )
     logs = settings.logs_dir
     logs.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     report_path = logs / f"reconcile_{stamp}.json"
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     report["report_path"] = str(report_path)
+    if notify:
+        from asqt.reconcile_jobs import _notify_reconcile
+
+        _notify_reconcile({**report, "trigger": "manual"}, settings=settings)
     return report
 
 

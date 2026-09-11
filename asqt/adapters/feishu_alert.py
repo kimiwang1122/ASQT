@@ -16,14 +16,6 @@ DEFAULT_FEISHU_WEBHOOK = (
     "https://open.feishu.cn/open-apis/bot/v2/hook/2bfb3ba6-f779-4331-a8d9-f3bc06354176"
 )
 FEISHU_LEVELS = {"high", "critical"}
-CATEGORY_LABEL = {
-    "kill_switch": "急停",
-    "drawdown": "回撤",
-    "paper_trading": "模拟交易开关",
-    "paper_daily": "日终模拟",
-    "ops": "运营",
-    "quality": "质量",
-}
 
 
 def feishu_webhook_url() -> str | None:
@@ -36,15 +28,9 @@ def feishu_webhook_url() -> str | None:
 
 
 def format_feishu_text(row: dict[str, Any]) -> str:
-    level = str(row.get("level") or "")
-    category = str(row.get("category") or "")
-    label = CATEGORY_LABEL.get(category, category or "-")
-    title = str(row.get("title") or "").strip() or "告警"
-    detail = str(row.get("detail") or "").strip()
-    lines = [f"【ASQT告警】{level} · {label}", title]
-    if detail:
-        lines.append(detail)
-    return "\n".join(lines)
+    from asqt.alert_format import format_feishu_text as shared_format
+
+    return shared_format(row)
 
 
 def should_push_feishu(row: dict[str, Any]) -> bool:

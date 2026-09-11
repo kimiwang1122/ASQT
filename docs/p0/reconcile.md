@@ -34,24 +34,20 @@ Token 只放环境变量 `TUSHARE_TOKEN` 或 `data/.tushare_token`，不要写�
 
 报告：`data/logs/reconcile_*.json`；差异写入 `quality_issue.dataset=market_daily_reconcile`（`warn`，不改 `check-quality` 的交易阻断）。
 
+复权因子：对照源与主源常有恒定基准差。对账时按标的用 `median(stored/peer)` 对齐后再比；对齐后落入阈值的不记差异，报告里记 `adj_baselines`（因子基准已对齐）。收盘价仍按未复权直接比。不改写 parquet。
+
 ## cron 示例
 
-日 K 追加 + 质检 + 滚动对账（交易日 16:30）：
+日 K 追加 + 质检（交易日 16:30 进程内；20:05 cron 兜底）：
 
 ```cron
-30 16 * * 1-5 cd /Users/kimi/Documents/ChatGPT/ASQT && .venv/bin/asqt sync-daily >> data/logs/sync-daily.cron.log 2>&1
+5 20 * * 1-5 /path/to/ASQT/scripts/asqt-cron-fallback.sh >> /path/to/ASQT/data/logs/cron-fallback.log 2>&1
 ```
 
-只追加行情（已有 parquet，从最大交易日重叠 1 天拉到今天）：
-
-```bash
-.venv/bin/asqt pull-daily --universe --append
-```
-
-跨源鉴定（每周日 02:00）：
+跨源对账（交易日 **19:15**，与同步/20:05 错开；进程内 `ASQT_RECONCILE_AUTO=1` 也会跑；`auto` peer 优先 Tushare）：
 
 ```cron
-0 2 * * 0 cd /Users/kimi/Documents/ChatGPT/ASQT && .venv/bin/asqt reconcile --universe --lookback-days 14 --peer auto >> data/logs/reconcile.cron.log 2>&1
+15 19 * * 1-5 /path/to/ASQT/.venv/bin/asqt reconcile --universe --lookback-days 14 --peer auto >> /path/to/ASQT/data/logs/reconcile.cron.log 2>&1
 ```
 
-机器上的路径按部署目录修改。P3 调度器接入前，用系统 cron 即可。`sync-daily` 在本地还没有日 K 时会跳过，需先跑一次带 `--start/--end` 的历史 `pull-daily`。
+超时：`ASQT_RECONCILE_TIMEOUT_S`（整任务，默认 900）与 `ASQT_RECONCILE_PEER_TIMEOUT_S`（单 peer 拉取，默认 600）；超时记失败任务并飞书「跨源对账失败」。
