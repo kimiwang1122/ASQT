@@ -154,6 +154,18 @@ def cmd_cash_reconcile() -> None:
     print(json.dumps(_jsonable(result), ensure_ascii=False, indent=2))
 
 
+def cmd_tune(strategy: str, grid_json: str | None) -> None:
+    from asqt.tune import run_tune
+
+    grid = None
+    if grid_json:
+        grid = json.loads(grid_json)
+        if not isinstance(grid, list):
+            raise SystemExit("--grid must be a JSON array of param objects")
+    result = run_tune(strategy, grid=grid, settings=get_settings())
+    print(json.dumps(_jsonable(result), ensure_ascii=False, indent=2))
+
+
 def cmd_paper_reset(strategy: str) -> None:
     from asqt.paper import reset_paper_account
 
@@ -227,6 +239,13 @@ def main() -> None:
         "--strategy",
         default="all",
         choices=("all", *STRATEGY_SPECS.keys()),
+    )
+    tune = subparsers.add_parser("tune", help="IS grid search → OOS report; does not mutate paper params")
+    tune.add_argument("--strategy", required=True, choices=tuple(STRATEGY_SPECS.keys()))
+    tune.add_argument(
+        "--grid",
+        default=None,
+        help='JSON array of param objects, e.g. \'[{"lookback":20,"top_k":5}]\'',
     )
     admit = subparsers.add_parser("paper-admit")
     admit.add_argument("--strategy", default="all", choices=("all", *STRATEGY_SPECS.keys()))
@@ -303,6 +322,8 @@ def main() -> None:
         cmd_reconcile(symbols, start, end, args.peer)
     elif args.command == "research-backtest":
         cmd_research_backtest(args.strategy)
+    elif args.command == "tune":
+        cmd_tune(args.strategy, args.grid)
     elif args.command == "paper-admit":
         cmd_paper_admit(args.strategy, args.reason)
     elif args.command == "paper-run":

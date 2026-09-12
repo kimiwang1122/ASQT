@@ -99,6 +99,8 @@
 | R1 | `etf_ma_rotate`（规则，ETF 20 日均线） | 完成 | 回测报告 + 实验 JSON | — |
 | R2 | `stock_momentum_topk`（TopK=5，20 日动量） | 完成 | 同上 | — |
 | R2b | `etf_momentum_topk`（TopK=3，40 日动量） | 完成 | 第三套规则策略；新 `parameter_set_id` | 已 paper 参数组不可改 |
+| R10 | 量价因子库 + 低波动量 / 均线动量过滤 | 完成 | `asqt/factors.py`；`stock_lowvol_momentum`、`etf_ma_momentum_filter` | 仅日 K；无财务因子 |
+| R11 | IS 网格调参 CLI | 完成 | `asqt tune`；报告 `data/experiment/tune_*.json` | 不自动改 paper；walk-forward 暂缓 |
 | R3 | 同策略 + 同 `data_version` 可复现 | 完成 | P2 测试 | — |
 | R4 | IS/OOS 时间切开，无未来函数 | 完成 | `asof` 只看 `trade_date <= asof` | — |
 | R5 | 质量 `block` → 策略 `failed` | 完成 | P2 测试 | — |
@@ -156,7 +158,7 @@
 2. **日终闭环**：交易日同步成功后会自动 `paper-daily`；空账本不会自动回放长窗口，需先手工「跑模拟」。进程外兜底见 `scripts/crontab.example`（跨源 19:15、财务对账 19:45、同步兜底 20:05）。  
 3. **财务对账**：`asqt cash-reconcile` / 进程内 `ASQT_CASH_RECONCILE_AUTO`；无账本记「跳过」；有账本才验现金/持仓。  
 4. **跨源对账**：因子恒定基准差已对齐后再比；真残差仍 warn。方案 2（入库统一权威因子）暂不做。  
-5. **第三套策略**：`etf_momentum_topk` 需回测 → paper → 单独跑模拟；勿改已 paper 参数组。  
+5. **研究扩展**：新策略先 `research-backtest` → 生命周期 paper → 跑模拟；改参用 `asqt tune` 出报告后**手写**新 `parameter_set_id`，勿改已 paper 组。walk-forward / 基本面因子暂缓。  
 6. **Q1**：付费数据源仍暂缓。
 
 修订：2026-09-11

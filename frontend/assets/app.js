@@ -886,6 +886,8 @@ function appendAlertFullDetail(container, row) {
     etf_ma_rotate: "ETF 均线轮动",
     stock_momentum_topk: "股票动量 TopK",
     etf_momentum_topk: "ETF 动量 TopK",
+    stock_lowvol_momentum: "股票低波动量",
+    etf_ma_momentum_filter: "ETF 均线动量过滤",
   };
   const isDrawdown =
     String(payload.kind || "").startsWith("drawdown") ||
@@ -1085,6 +1087,8 @@ function formatAlertFull(row) {
     etf_ma_rotate: "ETF 均线轮动",
     stock_momentum_topk: "股票动量 TopK",
     etf_momentum_topk: "ETF 动量 TopK",
+    stock_lowvol_momentum: "股票低波动量",
+    etf_ma_momentum_filter: "ETF 均线动量过滤",
   };
 
   if (
@@ -2390,6 +2394,8 @@ const STRATEGY_LABEL = {
   etf_ma_rotate: "ETF 均线轮动",
   stock_momentum_topk: "股票动量 TopK",
   etf_momentum_topk: "ETF 动量 TopK",
+  stock_lowvol_momentum: "股票低波动量",
+  etf_ma_momentum_filter: "ETF 均线动量过滤",
 };
 
 const PARAM_LABEL = {
@@ -2398,6 +2404,9 @@ const PARAM_LABEL = {
   max_weight: "单票上限",
   gross_limit: "总仓上限",
   window: "均线窗口",
+  vol_window: "波动窗口",
+  ma_window: "均线窗口",
+  mom_lookback: "动量回看",
 };
 
 const PARAM_PCT_KEYS = new Set(["max_weight", "gross_limit"]);
@@ -2407,6 +2416,8 @@ const STRATEGY_PARAMS = {
   etf_ma_rotate: { window: 20, max_weight: 0.2, gross_limit: 0.95 },
   stock_momentum_topk: { lookback: 20, top_k: 5, max_weight: 0.1, gross_limit: 0.95 },
   etf_momentum_topk: { lookback: 40, top_k: 3, max_weight: 0.2, gross_limit: 0.95 },
+  stock_lowvol_momentum: { lookback: 20, vol_window: 20, top_k: 5, max_weight: 0.1, gross_limit: 0.95 },
+  etf_ma_momentum_filter: { ma_window: 20, mom_lookback: 40, top_k: 3, max_weight: 0.2, gross_limit: 0.95 },
 };
 
 function formatParamValue(key, value) {

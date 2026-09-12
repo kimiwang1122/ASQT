@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ASQT 控制台</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=p3-ui47" />
+    <link rel="stylesheet" href="/assets/styles.css?v=p3-ui48" />
   </head>
   <body>
     <div class="shell">
@@ -390,7 +390,7 @@
               <h2>策略版本</h2>
               <span>生命周期 · 仅 paper 可下单</span>
             </div>
-            <p class="hint">草稿 / 回测 / 候选不能写可下单目标仓。准入模拟后才生成目标仓并由 PaperBroker 撮合。改参必须新版本，禁止改已 paper 的参数组。第三套规则策略：`etf_momentum_topk`（40 日动量 Top3）；样本沿用完整日 K（约 2023 起）。</p>
+            <p class="hint">草稿 / 回测 / 候选不能写可下单目标仓。准入模拟后才生成目标仓并由 PaperBroker 撮合。改参必须新版本，禁止改已 paper 的参数组。另有 `stock_lowvol_momentum`（动量/波动）、`etf_ma_momentum_filter`（均线过滤+动量）；调参用 CLI `asqt tune`，禁止改已 paper 参数组。样本沿用完整日 K（约 2023 起）。</p>
             <p class="hint" id="strategy-gate-hint" hidden></p>
             <form class="filters filters-inline" id="strategy-run-form">
               <label class="filter-inline">
@@ -400,6 +400,8 @@
                   <option value="etf_ma_rotate">ETF 均线轮动</option>
                   <option value="stock_momentum_topk">股票动量 TopK</option>
                   <option value="etf_momentum_topk">ETF 动量 TopK</option>
+                  <option value="stock_lowvol_momentum">股票低波动量</option>
+                  <option value="etf_ma_momentum_filter">ETF 均线动量过滤</option>
                 </select>
               </label>
               <label class="filter-action">
@@ -414,6 +416,8 @@
                   <option value="etf_ma_rotate">ETF 均线轮动</option>
                   <option value="stock_momentum_topk">股票动量 TopK</option>
                   <option value="etf_momentum_topk">ETF 动量 TopK</option>
+                  <option value="stock_lowvol_momentum">股票低波动量</option>
+                  <option value="etf_ma_momentum_filter">ETF 均线动量过滤</option>
                 </select>
               </label>
               <label class="filter-inline">
@@ -489,6 +493,8 @@
                   <option value="etf_ma_rotate">ETF 均线轮动</option>
                   <option value="stock_momentum_topk">股票动量 TopK</option>
                   <option value="etf_momentum_topk">ETF 动量 TopK</option>
+                  <option value="stock_lowvol_momentum">股票低波动量</option>
+                  <option value="etf_ma_momentum_filter">ETF 均线动量过滤</option>
                 </select>
               </label>
               <label class="filter-inline">
@@ -756,6 +762,8 @@
                   <option value="etf_ma_rotate">ETF 均线轮动</option>
                   <option value="stock_momentum_topk">股票动量 TopK</option>
                   <option value="etf_momentum_topk">ETF 动量 TopK</option>
+                  <option value="stock_lowvol_momentum">股票低波动量</option>
+                  <option value="etf_ma_momentum_filter">ETF 均线动量过滤</option>
                 </select>
               </label>
               <label class="filter-action">
@@ -871,6 +879,6 @@
         </div>
       </div>
     </div>
-    <script src="/assets/app.js?v=p3-ui47"></script>
+    <script src="/assets/app.js?v=p3-ui48"></script>
   </body>
 </html>

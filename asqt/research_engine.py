@@ -302,6 +302,7 @@ class LocalResearchEngine:
         factor_payload: list[dict[str, Any]] = []
 
         by_date_symbol = {(str(row["trade_date"]), str(row["symbol"])): row for row in rows}
+        params = dict(spec["params"])
         for index, signal_date in enumerate(dates[:-1]):
             fill_date = dates[index + 1]
             weights = weights_for(
@@ -309,6 +310,7 @@ class LocalResearchEngine:
                 rows,
                 signal_date,
                 limits=limits,
+                params=params,
                 market_by_symbol=grouped,
                 suspended=halted,
             )
@@ -319,6 +321,7 @@ class LocalResearchEngine:
                     rows,
                     signal_date,
                     source_run_id=run_id,
+                    params=params,
                     market_by_symbol=grouped,
                 )
             )

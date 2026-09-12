@@ -22,6 +22,8 @@ STRATEGY_LABEL = {
     "etf_ma_rotate": "ETF 均线轮动",
     "stock_momentum_topk": "股票动量 TopK",
     "etf_momentum_topk": "ETF 动量 TopK",
+    "stock_lowvol_momentum": "股票低波动量",
+    "etf_ma_momentum_filter": "ETF 均线动量过滤",
 }
 
 
