@@ -91,7 +91,9 @@ def _json_num(value):
 
 def read_market_snapshot(
     *,
+    asof: str | None = None,
     trade_date: str | None = None,
+    data_version: str | None = None,
     exchange: str | None = None,
     instrument_type: str | None = None,
     code: str | None = None,
@@ -101,19 +103,34 @@ def read_market_snapshot(
     names: dict[str, str] | None = None,
     settings: Settings | None = None,
 ) -> dict:
-    """Latest-date (or chosen date) Top-N with DoD / YoY volume marks."""
-    path = market_daily_path(settings)
+    """Point-in-time Top-N snapshot; same asof+data_version → identical payload.
+
+    ``asof`` is the preferred query key; ``trade_date`` remains an alias for UI
+    compatibility. ``data_version`` is computed from all bars on that session;
+    if the caller supplies one and it mismatches, ``version_mismatch`` is set
+    and ``items`` is empty.
+    """
+    from asqt.versioning import data_version_for
+
+    requested = asof or trade_date
+    sort_norm = sort if sort in {"volume", "dod", "yoy"} else "volume"
+    ascending = (order or "desc").lower() == "asc"
+    order_norm = "asc" if ascending else "desc"
     empty = {
-        "trade_date": trade_date,
+        "asof": requested,
+        "trade_date": requested,
+        "data_version": None,
+        "version_mismatch": False,
         "min_trade_date": None,
         "max_trade_date": None,
         "matched": 0,
         "returned": 0,
-        "limit": limit,
-        "sort": sort,
-        "order": order,
+        "limit": int(limit),
+        "sort": sort_norm,
+        "order": order_norm,
         "items": [],
     }
+    path = market_daily_path(settings)
     if not path.exists():
         return empty
 
@@ -122,16 +139,41 @@ def read_market_snapshot(
         return empty
 
     dates = sorted(frame["trade_date"].astype(str).unique())
-    asof = trade_date or dates[-1]
-    if asof not in dates:
+    session = requested or dates[-1]
+    if session not in dates:
         return {
             **empty,
-            "trade_date": asof,
+            "asof": session,
+            "trade_date": session,
             "min_trade_date": dates[0],
             "max_trade_date": dates[-1],
         }
 
-    snap = frame[frame["trade_date"].astype(str) == asof].copy()
+    day = frame[frame["trade_date"].astype(str) == session]
+    version_rows = [
+        {
+            "symbol": str(row["symbol"]),
+            "trade_date": str(row["trade_date"]),
+            "close": row.get("close"),
+            "adj_factor": row.get("adj_factor", 1.0),
+            "source": row.get("source"),
+            "version": row.get("version"),
+        }
+        for row in day.to_dict(orient="records")
+    ]
+    computed_version = data_version_for(version_rows) if version_rows else None
+    if data_version and computed_version and str(data_version) != str(computed_version):
+        return {
+            **empty,
+            "asof": session,
+            "trade_date": session,
+            "data_version": computed_version,
+            "version_mismatch": True,
+            "min_trade_date": dates[0],
+            "max_trade_date": dates[-1],
+        }
+
+    snap = day.copy()
     parsed = snap["symbol"].map(split_symbol)
     snap["code"] = parsed.map(lambda item: item[0])
     snap["exchange"] = parsed.map(lambda item: item[1])
@@ -155,13 +197,13 @@ def read_market_snapshot(
         ]
 
     prev_vol = (
-        frame[frame["trade_date"].astype(str) < asof]
+        frame[frame["trade_date"].astype(str) < session]
         .sort_values("trade_date")
         .groupby("symbol", as_index=False)
         .tail(1)[["symbol", "volume"]]
         .rename(columns={"volume": "prev_volume"})
     )
-    yoy_cut = (pd.Timestamp(asof) - pd.DateOffset(years=1)).strftime("%Y-%m-%d")
+    yoy_cut = (pd.Timestamp(session) - pd.DateOffset(years=1)).strftime("%Y-%m-%d")
     yoy_vol = (
         frame[frame["trade_date"].astype(str) <= yoy_cut]
         .sort_values("trade_date")
@@ -184,8 +226,7 @@ def read_market_snapshot(
     snap["volume_yoy"] = [item[0] for item in yoy]
     snap["volume_yoy_dir"] = [item[1] for item in yoy]
 
-    sort_key = {"volume": "volume", "dod": "volume_dod", "yoy": "volume_yoy"}.get(sort, "volume")
-    ascending = (order or "desc").lower() == "asc"
+    sort_key = {"volume": "volume", "dod": "volume_dod", "yoy": "volume_yoy"}[sort_norm]
     snap = snap.sort_values([sort_key, "symbol"], ascending=[ascending, True], na_position="last")
     matched = int(len(snap))
     snap = snap.head(int(limit))
@@ -214,14 +255,17 @@ def read_market_snapshot(
             }
         )
     return {
-        "trade_date": asof,
+        "asof": session,
+        "trade_date": session,
+        "data_version": computed_version,
+        "version_mismatch": False,
         "min_trade_date": dates[0],
         "max_trade_date": dates[-1],
         "matched": matched,
         "returned": len(items),
         "limit": int(limit),
-        "sort": sort if sort in {"volume", "dod", "yoy"} else "volume",
-        "order": "asc" if ascending else "desc",
+        "sort": sort_norm,
+        "order": order_norm,
         "items": items,
     }
 

@@ -133,13 +133,13 @@
 #### 严格验收门禁
 
 **GATE-D1 snapshot**
-- [ ] `GET /api/market/snapshot?asof=` 同 asof+data_version 两次结果一致
+- [x] `GET /api/market/snapshot?asof=` 同 asof+data_version 两次结果一致
 
 **GATE-D2 registry**
-- [ ] `provider_registry` 含 priority/optional；扩 schema 只改声明
+- [x] `provider_registry` 含 priority/optional；扩 schema 只改声明
 
 **GATE-D3 selectors DSL（自研）**
-- [ ] AND/OR 或等价规则；**零** CN `app/` 代码拷贝
+- [x] AND/OR 或等价规则；**零** CN `app/` 代码拷贝
 
 **GATE-D4/D5（可选）** 报告目录树；job signature 防配置漂移续跑
 

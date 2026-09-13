@@ -253,6 +253,21 @@ def build_adapter(source: str):
     raise ValueError(f"unknown data source: {source}")
 
 
+def resolve_adapters(
+    schema: str,
+    *,
+    preferred: str | None = None,
+    include_optional: bool = True,
+) -> list[dict]:
+    """Build adapters in registry chain order (declaration-driven)."""
+    from asqt.provider_registry import resolve_provider_chain
+
+    out: list[dict] = []
+    for row in resolve_provider_chain(schema, preferred=preferred, include_optional=include_optional):
+        out.append({**row, "adapter": build_adapter(row["source_id"])})
+    return out
+
+
 def tushare_peer_available() -> bool:
     try:
         from asqt.adapters.tushare_source import resolve_tushare_token

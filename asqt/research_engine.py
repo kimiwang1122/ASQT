@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from hashlib import sha1
 from pathlib import Path
 from collections.abc import Callable
 from typing import Any
@@ -27,6 +26,7 @@ from asqt.strategies import (
     suspended_keys,
     weights_for,
 )
+from asqt.versioning import data_version_for
 
 ALLOWED_TRANSITIONS = {
     "draft": {"backtest"},
@@ -43,15 +43,6 @@ HOLD_RESEARCH = {"paper", "paused"}
 BLOCK_RESEARCH = {"retired", "archived"}
 FROZEN_FOR_RESEARCH = HOLD_RESEARCH | BLOCK_RESEARCH
 RISK_CONFIG = "docs/p0/risk_defaults.md"
-
-
-def data_version_for(rows: list[dict[str, Any]]) -> str:
-    digest = sha1()
-    for row in sorted(rows, key=lambda item: (str(item["symbol"]), str(item["trade_date"]))):
-        digest.update(
-            f"{row['symbol']}|{row['trade_date']}|{row['close']}|{row['adj_factor']}|{row.get('source')}|{row.get('version')}".encode()
-        )
-    return digest.hexdigest()[:16]
 
 
 def _nav_metrics(points: list[dict[str, Any]], *, start_nav: float = 1.0) -> dict[str, Any]:

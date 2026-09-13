@@ -94,7 +94,8 @@ class FakeAdapter:
 def test_record_schemas_register_market_daily():
     assert "market_daily" in RECORD_SCHEMAS
     assert RECORD_SCHEMAS["market_daily"]["pk"] == ("symbol", "trade_date")
-    assert providers_for("market_daily") == ["baostock", "akshare", "tushare"]
+    assert providers_for("market_daily") == ["baostock", "tushare", "akshare"]
+    assert providers_for("market_daily", include_optional=False) == ["baostock"]
     assert provider_provides("baostock", "market_daily") is True
     assert provider_provides("baostock", "market_event") is False
     assert set(PROVIDER_REGISTRY) == {"baostock", "akshare", "tushare"}

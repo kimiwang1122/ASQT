@@ -38,6 +38,36 @@ def _pass_filter(values: dict[str, float], rule: dict[str, Any]) -> bool:
     raise ValueError(f"unknown filter op: {op}")
 
 
+def eval_filter_expr(values: dict[str, float], expr: Any) -> bool:
+    """Evaluate a filter leaf or AND/OR tree.
+
+    Leaf: ``{factor, op, value}``
+    AND: ``{all: [nodes...]}`` or a bare list (legacy flat AND)
+    OR: ``{any: [nodes...]}``
+    """
+    if expr is None:
+        return True
+    if isinstance(expr, list):
+        return all(eval_filter_expr(values, node) for node in expr)
+    if not isinstance(expr, dict):
+        raise ValueError(f"invalid filter expr: {expr!r}")
+    if "all" in expr:
+        nodes = expr["all"]
+        if not isinstance(nodes, list):
+            raise ValueError("filter all must be a list")
+        return all(eval_filter_expr(values, node) for node in nodes)
+    if "any" in expr:
+        nodes = expr["any"]
+        if not isinstance(nodes, list):
+            raise ValueError("filter any must be a list")
+        if not nodes:
+            return False
+        return any(eval_filter_expr(values, node) for node in nodes)
+    if "factor" in expr:
+        return _pass_filter(values, expr)
+    raise ValueError(f"unknown filter node: {sorted(expr)}")
+
+
 def _is_suspended(
     symbol: str,
     trade_date: str,
@@ -65,7 +95,8 @@ def select_targets(
 
     ``rules`` keys (aligned with STRATEGY_SPECS params):
       score_factor: str | None — rank key; None → equal weight all survivors
-      filters: list[{factor, op, value}]
+      filters: list[{factor, op, value}] — flat AND (legacy)
+      filter_expr: AND/OR tree (``all`` / ``any`` / leaf); wins over ``filters``
       top_k: int | None — None keeps all filtered names
       max_weight, gross_limit: float
       ascending: bool — default False (higher score better)
@@ -77,7 +108,9 @@ def select_targets(
         symbol = str(row["symbol"])
         by_symbol.setdefault(symbol, {})[str(row["factor_name"])] = float(row["value"])
 
-    filters = list(rules.get("filters") or [])
+    filter_expr = rules.get("filter_expr")
+    if filter_expr is None and rules.get("filters") is not None:
+        filter_expr = list(rules.get("filters") or [])
     score_factor = rules.get("score_factor")
     top_k = rules.get("top_k")
     ascending = bool(rules.get("ascending", False))
@@ -89,7 +122,7 @@ def select_targets(
     for symbol, values in by_symbol.items():
         if _is_suspended(symbol, asof, limits=limits, suspended=suspended):
             continue
-        if any(not _pass_filter(values, rule) for rule in filters):
+        if filter_expr is not None and not eval_filter_expr(values, filter_expr):
             continue
         if score_factor:
             if score_factor not in values:

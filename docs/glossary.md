@@ -38,6 +38,9 @@
 | 时点池 | 历史成分 | 回测某日只用**当时**指数成分。现在是筛选日固定名单，有前视偏差风险。 |
 | `point_in_time` | 时点错误 | 质检：上市前或退市后仍有行情。 |
 | PIT / `asqt.pit` | 时点窗口 | 统一 `asof`：只见 `date <= asof`；backtest 丢无日期字段；见 [adoption_priority_plan.md](adoption_priority_plan.md) GATE-A1。 |
+| 市场快照 | `/api/market/snapshot` | 按 `asof`（`trade_date` 别名）取 TopN；响应带 `data_version`；同 asof+version 两次一致；错 version → `version_mismatch`。 |
+| `provider_registry` | 源声明 | `priority` / `optional` / `provides`；`providers_for` / `fetch_with_fallback`；扩 schema 优先改声明。 |
+| `filter_expr` | 选股 DSL | `all`/`any`/叶子 `{factor,op,value}`；`filters` 列表仍为扁平 AND。 |
 | `REVIEW` / `asqt.decision` | 决策哨兵 | 五档/三档评级；解析失败为 `REVIEW`，禁止静默变 Hold。 |
 | `risk_gate` | 终审闸门 | `evaluate(purpose=orders|admit)` 唯一出口；稳定 `reason_code`（如 `quality_block` / `kill_switch` / `stale_data`）。 |
 | `decision_log` | 决策日志 | SQLite pending→resolved；`thesis_json`/`outcome_json` 主存（禁 markdown）；`GET /api/decisions?asof=` PIT 过滤。目标仓/订单可挂 `decision_id`。 |

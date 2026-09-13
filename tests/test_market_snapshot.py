@@ -99,3 +99,48 @@ def test_market_snapshot_is_volume_topn_with_filters_and_volume_marks(tmp_path, 
     dod_asc = client.get("/api/market/snapshot", params={"sort": "dod", "order": "asc"})
     assert dod_asc.json()["sort"] == "dod"
     assert dod_asc.json()["items"][0]["symbol"] == "000001.SZ"
+
+
+def test_gate_d1_snapshot_asof_data_version_deterministic(tmp_path, monkeypatch):
+    settings = make_settings(tmp_path)
+    (tmp_path / "frontend").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "frontend" / "index.html").write_text("<html></html>", encoding="utf-8")
+    seed_demo(settings)
+
+    from asqt import config as config_module
+
+    config_module.get_settings.cache_clear()
+    monkeypatch.setattr("asqt.api.get_settings", lambda: settings)
+    client = TestClient(create_app())
+
+    first = client.get("/api/market/snapshot", params={"asof": "2026-08-21", "limit": 10})
+    second = client.get("/api/market/snapshot", params={"asof": "2026-08-21", "limit": 10})
+    assert first.status_code == 200
+    assert first.json() == second.json()
+    body = first.json()
+    assert body["asof"] == "2026-08-21"
+    assert body["trade_date"] == "2026-08-21"
+    assert body["data_version"]
+    assert body["version_mismatch"] is False
+
+    same_via_trade_date = client.get(
+        "/api/market/snapshot",
+        params={"trade_date": "2026-08-21", "limit": 10},
+    )
+    assert same_via_trade_date.json() == body
+
+    pinned = client.get(
+        "/api/market/snapshot",
+        params={"asof": "2026-08-21", "data_version": body["data_version"], "limit": 10},
+    )
+    assert pinned.json() == body
+
+    mismatch = client.get(
+        "/api/market/snapshot",
+        params={"asof": "2026-08-21", "data_version": "deadbeefdeadbeef", "limit": 10},
+    )
+    assert mismatch.status_code == 200
+    bad = mismatch.json()
+    assert bad["version_mismatch"] is True
+    assert bad["items"] == []
+    assert bad["data_version"] == body["data_version"]

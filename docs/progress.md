@@ -29,7 +29,7 @@
 | P2 | 研究回测 + 策略版本 | 完成 | 两策略引擎、策略页、回测归因已验收；模拟偏差随 P3 成交 |
 | P3 | 模拟交易 + 运营 | 完成 | PaperBroker、账本、20 日模拟、急停、本地+文件告警、生命周期准入 |
 | P4 | 实接券商通道 | 暂缓 | Q2 未具备；预留 `QmtExecutionAdapter` 恒为不可用，见 [p4/README.md](p4/README.md) |
-| 吸收轨 | TradingAgents/CN 工程纪律 | 进行中 | 唯一方案 [adoption_priority_plan.md](adoption_priority_plan.md)；阶段 A+B+C 已绿，下一阶段 D（snapshot / registry） |
+| 吸收轨 | TradingAgents/CN 工程纪律 | 进行中 | 唯一方案 [adoption_priority_plan.md](adoption_priority_plan.md)；阶段 A–D 已绿（D4/D5 可选未做）；下一阶段 E 默认后置 |
 
 当前可对外说的进度：**P1 完成，P2 回测可复现，P3 本地模拟盘可连续运行（未接券商）。** 吸收轨从 PIT/符号边界开工。
 
@@ -175,7 +175,7 @@
 
 ## 下次开工建议
 
-1. **吸收轨阶段 D**：市场快照 API + provider registry；门禁见 [adoption_priority_plan.md](adoption_priority_plan.md) GATE-D1/D2。阶段 A/B/C 已绿。  
+1. **吸收轨阶段 E（默认后置）**：财务 `ann_date` / Draft LLM 只读；除非单独解冻，否则不开。D4/D5（报告目录树、job signature）可按需补。  
 2. **P4 实接**：等 Q2（MiniQMT 权限）再按 [p4/README.md](p4/README.md)「Q2 具备后才开的验收」接线；禁止把预留适配器标成完成。Qlib bin（R9）同理：目录预留，业务层零 `import qlib`。  
 3. **日终闭环**：交易日同步成功后会自动 `paper-daily`；空账本不会自动回放长窗口，需先手工「跑模拟」。进程外兜底见 `scripts/crontab.example`（跨源 19:15、财务对账 19:45、同步兜底 20:05）。  
 4. **跨源对账**：因子恒定基准差已对齐后再比；真残差仍 warn。方案 2（入库统一权威因子）暂不做。  

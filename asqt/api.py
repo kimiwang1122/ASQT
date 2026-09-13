@@ -604,7 +604,9 @@ def create_app() -> FastAPI:
 
     @app.get("/api/market/snapshot")
     def market_snapshot(
+        asof: str | None = Query(default=None),
         trade_date: str | None = Query(default=None),
+        data_version: str | None = Query(default=None),
         exchange: str | None = Query(default=None),
         instrument_type: str | None = Query(default=None),
         code: str | None = Query(default=None),
@@ -616,8 +618,10 @@ def create_app() -> FastAPI:
             row["symbol"]: row.get("name") or ""
             for row in query_all("SELECT symbol, name FROM instrument_master", settings=settings)
         }
-        payload = read_market_snapshot(
+        return read_market_snapshot(
+            asof=asof,
             trade_date=trade_date,
+            data_version=data_version,
             exchange=exchange,
             instrument_type=instrument_type,
             code=code,
@@ -627,7 +631,6 @@ def create_app() -> FastAPI:
             names=names,
             settings=settings,
         )
-        return payload
 
     @app.get("/api/orders")
     def list_orders(limit: int = Query(default=20, ge=1, le=200)) -> list[dict]:
