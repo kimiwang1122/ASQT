@@ -18,6 +18,8 @@ const GATE_DENY_LABEL = {
   not_orderable: "当前状态不能生成可下单目标仓。仅「模拟」状态可以。",
   bad_action: "动作只能是准入模拟、暂停、恢复或退役。",
   paper_busy: "模拟盘运行中，请勿重复提交",
+  override_conflict: "模拟覆盖参数冲突或非法，请检查 force_in/cap 权重",
+  stale_data: "行情过旧，拒绝用过期价撮合",
   "kill switch change requires a reason": "请填写急停原因（不能全是空格）",
   "lifecycle change requires a reason": "改生命周期必须填写原因。",
 };

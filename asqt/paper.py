@@ -21,11 +21,11 @@ from asqt.ops import (
     maybe_drawdown_halt,
     maybe_flatten_incomplete_alert,
     paper_account_config,
-    quality_gate,
     reset_portfolio_peak,
     set_kill_switch,
 )
 from asqt.research_engine import LocalStrategyService
+from asqt.risk_gate import evaluate as evaluate_risk_gate
 from asqt.storage import read_market_daily
 from asqt.strategies import STRATEGY_SPECS
 from asqt.symbols import infer_instrument_type
@@ -590,31 +590,36 @@ class PaperOrderService:
     ) -> list[dict[str, Any]]:
         if strategy_id not in STRATEGY_SPECS:
             raise ValueError(f"unknown strategy: {strategy_id}")
-        gate = quality_gate(self.settings)
-        if not gate["trade_allowed"]:
-            return self._reject_stub(trade_date, strategy_id, "quality_block")
 
         dates = self._dates()
         if signal_date is None:
             signal_date = _prev_date(dates, trade_date)
         if signal_date is None:
             raise ValueError("no prior session for T+1 fill")
-        if not self._calendar_open(trade_date):
-            return self._reject_stub(trade_date, strategy_id, "calendar_closed")
 
         rows = read_market_daily(end=trade_date, settings=self.settings)
         by_key = {(str(row["trade_date"]), str(row["symbol"])): row for row in rows}
-        if self._stale_blocks_trading(trade_date, rows):
-            return self._reject_stub(trade_date, strategy_id, "stale_data")
 
         ledger = PaperLedger(strategy_id, self.settings)
         state = ledger.load(before=trade_date)
         # T+1: yesterday's buys become tradable at next session open.
         state["tradable"] = {symbol: int(item["qty"]) for symbol, item in state["positions"].items()}
-        global_kill = kill_engaged(self.settings)
         sync_halt_lifecycle(state)
         book_halted = bool(state.get("halted") or state.get("flatten_pending"))
-        flatten_only = global_kill or book_halted
+
+        gate = evaluate_risk_gate(
+            purpose="orders",
+            strategy_id=strategy_id,
+            trade_date=trade_date,
+            settings=self.settings,
+            book_halted=book_halted,
+            check_overrides=True,
+        )
+        if gate.rejected:
+            return self._reject_stub(trade_date, strategy_id, gate.reason_code)
+
+        global_kill = kill_engaged(self.settings)
+        flatten_only = bool(gate.flatten_only)
         halt_tag = "kill_switch" if global_kill else ("strategy_halt" if book_halted else "paper")
 
         created: list[dict[str, Any]] = []
@@ -635,6 +640,9 @@ class PaperOrderService:
                     apply_fills=apply_fills,
                 )
             )
+            if not created:
+                # No position to flatten — still record a stable gate rejection.
+                return self._reject_stub(trade_date, strategy_id, halt_tag)
             if apply_fills:
                 sync_halt_lifecycle(state)
                 marks = {
@@ -1017,24 +1025,6 @@ class PaperOrderService:
         if not rows:
             return True
         return int(rows[0]["is_open"] or 0) == 1
-
-    def _stale_blocks_trading(self, trade_date: str, rows: list[dict[str, Any]]) -> bool:
-        """When ASQT_STALE_SEVERITY=block, refuse fills if market lags asof too far."""
-        from asqt.stale import evaluate_market_staleness, stale_severity
-
-        if stale_severity() != "block":
-            return False
-        calendar = query_all(
-            "SELECT * FROM trade_calendar WHERE market = 'CN' AND trade_date <= ?",
-            (trade_date,),
-            settings=self.settings,
-        )
-        report = evaluate_market_staleness(
-            records=rows,
-            calendar=calendar,
-            asof=trade_date,
-        )
-        return report.blocked
 
     def _dates(self) -> list[str]:
         rows = read_market_daily(settings=self.settings)

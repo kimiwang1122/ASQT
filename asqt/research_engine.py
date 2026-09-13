@@ -216,7 +216,7 @@ class LocalStrategyService:
         actor: str,
         require_experiment: bool = False,
     ) -> dict[str, Any]:
-        from asqt.ops import kill_engaged, quality_gate
+        from asqt.risk_gate import evaluate as evaluate_risk_gate
 
         if not (reason or "").strip():
             raise ValueError("lifecycle change requires a reason")
@@ -224,22 +224,15 @@ class LocalStrategyService:
         if not current:
             raise PermissionError(f"{strategy_id} has no version")
         if new_status == "paper":
-            gate = quality_gate(self.settings)
-            if not gate["trade_allowed"]:
-                raise PermissionError("quality_block")
-            if kill_engaged(self.settings):
-                raise PermissionError("kill_switch")
-            if require_experiment:
-                path = self.settings.experiment_dir / f"latest-{strategy_id}.json"
-                if not path.exists():
-                    raise PermissionError("missing_experiment")
-                import json
-
-                report = json.loads(path.read_text(encoding="utf-8"))
-                if not report.get("ok"):
-                    raise PermissionError("experiment_not_ok")
-                if not report.get("parameter_set_id") or not report.get("data_version"):
-                    raise PermissionError("missing_version_pins")
+            gate = evaluate_risk_gate(
+                purpose="admit",
+                strategy_id=strategy_id,
+                settings=self.settings,
+                require_experiment=require_experiment,
+                check_overrides=True,
+            )
+            if gate.rejected or gate.decision == "review":
+                raise PermissionError(gate.reason_code)
             execute(
                 """
                 UPDATE strategy_version

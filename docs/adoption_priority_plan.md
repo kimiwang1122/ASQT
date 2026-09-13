@@ -92,18 +92,18 @@
 #### 严格验收门禁
 
 **GATE-B1 决策枚举**
-- [ ] `contracts`（或专用模块）定义三档/五档 + `REVIEW`
-- [ ] 解析失败 / 证据不足 → `REVIEW`，**不得**映射为 Hold
-- [ ] 规则策略可映射到同一枚举（无 LLM）
+- [x] `contracts`（或专用模块）定义三档/五档 + `REVIEW`
+- [x] 解析失败 / 证据不足 → `REVIEW`，**不得**映射为 Hold
+- [x] 规则策略可映射到同一枚举（无 LLM）
 
 **GATE-B2 risk_gate**
-- [ ] `asqt/risk_gate.py`：`evaluate(...) -> {decision: approve|reject|review, reason_code, message}`
-- [ ] 汇聚：质检 block、kill switch、回撤 halt、lifecycle、override 冲突
-- [ ] `build_orders` / admit 前必经 gate；reject 有稳定 `reason_code`
-- [ ] 单测：每类拒绝至少一条；approve 路径一条
+- [x] `asqt/risk_gate.py`：`evaluate(...) -> {decision: approve|reject|review, reason_code, message}`
+- [x] 汇聚：质检 block、kill switch、回撤 halt、lifecycle、override 冲突
+- [x] `build_orders` / admit 前必经 gate；reject 有稳定 `reason_code`
+- [x] 单测：每类拒绝至少一条；approve 路径一条
 
 **GATE-B3 paper checklist**
-- [ ] T+1 当日买不可卖、涨跌停拒单、手数、停牌：既有或新增断言全绿
+- [x] T+1 当日买不可卖、涨跌停拒单、手数、停牌：既有或新增断言全绿
 
 **切入文件**：`contracts.py`、新建 `risk_gate.py`、`paper.py`、`ops.py`、`overrides.py`、前端交易/复盘提示
 

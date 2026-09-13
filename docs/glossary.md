@@ -38,6 +38,8 @@
 | 时点池 | 历史成分 | 回测某日只用**当时**指数成分。现在是筛选日固定名单，有前视偏差风险。 |
 | `point_in_time` | 时点错误 | 质检：上市前或退市后仍有行情。 |
 | PIT / `asqt.pit` | 时点窗口 | 统一 `asof`：只见 `date <= asof`；backtest 丢无日期字段；见 [adoption_priority_plan.md](adoption_priority_plan.md) GATE-A1。 |
+| `REVIEW` / `asqt.decision` | 决策哨兵 | 五档/三档评级；解析失败为 `REVIEW`，禁止静默变 Hold。 |
+| `risk_gate` | 终审闸门 | `evaluate(purpose=orders|admit)` 唯一出口；稳定 `reason_code`（如 `quality_block` / `kill_switch` / `stale_data`）。 |
 | `missing` / `range` / `cross_source` | 质检类型 | 缺数；OHLC/量额非法；主备源对不上（`warn`，不单独停交易）。 |
 | `stale_asof` | 行情过旧 | 最新日 K 相对 asof 落后超过 N 个**交易日**（默认 5，`ASQT_STALE_MAX_SESSIONS`）。严重级别 `ASQT_STALE_SEVERITY=warn|block`；block 时 paper 拒单 `stale_data`。 |
 | `block` / `warn` | 严重级别 | `block` 开放则 `trade_allowed=false`，禁新订单；`warn` 不翻转闸门。 |

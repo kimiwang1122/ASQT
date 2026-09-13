@@ -1,4 +1,8 @@
-"""Canonical contract field dictionaries for schema and acceptance checks."""
+"""Canonical contract field dictionaries for schema and acceptance checks.
+
+Decision ratings (Buy…Sell / REVIEW) live in ``asqt.decision`` — keep field
+lists here; keep enums/parsers there so trading paths share one vocabulary.
+"""
 
 from __future__ import annotations
 
