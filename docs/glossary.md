@@ -40,6 +40,7 @@
 | PIT / `asqt.pit` | 时点窗口 | 统一 `asof`：只见 `date <= asof`；backtest 丢无日期字段；见 [adoption_priority_plan.md](adoption_priority_plan.md) GATE-A1。 |
 | `REVIEW` / `asqt.decision` | 决策哨兵 | 五档/三档评级；解析失败为 `REVIEW`，禁止静默变 Hold。 |
 | `risk_gate` | 终审闸门 | `evaluate(purpose=orders|admit)` 唯一出口；稳定 `reason_code`（如 `quality_block` / `kill_switch` / `stale_data`）。 |
+| `decision_log` | 决策日志 | SQLite pending→resolved；`thesis_json`/`outcome_json` 主存（禁 markdown）；`GET /api/decisions?asof=` PIT 过滤。目标仓/订单可挂 `decision_id`。 |
 | `missing` / `range` / `cross_source` | 质检类型 | 缺数；OHLC/量额非法；主备源对不上（`warn`，不单独停交易）。 |
 | `stale_asof` | 行情过旧 | 最新日 K 相对 asof 落后超过 N 个**交易日**（默认 5，`ASQT_STALE_MAX_SESSIONS`）。严重级别 `ASQT_STALE_SEVERITY=warn|block`；block 时 paper 拒单 `stale_data`。 |
 | `block` / `warn` | 严重级别 | `block` 开放则 `trade_allowed=false`，禁新订单；`warn` 不翻转闸门。 |
@@ -82,7 +83,7 @@
 | `symbol_tag` | 标签 / 池 | `(tag, symbol)` 可查询标签；宇宙 CSV 的 `pool` 同步为 `source=universe_csv`。策略 params 可选 `pool_tags`。 |
 | `paper_override` | 人工覆盖 | 按 `(strategy_id, symbol)`：`force_in` / `force_out` / `cap` 改写目标仓；`reason` 标 `override:*`；写 `operation_audit`。 |
 | IS / OOS | 样本内 / 外 | 按时间切开（约前 70% / 后 30%）；信号日只看 `trade_date <= asof`。样本内用来定规则，样本外检验是否还能赚。 |
-| 复盘 | `#review` / 归因 | 把回测收益拆到标的，并对照 Paper 净值。接口 `GET /api/research/attribution`。加强展示：样本天数、贡献占比、OOS Top/拖累、参数组、样本区间、Paper vs 回测表。 |
+| 复盘 | `#review` / 归因 | 把回测收益拆到标的，并对照 Paper 净值。接口 `GET /api/research/attribution`；决策表 `GET /api/decisions`。加强展示：样本天数、贡献占比、OOS Top/拖累、参数组、样本区间、Paper vs 回测表。 |
 | 净值 / 复利收益 | `nav` / `total_return` | 每日组合收益连乘；复利收益 = 净值 − 1。不含滑点费用。 |
 | 累加贡献 | `additive_return` | 各日「权重 × 复权收益」加总。一般略不等于复利（连乘交叉项）。 |
 | 持有日 / 平均权重 | `days` / `avg_weight` | 该标的在目标仓中的天数与这些天的平均仓位。 |

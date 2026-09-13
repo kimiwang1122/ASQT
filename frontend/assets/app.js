@@ -3411,12 +3411,56 @@ function renderAttribution(payload) {
   }
 }
 
+function renderDecisions(payload) {
+  const body = document.getElementById("review-decisions-body");
+  if (!body) {
+    return;
+  }
+  body.innerHTML = "";
+  const items = payload?.items || [];
+  setText(
+    "review-decisions-hint",
+    items.length
+      ? `最近 ${items.length} 条决策（pending / resolved）。`
+      : "尚无决策日志。跑一轮 paper 日终后会出现 pending→resolved。",
+  );
+  if (!items.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 6;
+    td.className = "table-empty";
+    td.textContent = "暂无决策记录";
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+  for (const row of items) {
+    const tr = document.createElement("tr");
+    const ret = row.outcome?.session_return;
+    appendCell(tr, row.signal_date || "-");
+    appendCell(tr, row.status || "-");
+    appendCell(tr, row.rating || "-");
+    appendCell(tr, row.fill_date || "-");
+    appendCell(tr, ret == null ? "-" : formatPct(ret), {
+      className: ret == null ? "num" : pnlClass(ret),
+    });
+    appendCell(tr, row.lesson || "-");
+    body.appendChild(tr);
+  }
+}
+
 async function loadReviewPage() {
   const select = document.getElementById("review-strategy");
   const strategyId = select?.value || "etf_ma_rotate";
   setText("review-hint", "正在按日重算归因，请稍候…");
-  const payload = await requestJson(`/api/research/attribution?strategy_id=${encodeURIComponent(strategyId)}`);
+  const [payload, decisions] = await Promise.all([
+    requestJson(`/api/research/attribution?strategy_id=${encodeURIComponent(strategyId)}`),
+    requestJson(`/api/decisions?strategy_id=${encodeURIComponent(strategyId)}&limit=30`).catch(() => ({
+      items: [],
+    })),
+  ]);
   renderAttribution(payload);
+  renderDecisions(decisions);
 }
 
 let backtestTimer = 0;

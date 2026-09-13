@@ -116,13 +116,13 @@
 #### 严格验收门禁
 
 **GATE-C1 decision_log**
-- [ ] SQLite 表 `decision_log`：pending → resolved；禁 markdown 主存
-- [ ] paper 日终可写结构化 outcome（收益/是否急停）
-- [ ] 按 asof 查询：**看不到**未 resolved 的未来 lesson
-- [ ] 目标仓或订单可关联 `decision_id`
-- [ ] 复盘页或 API 能列出最近决策
+- [x] SQLite 表 `decision_log`：pending → resolved；禁 markdown 主存
+- [x] paper 日终可写结构化 outcome（收益/是否急停）
+- [x] 按 asof 查询：**看不到**未 resolved 的未来 lesson
+- [x] 目标仓或订单可关联 `decision_id`
+- [x] 复盘页或 API 能列出最近决策
 
-**切入文件**：`db.py`、`paper_jobs.py`、复盘前端
+**切入文件**：`db.py`、`decision_log.py`、`paper.py`、`research_engine.py`、复盘前端
 
 ---
 

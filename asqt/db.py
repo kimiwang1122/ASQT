@@ -197,6 +197,7 @@ SCHEMA_SQL: tuple[str, ...] = (
         target_volume INTEGER,
         reason TEXT,
         data_version TEXT NOT NULL,
+        decision_id TEXT,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
     """,
@@ -214,8 +215,25 @@ SCHEMA_SQL: tuple[str, ...] = (
         valid_date TEXT NOT NULL,
         risk_tags TEXT,
         status TEXT NOT NULL,
+        decision_id TEXT,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS decision_log (
+        decision_id TEXT PRIMARY KEY,
+        strategy_id TEXT NOT NULL,
+        signal_date TEXT NOT NULL,
+        fill_date TEXT,
+        status TEXT NOT NULL CHECK(status IN ('pending', 'resolved')),
+        rating TEXT,
+        action TEXT,
+        thesis_json TEXT NOT NULL,
+        outcome_json TEXT,
+        resolved_at TEXT,
+        lesson TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
     """,
     """
@@ -356,6 +374,12 @@ _DATA_SYNC_RUN_EXTRA_COLUMNS: tuple[tuple[str, str], ...] = (
     ("progress_total", "INTEGER"),
     ("progress_symbol", "TEXT"),
 )
+_TARGET_POSITION_EXTRA_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("decision_id", "TEXT"),
+)
+_STANDARD_ORDER_EXTRA_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("decision_id", "TEXT"),
+)
 
 
 def connect(settings: Settings | None = None) -> sqlite3.Connection:
@@ -431,14 +455,27 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     for column, col_type in _DATA_SOURCE_EXTRA_COLUMNS:
         if column not in existing:
             conn.execute(f"ALTER TABLE data_source ADD COLUMN {column} {col_type}")
-    if "data_sync_run" in {
-        row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-    }:
+    tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "data_sync_run" in tables:
         sync_cols = _existing_columns(conn, "data_sync_run")
         for column, col_type in _DATA_SYNC_RUN_EXTRA_COLUMNS:
             if column not in sync_cols:
                 conn.execute(f"ALTER TABLE data_sync_run ADD COLUMN {column} {col_type}")
+    if "target_position" in tables:
+        target_cols = _existing_columns(conn, "target_position")
+        for column, col_type in _TARGET_POSITION_EXTRA_COLUMNS:
+            if column not in target_cols:
+                conn.execute(f"ALTER TABLE target_position ADD COLUMN {column} {col_type}")
+    if "standard_order" in tables:
+        order_cols = _existing_columns(conn, "standard_order")
+        for column, col_type in _STANDARD_ORDER_EXTRA_COLUMNS:
+            if column not in order_cols:
+                conn.execute(f"ALTER TABLE standard_order ADD COLUMN {column} {col_type}")
     _migrate_factor_signal(conn)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS decision_log_strategy_signal ON decision_log(strategy_id, signal_date DESC)"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS decision_log_status ON decision_log(status, signal_date DESC)")
     conn.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS data_sync_run_one_inflight

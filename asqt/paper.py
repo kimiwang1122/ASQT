@@ -662,7 +662,24 @@ class PaperOrderService:
             (strategy_id, signal_date),
             settings=self.settings,
         )
+        decision_id = next(
+            (str(row["decision_id"]) for row in targets if row.get("decision_id")),
+            None,
+        )
+        if decision_id is None:
+            from asqt.decision_log import list_decisions
+
+            pending = list_decisions(
+                strategy_id=strategy_id,
+                status="pending",
+                asof=signal_date,
+                limit=1,
+                settings=self.settings,
+            )
+            if pending and pending[0].get("signal_date") == signal_date:
+                decision_id = str(pending[0]["decision_id"])
         nav = _nav(state, by_key, signal_date)
+        nav_before = float(nav)
         intended = {row["symbol"]: float(row["target_weight"]) for row in targets}
         intended = self._apply_stops(intended, state, by_key, signal_date)
 
@@ -696,11 +713,14 @@ class PaperOrderService:
                 weight=weight,
                 nav=nav,
                 state=state,
+                decision_id=decision_id,
             )
             created.append(order)
             if apply_fills:
                 self._match(order, state, bar_fill, trade_date)
-        leftover_sells = self._flatten_missing(intended, state, trade_date, strategy_id, by_key)
+        leftover_sells = self._flatten_missing(
+            intended, state, trade_date, strategy_id, by_key, decision_id=decision_id
+        )
         created.extend(leftover_sells)
         if apply_fills:
             for order in leftover_sells:
@@ -735,6 +755,7 @@ class PaperOrderService:
                         by_key=by_key,
                         risk_tag="strategy_halt",
                         apply_fills=True,
+                        decision_id=decision_id,
                     )
                     created.extend(extra)
                 sync_halt_lifecycle(state)
@@ -744,6 +765,25 @@ class PaperOrderService:
                     if (trade_date, symbol) in by_key
                 }
             ledger.save(trade_date, state, marks)
+            market_value_after = sum(
+                int(item["qty"]) * float(marks.get(symbol, item["cost"]))
+                for symbol, item in state["positions"].items()
+                if int(item["qty"]) > 0
+            )
+            nav_after = float(state["cash"]) + market_value_after
+            from asqt.decision_log import resolve_for_session
+
+            resolve_for_session(
+                strategy_id=strategy_id,
+                signal_date=signal_date,
+                fill_date=trade_date,
+                nav_before=nav_before,
+                nav_after=nav_after,
+                halted=bool(state.get("halted") or state.get("flatten_pending")),
+                halt_reason=state.get("halt_reason"),
+                order_ids=[str(o["order_id"]) for o in created if o.get("order_id")],
+                settings=self.settings,
+            )
         return created
 
     def _flatten_all(
@@ -755,6 +795,7 @@ class PaperOrderService:
         by_key: dict[tuple[str, str], dict[str, Any]],
         risk_tag: str,
         apply_fills: bool,
+        decision_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Sell every tradable lot; never buy. Fees apply through normal fill path.
 
@@ -779,6 +820,7 @@ class PaperOrderService:
                 state=state,
                 risk_tag=risk_tag,
                 idem_suffix="flatten",
+                decision_id=decision_id,
             )
             created.append(order)
             if apply_fills:
@@ -802,6 +844,8 @@ class PaperOrderService:
         trade_date: str,
         strategy_id: str,
         by_key: dict[tuple[str, str], dict[str, Any]],
+        *,
+        decision_id: str | None = None,
     ) -> list[dict[str, Any]]:
         extra: list[dict[str, Any]] = []
         for symbol, item in list(state["positions"].items()):
@@ -822,6 +866,7 @@ class PaperOrderService:
                     weight=0.0,
                     nav=_nav(state, by_key, trade_date),
                     state=state,
+                    decision_id=decision_id,
                 )
             )
         return extra
@@ -840,6 +885,7 @@ class PaperOrderService:
         state: dict[str, Any],
         risk_tag: str | None = None,
         idem_suffix: str | None = None,
+        decision_id: str | None = None,
     ) -> dict[str, Any]:
         idem_key = f"{strategy_id}|{trade_date}|{symbol}|{side}"
         if idem_suffix:
@@ -891,8 +937,9 @@ class PaperOrderService:
             """
             INSERT INTO standard_order
                 (order_id, idem_key, trade_date, strategy_id, symbol, side, quantity,
-                 price_type, limit_price, valid_date, risk_tags, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'limit', ?, ?, ?, ?, ?, ?)
+                 price_type, limit_price, valid_date, risk_tags, status, decision_id,
+                 created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'limit', ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 order_id,
@@ -906,6 +953,7 @@ class PaperOrderService:
                 trade_date,
                 tag_text,
                 status,
+                decision_id,
                 now,
                 now,
             ),

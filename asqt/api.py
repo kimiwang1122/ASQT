@@ -766,6 +766,28 @@ def create_app() -> FastAPI:
 
         return LocalReviewService(settings).build_daily_review(trade_date)
 
+    @app.get("/api/decisions")
+    def decisions(
+        strategy_id: str | None = None,
+        asof: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> dict:
+        from asqt.decision_log import list_decisions
+        from asqt.pit import PitError
+
+        try:
+            items = list_decisions(
+                strategy_id=strategy_id,
+                asof=asof,
+                status=status,
+                limit=limit,
+                settings=settings,
+            )
+        except PitError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"items": items, "count": len(items)}
+
     @app.get("/api/research/backtest/active")
     def research_backtest_active() -> dict:
         return {"active": active_research_run(settings)}

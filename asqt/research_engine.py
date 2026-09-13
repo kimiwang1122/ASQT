@@ -143,6 +143,17 @@ class LocalStrategyService:
 
         weights, override_reasons = apply_overrides(weights, strategy_id, settings=self.settings)
         data_version = data_version_for(asof_rows(rows, trade_date))
+        from asqt.decision_log import record_pending
+
+        decision = record_pending(
+            strategy_id=strategy_id,
+            signal_date=trade_date,
+            weights=weights,
+            strategy_version=version["version"],
+            data_version=data_version,
+            settings=self.settings,
+        )
+        decision_id = str(decision["decision_id"])
         execute(
             "DELETE FROM target_position WHERE strategy_id = ? AND trade_date = ?",
             (strategy_id, trade_date),
@@ -161,6 +172,7 @@ class LocalStrategyService:
                 "target_volume": None,
                 "reason": override_reasons.get(symbol, default_reason),
                 "data_version": data_version,
+                "decision_id": decision_id,
             }
             for symbol, weight in weights.items()
         ]
@@ -169,8 +181,8 @@ class LocalStrategyService:
                 """
                 INSERT INTO target_position
                     (target_id, trade_date, strategy_id, strategy_version, symbol,
-                     target_weight, target_amount, target_volume, reason, data_version)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     target_weight, target_amount, target_volume, reason, data_version, decision_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -184,6 +196,7 @@ class LocalStrategyService:
                         item["target_volume"],
                         item["reason"],
                         item["data_version"],
+                        item["decision_id"],
                     )
                     for item in records
                 ],
