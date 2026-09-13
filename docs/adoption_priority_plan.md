@@ -141,17 +141,19 @@
 **GATE-D3 selectors DSL（自研）**
 - [x] AND/OR 或等价规则；**零** CN `app/` 代码拷贝
 
-**GATE-D4/D5（可选）** 报告目录树；job signature 防配置漂移续跑
+**GATE-D4/D5（可选）**
+- [x] 报告目录树：`data/experiment/{kind}/{run_id}/summary.json`（回测/paper/因子/tune）
+- [x] job `run_signature` 防配置漂移续跑（research/factor/event/paper）
 
 ---
 
 ### 阶段 E — 后置｜P2–P3
 
-| 项 | 条件 |
-|---|---|
-| 财务全量 + `ann_date` PIT | X3 解冻后；先 schema 后拉数 |
-| Draft LLM 助手 | 仅只读；lifecycle=draft；永不 `emit` 仓位 |
-| 新闻/多周期 | 有明确产品需求再开 |
+| 项 | 状态 | 条件 |
+|---|---|---|
+| 财务 schema + `ann_date` PIT | **已做 schema**（全量拉数仍 X3） | `fundamental_snapshot` + `fundamentals_asof` |
+| Draft LLM 助手 | **已做只读桩** | `POST /api/research/draft-assist`；lifecycle≠paper；永不 emit 仓位 |
+| 新闻/多周期 | **跳过** | 无产品需求；非主航道 |
 
 ---
 

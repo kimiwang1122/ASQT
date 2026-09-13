@@ -371,11 +371,14 @@ def run_tune(
 
 
 def _write_tune_report(report: dict[str, Any], *, settings: Settings) -> Path:
-    folder = settings.experiment_dir
-    folder.mkdir(parents=True, exist_ok=True)
+    from asqt.reporting import write_run_tree
+
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    path = folder / f"tune_{report['strategy_id']}_{stamp}.json"
-    path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    latest = folder / f"latest-tune-{report['strategy_id']}.json"
-    latest.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
-    return path
+    run_id = f"{report['strategy_id']}_{stamp}"
+    return write_run_tree(
+        "tune",
+        run_id,
+        report,
+        settings=settings,
+        strategy_id=str(report.get("strategy_id") or ""),
+    )

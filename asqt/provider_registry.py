@@ -28,7 +28,7 @@ PROVIDER_REGISTRY: dict[str, dict[str, Any]] = {
         "name": "Tushare",
         "priority": 15,
         "optional": True,
-        "provides": ("market_daily", "market_event"),
+        "provides": ("market_daily", "market_event", "fundamental_snapshot"),
     },
 }
 

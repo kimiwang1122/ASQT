@@ -33,6 +33,19 @@ MARKET_EVENT_COLUMNS: tuple[str, ...] = (
     "version",
 )
 
+# Knowability date = ann_date (announcement). Full vendor pull is X3 / deferred.
+FUNDAMENTAL_SNAPSHOT_COLUMNS: tuple[str, ...] = (
+    "symbol",
+    "report_period",
+    "ann_date",
+    "asof_date",
+    "metric",
+    "value",
+    "unit",
+    "source",
+    "version",
+)
+
 TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
     "data_source": (
         "source_id",
@@ -243,6 +256,7 @@ TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "progress_label",
         "fail_reason",
         "detail",
+        "run_signature",
         "started_at",
         "finished_at",
         "created_at",
@@ -258,6 +272,7 @@ TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "progress_label",
         "fail_reason",
         "detail",
+        "run_signature",
         "started_at",
         "finished_at",
         "created_at",
@@ -272,6 +287,7 @@ TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "progress_label",
         "fail_reason",
         "detail",
+        "run_signature",
         "started_at",
         "finished_at",
         "created_at",

@@ -119,21 +119,33 @@ def start_backtest_job(
 ) -> dict[str, Any]:
     settings = settings or get_settings()
     initialize_database(settings)
-    job_key, _ids = normalize_backtest_targets(strategy_id, strategy_ids)
-    run_id = _claim(job_key, settings)
+    job_key, ids = normalize_backtest_targets(strategy_id, strategy_ids)
+    from asqt.strategies import CODE_VERSION
+    from asqt.versioning import run_signature
+
+    signature = run_signature(
+        "research",
+        {
+            "job_key": job_key,
+            "strategy_ids": ids,
+            "parameter_set_ids": [STRATEGY_SPECS[sid]["parameter_set_id"] for sid in ids],
+            "code_version": CODE_VERSION,
+        },
+    )
+    run_id = _claim(job_key, settings, run_signature=signature)
     if background:
         threading.Thread(
             target=_execute,
-            args=(run_id, job_key, settings),
+            args=(run_id, job_key, settings, signature),
             daemon=True,
             name=f"asqt-research-{run_id[:8]}",
         ).start()
     else:
-        _execute(run_id, job_key, settings)
+        _execute(run_id, job_key, settings, signature)
     return get_research_run(run_id, settings=settings) or {"run_id": run_id, "status": "queued"}
 
 
-def _claim(strategy_id: str, settings: Settings) -> str:
+def _claim(strategy_id: str, settings: Settings, *, run_signature: str | None = None) -> str:
     run_id = str(uuid4())
     now = _now()
     with connect(settings) as conn:
@@ -149,10 +161,10 @@ def _claim(strategy_id: str, settings: Settings) -> str:
                 """
                 INSERT INTO research_run
                     (run_id, strategy_id, status, inflight, progress_pct, progress_done,
-                     progress_total, progress_label, started_at, created_at)
-                VALUES (?, ?, 'queued', 1, 0, 0, 0, ?, ?, ?)
+                     progress_total, progress_label, run_signature, started_at, created_at)
+                VALUES (?, ?, 'queued', 1, 0, 0, 0, ?, ?, ?, ?)
                 """,
-                (run_id, strategy_id, "排队", now, now),
+                (run_id, strategy_id, "排队", run_signature, now, now),
             )
             conn.commit()
         except ResearchBusy:
@@ -166,7 +178,41 @@ def _claim(strategy_id: str, settings: Settings) -> str:
     return run_id
 
 
-def _execute(run_id: str, strategy_id: str, settings: Settings) -> None:
+def resume_backtest_job(
+    run_id: str,
+    *,
+    strategy_id: str = "all",
+    strategy_ids: list[str] | None = None,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Refuse resume when the stored run_signature drifts from the new request."""
+    from asqt.strategies import CODE_VERSION
+    from asqt.versioning import assert_run_signature, run_signature
+
+    settings = settings or get_settings()
+    row = get_research_run(run_id, settings=settings)
+    if not row:
+        raise ValueError(f"unknown research run: {run_id}")
+    job_key, ids = normalize_backtest_targets(strategy_id, strategy_ids)
+    actual = run_signature(
+        "research",
+        {
+            "job_key": job_key,
+            "strategy_ids": ids,
+            "parameter_set_ids": [STRATEGY_SPECS[sid]["parameter_set_id"] for sid in ids],
+            "code_version": CODE_VERSION,
+        },
+    )
+    assert_run_signature(row.get("run_signature"), actual, run_id=run_id)
+    return row
+
+
+def _execute(run_id: str, strategy_id: str, settings: Settings, expected_signature: str | None = None) -> None:
+    if expected_signature:
+        from asqt.versioning import assert_run_signature
+
+        row = get_research_run(run_id, settings=settings) or {}
+        assert_run_signature(row.get("run_signature"), expected_signature, run_id=run_id)
     _patch(
         run_id,
         settings,
@@ -197,15 +243,26 @@ def _execute(run_id: str, strategy_id: str, settings: Settings) -> None:
             )
             reports.append(_compact_report(report))
             progress(date_steps, date_steps, f"{label} · 完成")
+        detail = {"ok": all(item.get("ok") for item in reports), "reports": reports}
+        from asqt.reporting import write_run_tree
+
+        write_run_tree(
+            "backtest",
+            run_id,
+            {"ok": detail["ok"], "strategy_id": strategy_id, "reports": reports, "job": True},
+            settings=settings,
+            strategy_id=strategy_id if strategy_id != "all" and "," not in strategy_id else None,
+            write_legacy_latest=False,
+        )
         _finish(
             run_id,
-            status="success" if all(item.get("ok") for item in reports) else "failed",
-            detail={"ok": all(item.get("ok") for item in reports), "reports": reports},
+            status="success" if detail["ok"] else "failed",
+            detail=detail,
             settings=settings,
             progress_pct=100,
             progress_done=grand,
             progress_total=grand,
-            progress_label="回测完成" if all(item.get("ok") for item in reports) else "回测未全部通过",
+            progress_label="回测完成" if detail["ok"] else "回测未全部通过",
         )
     except Exception as exc:
         _finish(run_id, status="failed", fail_reason=str(exc)[:500], settings=settings)

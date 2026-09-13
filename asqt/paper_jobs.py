@@ -96,6 +96,12 @@ def start_paper_job(
 
     if paper_run_locked(settings=settings):
         raise PaperBusy(PAPER_BUSY_MESSAGE)
+    from asqt.versioning import run_signature
+
+    signature = run_signature(
+        "paper",
+        {"strategy_id": job_key, "days": int(days), "mode": run_mode},
+    )
     run_id = str(uuid4())
     now = _now()
     execute(
@@ -111,6 +117,7 @@ def start_paper_job(
                     "strategy_id": job_key,
                     "days": days,
                     "mode": run_mode,
+                    "run_signature": signature,
                     "progress_pct": 0,
                     "progress_done": 0,
                     "progress_total": 0,
@@ -124,13 +131,37 @@ def start_paper_job(
     if background:
         threading.Thread(
             target=_execute,
-            args=(run_id, job_key, days, settings, run_mode),
+            args=(run_id, job_key, days, settings, run_mode, signature),
             daemon=True,
             name=f"asqt-paper-{run_id[:8]}",
         ).start()
     else:
-        _execute(run_id, job_key, days, settings, run_mode)
+        _execute(run_id, job_key, days, settings, run_mode, signature)
     return get_paper_run(run_id, settings=settings) or {"run_id": run_id, "status": "queued"}
+
+
+def resume_paper_job(
+    run_id: str,
+    *,
+    strategy_id: str = "all",
+    days: int = 20,
+    strategy_ids: list[str] | None = None,
+    mode: str = "sequential",
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    from asqt.paper import normalize_paper_mode, normalize_paper_targets
+    from asqt.versioning import assert_run_signature, run_signature
+
+    settings = settings or get_settings()
+    row = get_paper_run(run_id, settings=settings)
+    if not row:
+        raise ValueError(f"unknown paper run: {run_id}")
+    job_key, _ids = normalize_paper_targets(strategy_id, strategy_ids)
+    run_mode = normalize_paper_mode(mode)
+    actual = run_signature("paper", {"strategy_id": job_key, "days": int(days), "mode": run_mode})
+    stored = _message_dict(row.get("message")).get("run_signature") or row.get("run_signature")
+    assert_run_signature(stored, actual, run_id=run_id)
+    return row
 
 
 def _execute(
@@ -139,7 +170,14 @@ def _execute(
     days: int,
     settings: Settings,
     mode: str = "sequential",
+    expected_signature: str | None = None,
 ) -> None:
+    if expected_signature:
+        from asqt.versioning import assert_run_signature
+
+        row = get_paper_run(run_id, settings=settings) or {}
+        stored = _message_dict(row.get("message")).get("run_signature")
+        assert_run_signature(stored, expected_signature, run_id=run_id)
     _patch(
         run_id,
         settings,
@@ -268,6 +306,26 @@ def _finish(
                 for item in (detail.get("reports") or [])
             ],
         }
+        try:
+            from asqt.reporting import write_run_tree
+
+            write_run_tree(
+                "paper",
+                run_id,
+                {
+                    "ok": detail.get("ok"),
+                    "strategy_id": message.get("strategy_id"),
+                    "days": detail.get("days") or message.get("days"),
+                    "mode": detail.get("mode") or message.get("mode"),
+                    "result": message["result"],
+                    "status": status,
+                },
+                settings=settings,
+                strategy_id=str(message.get("strategy_id") or ""),
+                write_legacy_latest=False,
+            )
+        except Exception:
+            pass
     if fail_reason:
         message["fail_reason"] = fail_reason
     if progress_pct is not None:

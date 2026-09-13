@@ -8,7 +8,7 @@ from typing import Any
 import pandas as pd
 
 from asqt.config import Settings, ensure_runtime_dirs, get_settings
-from asqt.contracts import MARKET_DAILY_COLUMNS, MARKET_EVENT_COLUMNS
+from asqt.contracts import FUNDAMENTAL_SNAPSHOT_COLUMNS, MARKET_DAILY_COLUMNS, MARKET_EVENT_COLUMNS
 
 RECORD_SCHEMAS: dict[str, dict[str, Any]] = {
     "market_daily": {
@@ -20,6 +20,11 @@ RECORD_SCHEMAS: dict[str, dict[str, Any]] = {
         "name": "market_event",
         "columns": MARKET_EVENT_COLUMNS,
         "pk": ("event_id",),
+    },
+    "fundamental_snapshot": {
+        "name": "fundamental_snapshot",
+        "columns": FUNDAMENTAL_SNAPSHOT_COLUMNS,
+        "pk": ("symbol", "report_period", "metric", "source", "version"),
     },
 }
 
@@ -115,6 +120,8 @@ def query_records(
         date_col = "trade_date"
     elif "event_date" in frame.columns:
         date_col = "event_date"
+    elif "ann_date" in frame.columns:
+        date_col = "ann_date"
     if start is not None and date_col is not None:
         frame = frame[frame[date_col] >= start]
     if end is not None and date_col is not None:

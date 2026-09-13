@@ -164,8 +164,10 @@ def evaluate(
         if status is None:
             return _reject(REASON_NO_VERSION, f"{sid} has no version")
         if require_experiment:
-            path = settings.experiment_dir / f"latest-{sid}.json"
-            if not path.exists():
+            from asqt.reporting import latest_summary_path
+
+            path = latest_summary_path(sid, kind="backtest", settings=settings)
+            if path is None or not path.exists():
                 return _reject(REASON_MISSING_EXPERIMENT, "缺少最近一次回测报告")
             import json
 

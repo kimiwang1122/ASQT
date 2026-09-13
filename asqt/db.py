@@ -150,6 +150,7 @@ SCHEMA_SQL: tuple[str, ...] = (
         progress_label TEXT,
         fail_reason TEXT,
         detail TEXT,
+        run_signature TEXT,
         started_at TEXT,
         finished_at TEXT,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -167,6 +168,7 @@ SCHEMA_SQL: tuple[str, ...] = (
         progress_label TEXT,
         fail_reason TEXT,
         detail TEXT,
+        run_signature TEXT,
         started_at TEXT,
         finished_at TEXT,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -354,6 +356,7 @@ SCHEMA_SQL: tuple[str, ...] = (
         progress_label TEXT,
         fail_reason TEXT,
         detail TEXT,
+        run_signature TEXT,
         started_at TEXT,
         finished_at TEXT,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -380,6 +383,10 @@ _TARGET_POSITION_EXTRA_COLUMNS: tuple[tuple[str, str], ...] = (
 _STANDARD_ORDER_EXTRA_COLUMNS: tuple[tuple[str, str], ...] = (
     ("decision_id", "TEXT"),
 )
+_RUN_SIGNATURE_EXTRA_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("run_signature", "TEXT"),
+)
+_RUN_SIGNATURE_TABLES: tuple[str, ...] = ("research_run", "factor_run", "event_pull_run")
 
 
 def connect(settings: Settings | None = None) -> sqlite3.Connection:
@@ -471,6 +478,12 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         for column, col_type in _STANDARD_ORDER_EXTRA_COLUMNS:
             if column not in order_cols:
                 conn.execute(f"ALTER TABLE standard_order ADD COLUMN {column} {col_type}")
+    for table in _RUN_SIGNATURE_TABLES:
+        if table in tables:
+            cols = _existing_columns(conn, table)
+            for column, col_type in _RUN_SIGNATURE_EXTRA_COLUMNS:
+                if column not in cols:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
     _migrate_factor_signal(conn)
     conn.execute(
         "CREATE INDEX IF NOT EXISTS decision_log_strategy_signal ON decision_log(strategy_id, signal_date DESC)"

@@ -741,15 +741,29 @@ def create_app() -> FastAPI:
 
     @app.get("/api/research/experiments")
     def experiments() -> list[dict]:
-        import json
+        from asqt.reporting import list_latest_experiments
 
-        folder = settings.experiment_dir
-        if not folder.exists():
-            return []
-        items = []
-        for path in sorted(folder.glob("latest-*.json")):
-            items.append(json.loads(path.read_text(encoding="utf-8")))
-        return items
+        return list_latest_experiments(settings=settings)
+
+    @app.post("/api/research/draft-assist")
+    def draft_assist(payload: dict | None = None) -> dict:
+        from asqt.draft_assistant import DraftWriteForbidden, analyze_readonly
+        from asqt.pit import PitError
+
+        body = payload or {}
+        try:
+            return analyze_readonly(
+                asof=str(body.get("asof") or ""),
+                symbols=body.get("symbols"),
+                strategy_id=body.get("strategy_id"),
+                settings=settings,
+            )
+        except PitError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except DraftWriteForbidden as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/research/attribution")
     def attribution(strategy_id: str | None = None) -> dict:

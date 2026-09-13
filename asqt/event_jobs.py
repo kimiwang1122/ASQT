@@ -76,13 +76,16 @@ def start_events_pull_job(
 ) -> dict[str, Any]:
     settings = settings or get_settings()
     initialize_database(settings)
-    run_id = _claim(settings)
+    from asqt.versioning import run_signature
+
     payload = {
         "source": source,
         "symbols": symbols,
         "start": start,
         "end": end,
     }
+    signature = run_signature("event_pull", payload)
+    run_id = _claim(settings, run_signature=signature)
     execute(
         "UPDATE event_pull_run SET detail = ? WHERE run_id = ?",
         (json.dumps(payload, ensure_ascii=False), run_id),
@@ -91,16 +94,39 @@ def start_events_pull_job(
     if background:
         threading.Thread(
             target=_execute,
-            args=(run_id, symbols, start, end, settings),
+            args=(run_id, symbols, start, end, settings, signature),
             daemon=True,
             name=f"asqt-events-pull-{run_id[:8]}",
         ).start()
     else:
-        _execute(run_id, symbols, start, end, settings)
+        _execute(run_id, symbols, start, end, settings, signature)
     return get_event_pull_run(run_id, settings=settings) or {"run_id": run_id, "status": "queued"}
 
 
-def _claim(settings: Settings) -> str:
+def resume_events_pull_job(
+    run_id: str,
+    *,
+    symbols: list[str] | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    source: str = "tushare",
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    from asqt.versioning import assert_run_signature, run_signature
+
+    settings = settings or get_settings()
+    row = get_event_pull_run(run_id, settings=settings)
+    if not row:
+        raise ValueError(f"unknown event pull run: {run_id}")
+    actual = run_signature(
+        "event_pull",
+        {"source": source, "symbols": symbols, "start": start, "end": end},
+    )
+    assert_run_signature(row.get("run_signature"), actual, run_id=run_id)
+    return row
+
+
+def _claim(settings: Settings, *, run_signature: str | None = None) -> str:
     run_id = str(uuid4())
     now = _now()
     with connect(settings) as conn:
@@ -116,10 +142,10 @@ def _claim(settings: Settings) -> str:
                 """
                 INSERT INTO event_pull_run
                     (run_id, status, inflight, progress_pct, progress_done,
-                     progress_total, progress_label, started_at, created_at)
-                VALUES (?, 'queued', 1, 0, 0, 0, ?, ?, ?)
+                     progress_total, progress_label, run_signature, started_at, created_at)
+                VALUES (?, 'queued', 1, 0, 0, 0, ?, ?, ?, ?)
                 """,
-                (run_id, "排队中", now, now),
+                (run_id, "排队中", run_signature, now, now),
             )
             conn.execute("COMMIT")
         except EventsBusy:
@@ -136,8 +162,14 @@ def _execute(
     start: str | None,
     end: str | None,
     settings: Settings,
+    expected_signature: str | None = None,
 ) -> None:
     try:
+        if expected_signature:
+            from asqt.versioning import assert_run_signature
+
+            row = get_event_pull_run(run_id, settings=settings) or {}
+            assert_run_signature(row.get("run_signature"), expected_signature, run_id=run_id)
         _patch(
             run_id,
             status="running",

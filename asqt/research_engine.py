@@ -541,17 +541,17 @@ class LocalResearchEngine:
         write_factor_signals(rows, settings=self.settings)
 
     def _write_report(self, report: dict[str, Any]) -> Path:
-        import json
+        from asqt.reporting import write_run_tree
 
-        folder = self.settings.experiment_dir
-        folder.mkdir(parents=True, exist_ok=True)
-        path = folder / f"{report['strategy_id']}_{report['run_id']}.json"
-        stamped = dict(report)
-        stamped["created_at"] = datetime.now(timezone.utc).isoformat()
-        path.write_text(json.dumps(stamped, ensure_ascii=False, indent=2), encoding="utf-8")
-        latest = folder / f"latest-{report['strategy_id']}.json"
-        latest.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
-        return path
+        run_id = str(report.get("run_id") or "unknown")
+        return write_run_tree(
+            "backtest",
+            run_id,
+            report,
+            settings=self.settings,
+            strategy_id=str(report.get("strategy_id") or ""),
+            manifest={"code_version": report.get("code_version"), "data_version": report.get("data_version")},
+        )
 
 
 def run_p2_acceptance_suite(settings: Settings | None = None) -> dict[str, Any]:

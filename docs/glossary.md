@@ -41,6 +41,10 @@
 | 市场快照 | `/api/market/snapshot` | 按 `asof`（`trade_date` 别名）取 TopN；响应带 `data_version`；同 asof+version 两次一致；错 version → `version_mismatch`。 |
 | `provider_registry` | 源声明 | `priority` / `optional` / `provides`；`providers_for` / `fetch_with_fallback`；扩 schema 优先改声明。 |
 | `filter_expr` | 选股 DSL | `all`/`any`/叶子 `{factor,op,value}`；`filters` 列表仍为扁平 AND。 |
+| 实验目录树 | `asqt.reporting` | `data/experiment/{backtest\|tune\|paper\|factor\|draft}/{run_id}/summary.json`；`latest/` 指针；admit 仍可读 `latest-{sid}.json`。 |
+| `run_signature` | 任务指纹 | job 配置 sha1[:16]；续跑比对失败 → `SignatureMismatch`，防配置漂移。 |
+| `fundamental_snapshot` | 财务快照 | schema 预留；可知日=`ann_date`；全量拉数 X3。 |
+| draft-assist | 只读助手 | `POST /api/research/draft-assist`；写 `decision_log`；禁止 paper lifecycle / 写仓。 |
 | `REVIEW` / `asqt.decision` | 决策哨兵 | 五档/三档评级；解析失败为 `REVIEW`，禁止静默变 Hold。 |
 | `risk_gate` | 终审闸门 | `evaluate(purpose=orders|admit)` 唯一出口；稳定 `reason_code`（如 `quality_block` / `kill_switch` / `stale_data`）。 |
 | `decision_log` | 决策日志 | SQLite pending→resolved；`thesis_json`/`outcome_json` 主存（禁 markdown）；`GET /api/decisions?asof=` PIT 过滤。目标仓/订单可挂 `decision_id`。 |
