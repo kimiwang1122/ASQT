@@ -23,6 +23,7 @@ class ContractQualityChecker:
         calendar: list[dict] | None = None,
         expected_symbols: list[str] | None = None,
         corporate_actions: list[dict] | None = None,
+        asof: str | None = None,
     ) -> dict:
         if dataset != "market_daily":
             return {
@@ -48,6 +49,14 @@ class ContractQualityChecker:
         issues.extend(_range_issues(rows))
         issues.extend(_adj_jump_issues(records or [], corporate_actions))
         issues.extend(_point_in_time_issues(rows, instruments or []))
+        issues.extend(
+            _stale_asof_issues(
+                records or [],
+                calendar,
+                asof=asof or trade_date,
+                expected_symbols=expected_symbols,
+            )
+        )
         blocked = any(item["severity"] == "block" for item in issues)
         return {
             "ok": not blocked,
@@ -308,11 +317,53 @@ def _point_in_time_issues(rows: list[dict], instruments: list[dict]) -> list[dic
     return issues
 
 
+def _stale_asof_issues(
+    all_records: list[dict],
+    calendar: list[dict] | None,
+    *,
+    asof: str | None,
+    expected_symbols: list[str] | None,
+) -> list[dict]:
+    from asqt.stale import evaluate_market_staleness, open_trade_dates
+
+    opens = open_trade_dates(calendar)
+    if not opens:
+        return []
+    if asof:
+        cutoff = str(asof)[:10]
+    else:
+        cutoff = opens[-1]
+    # Only evaluate against an asof that is itself an open session (or last open <= asof).
+    eligible = [d for d in opens if d <= cutoff]
+    if not eligible:
+        return []
+    asof_session = eligible[-1]
+    report = evaluate_market_staleness(
+        records=all_records,
+        calendar=calendar,
+        asof=asof_session,
+        expected_symbols=expected_symbols,
+    )
+    return report.issues
+
+
 def format_issue_diff(diff: str | None, *, check_type: str | None = None) -> str:
     """Human-readable copy for quality_issue.diff. Raw string stays on the row."""
     text = (diff or "").strip()
     if not text:
         return "-"
+    stale = re.search(
+        r"latest_bar=([0-9-]+);\s*lag_sessions=(\d+);\s*max_lag=(\d+)",
+        text,
+    )
+    if stale or check_type == "stale_asof":
+        if stale:
+            latest, lag, max_lag = stale.groups()
+            return (
+                f"行情过旧：最新日 K {latest}，相对截止日落后 {lag} 个交易日"
+                f"（阈值 {max_lag}）。"
+            )
+        return f"行情过旧：{text}"
     scale = re.search(
         r"adj_factor_scale n=(\d+).*stored=([0-9.]+)\s+peer=([0-9.]+)\s+rel=([0-9.]+)",
         text,

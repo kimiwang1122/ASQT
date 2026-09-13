@@ -184,6 +184,7 @@ def pull_daily(
         check_end = min(end, session_asof_date())
         check = ContractQualityChecker().check(
             "market_daily",
+            asof=check_end,
             records=[row for row in stored if start <= row["trade_date"] <= end and row["symbol"] in set(symbols)],
             instruments=query_all("SELECT * FROM instrument_master", settings=settings),
             calendar=query_all(
@@ -306,6 +307,7 @@ def check_market_daily(*, settings: Settings | None = None, expected_symbols: li
     asof = session_asof_date()
     result = ContractQualityChecker().check(
         "market_daily",
+        asof=asof,
         records=read_market_daily(settings=settings),
         instruments=query_all("SELECT * FROM instrument_master", settings=settings),
         calendar=query_all(

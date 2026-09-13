@@ -602,6 +602,11 @@ class PaperOrderService:
         if not self._calendar_open(trade_date):
             return self._reject_stub(trade_date, strategy_id, "calendar_closed")
 
+        rows = read_market_daily(end=trade_date, settings=self.settings)
+        by_key = {(str(row["trade_date"]), str(row["symbol"])): row for row in rows}
+        if self._stale_blocks_trading(trade_date, rows):
+            return self._reject_stub(trade_date, strategy_id, "stale_data")
+
         ledger = PaperLedger(strategy_id, self.settings)
         state = ledger.load(before=trade_date)
         # T+1: yesterday's buys become tradable at next session open.
@@ -612,8 +617,6 @@ class PaperOrderService:
         flatten_only = global_kill or book_halted
         halt_tag = "kill_switch" if global_kill else ("strategy_halt" if book_halted else "paper")
 
-        rows = read_market_daily(end=trade_date, settings=self.settings)
-        by_key = {(str(row["trade_date"]), str(row["symbol"])): row for row in rows}
         created: list[dict[str, Any]] = []
 
         if flatten_only:
@@ -1014,6 +1017,24 @@ class PaperOrderService:
         if not rows:
             return True
         return int(rows[0]["is_open"] or 0) == 1
+
+    def _stale_blocks_trading(self, trade_date: str, rows: list[dict[str, Any]]) -> bool:
+        """When ASQT_STALE_SEVERITY=block, refuse fills if market lags asof too far."""
+        from asqt.stale import evaluate_market_staleness, stale_severity
+
+        if stale_severity() != "block":
+            return False
+        calendar = query_all(
+            "SELECT * FROM trade_calendar WHERE market = 'CN' AND trade_date <= ?",
+            (trade_date,),
+            settings=self.settings,
+        )
+        report = evaluate_market_staleness(
+            records=rows,
+            calendar=calendar,
+            asof=trade_date,
+        )
+        return report.blocked
 
     def _dates(self) -> list[str]:
         rows = read_market_daily(settings=self.settings)

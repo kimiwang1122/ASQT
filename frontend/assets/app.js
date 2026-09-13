@@ -582,6 +582,7 @@ const QUALITY_CHECK_LABEL = {
   adj_conflict: "复权冲突",
   point_in_time: "时点错误",
   cross_source: "跨源不一致",
+  stale_asof: "行情过旧",
 };
 const QUALITY_SORT_LABEL = {
   created_at: "时间",

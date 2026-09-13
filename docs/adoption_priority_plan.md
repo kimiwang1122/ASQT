@@ -67,10 +67,10 @@
 - [x] 命令：`arch -arm64 .venv/bin/python -m pytest tests/test_pit.py tests/test_events.py -q` 全绿
 
 **GATE-A2 陈旧守卫（A1 之后）**
-- [ ] 统一异常：`NoMarketDataError` / `StaleDataError`（或等价）可被 API/质检识别
-- [ ] 质检 `stale_asof`：最新 bar 早于 asof 超过 N 个**交易日** → 可配 warn/block
-- [ ] paper 路径：stale=block 时不得用过旧价撮合（单测）
-- [ ] 默认 N∈[5,10]，配置可覆盖；按交易日历计数（非自然日）
+- [x] 统一异常：`NoMarketDataError` / `StaleDataError`（或等价）可被 API/质检识别
+- [x] 质检 `stale_asof`：最新 bar 早于 asof 超过 N 个**交易日** → 可配 warn/block
+- [x] paper 路径：stale=block 时不得用过旧价撮合（单测）
+- [x] 默认 N∈[5,10]，配置可覆盖；按交易日历计数（非自然日）
 
 **GATE-A3 符号边界（可与 A1 同 PR）**
 - [x] `normalize_symbol`：`000001.SZ` / 大小写 / BaoStock `sz.000001` / 可推断的 6 位 → 标准形

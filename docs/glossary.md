@@ -39,6 +39,7 @@
 | `point_in_time` | 时点错误 | 质检：上市前或退市后仍有行情。 |
 | PIT / `asqt.pit` | 时点窗口 | 统一 `asof`：只见 `date <= asof`；backtest 丢无日期字段；见 [adoption_priority_plan.md](adoption_priority_plan.md) GATE-A1。 |
 | `missing` / `range` / `cross_source` | 质检类型 | 缺数；OHLC/量额非法；主备源对不上（`warn`，不单独停交易）。 |
+| `stale_asof` | 行情过旧 | 最新日 K 相对 asof 落后超过 N 个**交易日**（默认 5，`ASQT_STALE_MAX_SESSIONS`）。严重级别 `ASQT_STALE_SEVERITY=warn|block`；block 时 paper 拒单 `stale_data`。 |
 | `block` / `warn` | 严重级别 | `block` 开放则 `trade_allowed=false`，禁新订单；`warn` 不翻转闸门。 |
 | 闸门 | `trade_allowed` | 质量门禁：有开放 block 就不能下新单（mock 与 Paper 一致）。 |
 | 主源 / 备源 / peer | BaoStock / AkShare / Tushare | 交易主路径只用主源；备源和对账源不驱动下单。 |
