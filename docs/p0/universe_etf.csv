@@ -5,3 +5,7 @@ symbol,name,instrument_type,exchange,board,pool,index_name,reason,asof_date
 159915.SZ,易方达创业板ETF,etf,SZ,broad_index,etf_broad,创业板指,创业成长宽基,2026-09-03
 588000.SH,华夏上证科创板50ETF,etf,SH,broad_index,etf_broad,科创50,科创宽基,2026-09-03
 510050.SH,华夏上证50ETF,etf,SH,broad_index,etf_broad,上证50,超大盘宽基;AUM/成交额通常可查,2026-09-03
+159901.SZ,深证100ETF,etf,SZ,broad_index,etf_broad,深证100,深市大盘宽基补足,2026-09-11
+510180.SH,上证180ETF,etf,SH,broad_index,etf_broad,上证180,沪市大盘宽基补足,2026-09-11
+159949.SZ,华安创业板50ETF,etf,SZ,broad_index,etf_broad,创业板50,创业成长宽基补足,2026-09-11
+563300.SH,华泰柏瑞中证A500ETF,etf,SH,broad_index,etf_broad,中证A500,A500宽基补足,2026-09-11

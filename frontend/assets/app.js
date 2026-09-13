@@ -52,9 +52,24 @@ async function requestJson(url, options) {
     } catch (_err) {
       /* keep status text */
     }
-    throw new Error(detail);
+    const err = new Error(detail);
+    err.status = response.status;
+    throw err;
   }
   return response.json();
+}
+
+/** Call planned endpoints; on 404 return null and toast (events sibling may lag). */
+async function requestJsonOrMissing(url, options, missingLabel) {
+  try {
+    return await requestJson(url, options);
+  } catch (error) {
+    if (error && error.status === 404) {
+      showToast(missingLabel || `接口暂不可用（404）：${url}`, "warn");
+      return null;
+    }
+    throw error;
+  }
 }
 
 function setText(id, value) {
@@ -143,6 +158,16 @@ const TASK_NAME_LABEL = {
   "seed-demo": "初始化演示",
   universe_load: "加载股票池",
   "universe-load": "加载股票池",
+  "factor-compute": "因子计算",
+  factor_compute: "因子计算",
+  "factors-compute": "因子计算",
+  factors_compute: "因子计算",
+};
+
+const OVERRIDE_ACTION_LABEL = {
+  force_in: "强制纳入",
+  force_out: "强制剔除",
+  cap: "权重上限",
 };
 const STRATEGY_STATUS_LABEL = {
   draft: "草稿",
@@ -288,23 +313,12 @@ function renderMarket(payload) {
   });
   if (!records.length) {
     const tr = document.createElement("tr");
-    const td = document.createElement("td");
+      const td = document.createElement("td");
     td.colSpan = 13;
     td.className = "table-empty";
-    const wrap = document.createElement("div");
-    wrap.className = "empty-action";
-    const note = document.createElement("span");
-    note.textContent = "当前筛选没有行情。";
-    const action = document.createElement("button");
-    action.type = "button";
-    action.className = "secondary";
-    action.id = "bootstrap-empty";
-    action.textContent = "初始化演示数据";
-    wrap.append(note, action);
-    td.appendChild(wrap);
+    td.textContent = "当前筛选没有行情。请到「同步」页点「追加行情」同步或拉取数据。";
     tr.appendChild(td);
     body.appendChild(tr);
-    action.addEventListener("click", runBootstrap);
     return;
   }
   records.forEach((row, index) => {
@@ -512,7 +526,7 @@ function renderSources(sources) {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
     td.colSpan = 7;
-    td.textContent = "暂无数据源。请先初始化演示数据。";
+    td.textContent = "暂无数据源。请到「同步」页点「追加行情」同步后刷新。";
     tr.appendChild(td);
     body.appendChild(tr);
     return;
@@ -718,7 +732,9 @@ const ALERT_CATEGORY_LABEL = {
 };
 
 const ALERT_TITLE_LABEL = {
-  "max drawdown stop": "回撤触发急停",
+  "max drawdown stop": "组合回撤触发急停",
+  "strategy drawdown halt": "单策略回撤平仓",
+  "flatten incomplete": "未完成平仓",
   "max drawdown warning": "回撤预警",
   "kill switch on": "急停已打开",
   "paper trading on": "模拟交易已开启",
@@ -815,14 +831,18 @@ function formatAlertSummary(row) {
   }
   const title = formatAlertTitle(row);
   if (payload.dd != null) {
+    const kind = String(payload.kind || "");
+    const strategyStop = kind.endsWith("strategy_stop") || String(row?.title || "").includes("strategy drawdown");
     const stop =
       row?.level === "critical" ||
-      String(payload.kind || "").endsWith("stop") ||
+      kind.endsWith("stop") ||
       String(row?.title || "").includes("stop");
-    const warn =
-      String(payload.kind || "").endsWith("warn") || String(row?.title || "").includes("warning");
+    const warn = kind.endsWith("warn") || String(row?.title || "").includes("warning");
+    if (strategyStop) {
+      return `回撤 ${pctText(payload.dd)} 触发单策略平仓`;
+    }
     if (stop) {
-      return `回撤 ${pctText(payload.dd)} 触发急停`;
+      return `回撤 ${pctText(payload.dd)} 触发组合急停`;
     }
     if (warn) {
       return `回撤 ${pctText(payload.dd)} 触及预警`;
@@ -888,6 +908,9 @@ function appendAlertFullDetail(container, row) {
     etf_momentum_topk: "ETF 动量 TopK",
     stock_lowvol_momentum: "股票低波动量",
     etf_ma_momentum_filter: "ETF 均线动量过滤",
+    stock_short_reversal_topk: "股票短反转 TopK",
+    stock_momentum_volume_confirm: "股票动量量能确认",
+    stock_momentum_skip_month: "股票跳月动量",
   };
   const isDrawdown =
     String(payload.kind || "").startsWith("drawdown") ||
@@ -1089,6 +1112,9 @@ function formatAlertFull(row) {
     etf_momentum_topk: "ETF 动量 TopK",
     stock_lowvol_momentum: "股票低波动量",
     etf_ma_momentum_filter: "ETF 均线动量过滤",
+    stock_short_reversal_topk: "股票短反转 TopK",
+    stock_momentum_volume_confirm: "股票动量量能确认",
+    stock_momentum_skip_month: "股票跳月动量",
   };
 
   if (
@@ -1550,6 +1576,10 @@ function showPage(page) {
     loadQualityIssues().catch((error) => {
       setText("quality-page-meta", `加载失败：${error.message}`);
     });
+    loadEventsPage().catch((error) => {
+      setText("events-page-meta", `加载失败：${error.message}`);
+    });
+    resumeActiveEventsPull().catch(() => {});
   }
   if (page === "sync") {
     loadSyncRuns().catch((error) => {
@@ -1560,6 +1590,9 @@ function showPage(page) {
     loadOrders().catch((error) => {
       setText("paper-account-hint", `加载失败：${error.message}`);
     });
+    loadOverridesPage().catch((error) => {
+      setText("override-page-meta", `加载失败：${error.message}`);
+    });
   }
   if (page === "strategy") {
     loadStrategyPage().catch((error) => {
@@ -1568,6 +1601,12 @@ function showPage(page) {
       if (hint) {
         hint.hidden = false;
       }
+    });
+    loadFactorsPage().catch((error) => {
+      setText("factor-compute-meta", `加载失败：${error.message}`);
+    });
+    loadTagsPage().catch((error) => {
+      setText("tags-page-meta", `加载失败：${error.message}`);
     });
   }
   if (page === "review") {
@@ -1616,6 +1655,7 @@ async function refresh() {
   renderTasks(status.recent_tasks || []);
   renderSources(sources);
   renderPorts(ports);
+  syncPaperRunDaysMax(status.max_paper_days);
   await loadOverviewAlerts().catch(() => {});
   if ((location.hash || "").includes("overview-alerts")) {
     window.setTimeout(focusOverviewAlerts, 80);
@@ -1626,11 +1666,32 @@ async function refresh() {
     ["因子信号行数", status.factor_signal_rows],
     ["开放阻断", status.open_quality_blocks ?? status.open_quality_issues],
     ["开放警告", status.open_quality_warns ?? 0],
+    ["模拟天数上限", status.max_paper_days],
   ]);
   renderKv(
     "layout-grid",
     Object.entries(status.layout || health.layout || {}).map(([k, v]) => [k, v]),
   );
+}
+
+let paperRunDaysMax = 2000;
+
+function syncPaperRunDaysMax(maxDays) {
+  const max = Math.max(2, Number(maxDays) || 0);
+  if (!max) {
+    return;
+  }
+  paperRunDaysMax = max;
+  const input = document.getElementById("paper-run-days");
+  if (!input) {
+    return;
+  }
+  input.max = String(max);
+  input.title = `最多可跑到当前行情可用交易日上限（${max}）`;
+  const current = Number(input.value);
+  if (Number.isFinite(current) && current > max) {
+    input.value = String(max);
+  }
 }
 
 function showActionError(message) {
@@ -1652,7 +1713,7 @@ async function runBootstrap() {
   try {
     const result = await requestJson("/api/admin/bootstrap", { method: "POST" });
     document.getElementById("market-date").value = "";
-    await refresh();
+  await refresh();
     if (currentPage() === "data") {
       await loadQualityIssues();
     }
@@ -1670,10 +1731,6 @@ function applyTheme(mode) {
   document.getElementById("theme-dark").classList.toggle("active", mode === "dark");
   document.getElementById("theme-light").classList.toggle("active", mode === "light");
 }
-
-document.getElementById("bootstrap").addEventListener("click", () => {
-  runBootstrap();
-});
 
 document.getElementById("sync-now").addEventListener("click", () => {
   triggerSync();
@@ -1792,32 +1849,114 @@ let watchedRunId = "";
 
 const TOAST_HOLD_MS = 5000;
 let confirmResolver = null;
+let confirmOptions = {};
 
-function closeConfirmDialog(ok) {
-  const mask = document.getElementById("confirm-dialog");
-  if (mask) {
-    mask.hidden = true;
+const CONFIRM_REASON_HINT = "请填写原因（不能全是空格）";
+
+function showConfirmReasonError(message) {
+  const reasonInput = document.getElementById("confirm-reason");
+  const reasonError = document.getElementById("confirm-reason-error");
+  if (reasonError) {
+    reasonError.hidden = !message;
+    reasonError.textContent = message || "";
   }
-  const resolve = confirmResolver;
-  confirmResolver = null;
-  if (resolve) {
-    resolve(Boolean(ok));
+  if (reasonInput) {
+    reasonInput.classList.toggle("is-invalid", Boolean(message));
+    if (message) {
+      reasonInput.focus();
+      reasonInput.select?.();
+    }
   }
 }
 
-function confirmDialog(message) {
+function closeConfirmDialog(ok) {
+  const requireReason = Boolean(confirmOptions.requireReason);
+  if (ok && requireReason) {
+    const reasonInput = document.getElementById("confirm-reason");
+    const value = (reasonInput?.value || "").trim();
+    if (!value) {
+      showConfirmReasonError(CONFIRM_REASON_HINT);
+      return;
+    }
+  }
+  const mask = document.getElementById("confirm-dialog");
+  const card = mask?.querySelector(".confirm-card");
+  const reasonWrap = document.getElementById("confirm-reason-wrap");
+  const reasonInput = document.getElementById("confirm-reason");
+  const reason = (reasonInput?.value || "").trim();
+  if (mask) {
+    mask.hidden = true;
+  }
+  if (card) {
+    card.classList.remove("has-reason");
+  }
+  if (reasonWrap) {
+    reasonWrap.hidden = true;
+  }
+  if (reasonInput) {
+    reasonInput.value = "";
+    reasonInput.classList.remove("is-invalid");
+  }
+  showConfirmReasonError("");
+  const resolve = confirmResolver;
+  const options = confirmOptions;
+  confirmResolver = null;
+  confirmOptions = {};
+  if (!resolve) {
+    return;
+  }
+  if (options.requireReason) {
+    resolve(ok ? { ok: true, reason } : { ok: false, reason: "" });
+    return;
+  }
+  resolve(Boolean(ok));
+}
+
+function confirmDialog(message, options = {}) {
   const mask = document.getElementById("confirm-dialog");
   const text = document.getElementById("confirm-message");
   const okBtn = document.getElementById("confirm-ok");
+  const card = mask?.querySelector(".confirm-card");
+  const reasonWrap = document.getElementById("confirm-reason-wrap");
+  const reasonInput = document.getElementById("confirm-reason");
   if (!mask || !text) {
+    if (options.requireReason) {
+      const reason = window.prompt(message, "");
+      if (reason == null) {
+        return Promise.resolve({ ok: false, reason: "" });
+      }
+      const trimmed = String(reason).trim();
+      if (!trimmed) {
+        return Promise.resolve({ ok: false, reason: "" });
+      }
+      return Promise.resolve({ ok: true, reason: trimmed });
+    }
     return Promise.resolve(window.confirm(message));
   }
   if (confirmResolver) {
     closeConfirmDialog(false);
   }
+  confirmOptions = options || {};
   text.textContent = message;
+  const requireReason = Boolean(confirmOptions.requireReason);
+  if (card) {
+    card.classList.toggle("has-reason", requireReason);
+  }
+  if (reasonWrap) {
+    reasonWrap.hidden = !requireReason;
+  }
+  if (reasonInput) {
+    reasonInput.value = "";
+    reasonInput.classList.remove("is-invalid");
+    reasonInput.placeholder = confirmOptions.reasonPlaceholder || "必填";
+  }
+  showConfirmReasonError("");
   mask.hidden = false;
-  okBtn?.focus();
+  if (requireReason && reasonInput) {
+    reasonInput.focus();
+  } else {
+    okBtn?.focus();
+  }
   return new Promise((resolve) => {
     confirmResolver = resolve;
   });
@@ -1829,6 +1968,22 @@ document.getElementById("confirm-close")?.addEventListener("click", () => closeC
 document.getElementById("confirm-dialog")?.addEventListener("click", (event) => {
   if (event.target === event.currentTarget) {
     closeConfirmDialog(false);
+  }
+});
+document.getElementById("confirm-reason")?.addEventListener("input", () => {
+  const reasonInput = document.getElementById("confirm-reason");
+  const reasonError = document.getElementById("confirm-reason-error");
+  if (reasonError && !reasonError.hidden) {
+    const value = (reasonInput?.value || "").trim();
+    showConfirmReasonError(value ? "" : CONFIRM_REASON_HINT);
+  } else if (reasonInput) {
+    reasonInput.classList.remove("is-invalid");
+  }
+});
+document.getElementById("confirm-reason")?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    closeConfirmDialog(true);
   }
 });
 window.addEventListener("keydown", (event) => {
@@ -1974,7 +2129,7 @@ async function triggerSync() {
 
 function syncSchedulerHint(scheduler) {
   if (!scheduler.enabled) {
-    return "自动同步已关闭。可用右上角「追加行情」人工触发。";
+    return "自动同步已关闭。可到「同步」页点「追加行情」人工触发。";
   }
   const next = scheduler.next_at ? formatDateTime(scheduler.next_at, false) : "-";
   const window = scheduler.window || "16:30";
@@ -2042,6 +2197,18 @@ async function resumeActiveSync() {
   }
 }
 
+function syncFailReasonTitle(row) {
+  const reason = String(row?.fail_reason || "").trim();
+  if (!reason) {
+    return "";
+  }
+  // Never surface raw job detail JSON on hover.
+  if (reason.startsWith("{") || reason.startsWith("[")) {
+    return "";
+  }
+  return reason;
+}
+
 function renderSyncRuns(payload) {
   const body = document.getElementById("sync-body");
   if (!body) {
@@ -2064,13 +2231,14 @@ function renderSyncRuns(payload) {
       const windowLabel = row.start_date && row.end_date ? `${row.start_date} → ${row.end_date}` : "-";
       const qualityLabel =
         row.quality_ok == null ? "-" : Number(row.quality_ok) ? "通过" : "未通过";
+      const failTitle = syncFailReasonTitle(row);
       appendCell(tr, String(startNo + index + 1), { className: "num" });
       appendCell(tr, formatDateTime(row.started_at || row.created_at));
       appendCell(tr, formatDateTime(row.finished_at));
       appendCell(tr, SYNC_TRIGGER_LABEL[row.trigger] || row.trigger || "-");
       appendCell(tr, syncStatusLabel(row), {
         tone: toneForSync(row.status),
-        title: syncStatusTitle(row) || row.fail_reason || "",
+        title: syncStatusTitle(row) || failTitle,
       });
       appendCell(tr, windowLabel);
       appendCell(tr, row.max_trade_date_after || row.max_trade_date_before || "-");
@@ -2078,7 +2246,10 @@ function renderSyncRuns(payload) {
       appendCell(tr, qualityLabel, {
         tone: row.quality_ok == null ? "muted" : Number(row.quality_ok) ? "ok" : "block",
       });
-      appendCell(tr, row.fail_reason || "-", { className: "cell-clip", title: row.fail_reason || row.detail || "" });
+      appendCell(tr, failTitle || (row.fail_reason ? "见质检详情" : "-"), {
+        className: "cell-clip",
+        title: failTitle,
+      });
       body.appendChild(tr);
     });
   }
@@ -2209,13 +2380,26 @@ function enhanceSelect(select) {
     return;
   }
   select.dataset.enhanced = "1";
+  const modes = String(select.dataset.asqtSelect || "")
+    .split(/\s+/)
+    .filter(Boolean);
+  const multi = select.multiple || modes.includes("multi");
+  if (multi) {
+    select.multiple = true;
+    enhanceMultiSelect(select, modes);
+    return;
+  }
+
   const wrap = document.createElement("div");
-  wrap.className = select.dataset.asqtSelect === "wide" ? "asqt-select asqt-select-wide" : "asqt-select";
+  wrap.className = modes.includes("wide") ? "asqt-select asqt-select-wide" : "asqt-select";
   select.parentNode.insertBefore(wrap, select);
   wrap.appendChild(select);
   const trigger = document.createElement("button");
   trigger.type = "button";
   trigger.className = "asqt-select-trigger";
+  const triggerLabel = document.createElement("span");
+  triggerLabel.className = "asqt-select-trigger-label";
+  trigger.appendChild(triggerLabel);
   const menu = document.createElement("ul");
   menu.className = "asqt-select-menu";
   menu.hidden = true;
@@ -2233,7 +2417,7 @@ function enhanceSelect(select) {
       li.textContent = option.textContent;
       li.dataset.value = option.value;
       if (option.selected) {
-        li.className = "is-active";
+        li.classList.add("is-active");
       }
       li.addEventListener("click", () => {
         select.value = option.value;
@@ -2242,7 +2426,9 @@ function enhanceSelect(select) {
       });
       menu.appendChild(li);
     });
-    trigger.textContent = currentLabel() || "请选择";
+    const label = currentLabel() || "请选择";
+    triggerLabel.textContent = label;
+    trigger.title = label;
     trigger.classList.toggle("is-placeholder", !select.value && currentLabel() === "全部");
   }
 
@@ -2259,12 +2445,270 @@ function enhanceSelect(select) {
   renderMenu();
 }
 
+function enhanceMultiSelect(select, modes) {
+  const maxTags = Math.max(1, Number(select.dataset.maxTags || 1) || 1);
+  const wrap = document.createElement("div");
+  wrap.className = modes.includes("wide")
+    ? "asqt-select asqt-select-wide asqt-select-multi"
+    : "asqt-select asqt-select-multi";
+  select.parentNode.insertBefore(wrap, select);
+  wrap.appendChild(select);
+
+  const control = document.createElement("div");
+  control.className = "asqt-select-control asqt-select-trigger";
+  control.tabIndex = 0;
+  control.setAttribute("role", "combobox");
+  control.setAttribute("aria-expanded", "false");
+  control.setAttribute("aria-haspopup", "listbox");
+
+  const tags = document.createElement("div");
+  tags.className = "asqt-select-tags";
+  const search = document.createElement("input");
+  search.type = "search";
+  search.className = "asqt-select-search";
+  search.autocomplete = "off";
+  search.spellcheck = false;
+  search.setAttribute("aria-label", "搜索策略");
+  search.placeholder = "";
+  const icon = document.createElement("span");
+  icon.className = "asqt-select-search-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.innerHTML =
+    '<svg viewBox="0 0 16 16" width="14" height="14"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M10.5 10.5 L14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+  tags.appendChild(search);
+  control.append(tags, icon);
+
+  const menu = document.createElement("ul");
+  menu.className = "asqt-select-menu";
+  menu.hidden = true;
+  menu.setAttribute("role", "listbox");
+  menu.setAttribute("aria-multiselectable", "true");
+  wrap.append(control, menu);
+
+  let query = "";
+
+  function strategyOptions() {
+    return [...select.options].filter((option) => option.value !== "all");
+  }
+
+  function selectedStrategyOptions() {
+    return strategyOptions().filter((option) => option.selected);
+  }
+
+  function syncAllOptionState() {
+    const allOpt = [...select.options].find((option) => option.value === "all");
+    if (!allOpt) {
+      return;
+    }
+    const strategies = strategyOptions();
+    allOpt.selected = strategies.length > 0 && strategies.every((option) => option.selected);
+  }
+
+  function openMenu() {
+    closeAllSelects();
+    menu.hidden = false;
+    wrap.classList.add("is-open");
+    control.setAttribute("aria-expanded", "true");
+    search.focus();
+  }
+
+  function renderControl() {
+    syncAllOptionState();
+    const selected = selectedStrategyOptions();
+    const allSelected = selected.length > 0 && selected.length === strategyOptions().length;
+    tags.querySelectorAll(".asqt-select-tag").forEach((node) => node.remove());
+    if (allSelected) {
+      const tag = document.createElement("span");
+      tag.className = "asqt-select-tag";
+      const label = document.createElement("em");
+      label.textContent = "全部";
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "asqt-select-tag-remove";
+      remove.setAttribute("aria-label", "清空策略选择");
+      remove.textContent = "×";
+      remove.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        strategyOptions().forEach((option) => {
+          option.selected = false;
+        });
+        syncAllOptionState();
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        renderAll();
+      });
+      tag.append(label, remove);
+      tags.insertBefore(tag, search);
+    } else {
+      const visible = selected.slice(0, maxTags);
+      const overflow = selected.length - visible.length;
+      visible.forEach((option) => {
+        const tag = document.createElement("span");
+        tag.className = "asqt-select-tag";
+        const label = document.createElement("em");
+        label.textContent = option.textContent;
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "asqt-select-tag-remove";
+        remove.setAttribute("aria-label", `移除 ${option.textContent}`);
+        remove.textContent = "×";
+        remove.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          option.selected = false;
+          syncAllOptionState();
+          select.dispatchEvent(new Event("change", { bubbles: true }));
+          renderAll();
+        });
+        tag.append(label, remove);
+        tags.insertBefore(tag, search);
+      });
+      if (overflow > 0) {
+        const more = document.createElement("span");
+        more.className = "asqt-select-tag asqt-select-tag-more";
+        more.textContent = `+ ${overflow} ...`;
+        more.title = selected
+          .slice(maxTags)
+          .map((option) => option.textContent)
+          .join("、");
+        tags.insertBefore(more, search);
+      }
+    }
+    search.placeholder = selected.length ? "" : "搜索策略";
+    control.classList.toggle("is-placeholder", selected.length === 0);
+  }
+
+  function renderMenu() {
+    menu.innerHTML = "";
+    const needle = query.trim().toLowerCase();
+    let visibleCount = 0;
+    syncAllOptionState();
+    [...select.options].forEach((option) => {
+      const label = option.textContent || "";
+      const isAll = option.value === "all";
+      if (
+        needle &&
+        !isAll &&
+        !label.toLowerCase().includes(needle) &&
+        !option.value.toLowerCase().includes(needle)
+      ) {
+        return;
+      }
+      if (needle && isAll) {
+        return;
+      }
+      visibleCount += 1;
+      const li = document.createElement("li");
+      li.dataset.value = option.value;
+      li.setAttribute("role", "option");
+      li.setAttribute("aria-selected", option.selected ? "true" : "false");
+      if (isAll) {
+        li.classList.add("asqt-select-option-all");
+      }
+      const text = document.createElement("span");
+      text.className = "asqt-select-option-label";
+      text.textContent = label;
+      const mark = document.createElement("span");
+      mark.className = "asqt-select-check";
+      mark.setAttribute("aria-hidden", "true");
+      mark.textContent = "✓";
+      li.append(text, mark);
+      if (option.selected) {
+        li.classList.add("is-active");
+      }
+      li.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (isAll) {
+          const strategies = strategyOptions();
+          const selectAll = !strategies.every((item) => item.selected);
+          strategies.forEach((item) => {
+            item.selected = selectAll;
+          });
+          option.selected = selectAll;
+        } else {
+          option.selected = !option.selected;
+          syncAllOptionState();
+        }
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        renderAll();
+        search.focus();
+      });
+      menu.appendChild(li);
+    });
+    if (!visibleCount) {
+      const empty = document.createElement("li");
+      empty.className = "asqt-select-empty";
+      empty.textContent = "无匹配策略";
+      menu.appendChild(empty);
+    }
+  }
+
+  function renderAll() {
+    renderControl();
+    renderMenu();
+  }
+
+  control.addEventListener("click", (event) => {
+    if (event.target.closest(".asqt-select-tag-remove")) {
+      return;
+    }
+    if (menu.hidden) {
+      openMenu();
+    } else if (!event.target.closest(".asqt-select-search")) {
+      search.focus();
+    }
+  });
+  search.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (menu.hidden) {
+      openMenu();
+    }
+  });
+  search.addEventListener("input", () => {
+    query = search.value || "";
+    if (menu.hidden) {
+      openMenu();
+    } else {
+      renderMenu();
+    }
+  });
+  search.addEventListener("keydown", (event) => {
+    if (event.key === "Backspace" && !search.value) {
+      const selected = selectedStrategyOptions();
+      if (selected.length) {
+        selected[selected.length - 1].selected = false;
+        syncAllOptionState();
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        renderAll();
+      }
+    }
+    if (event.key === "Escape") {
+      closeAllSelects();
+    }
+  });
+  select.addEventListener("change", renderAll);
+  wrap._asqtMultiClear = () => {
+    query = "";
+    if (search.value) {
+      search.value = "";
+    }
+    control.setAttribute("aria-expanded", "false");
+    renderControl();
+    renderMenu();
+  };
+  renderAll();
+}
+
 function closeAllSelects() {
   document.querySelectorAll(".asqt-select").forEach((wrap) => {
     wrap.classList.remove("is-open");
     const menu = wrap.querySelector(".asqt-select-menu");
     if (menu) {
       menu.hidden = true;
+    }
+    if (typeof wrap._asqtMultiClear === "function") {
+      wrap._asqtMultiClear();
     }
   });
 }
@@ -2307,6 +2751,35 @@ document.getElementById("tasks-toggle").addEventListener("click", () => {
   const row = document.querySelector(".overview-alerts-row") || document.querySelector(".overview-workbench");
   applyTasks(!row?.classList.contains("tasks-collapsed"));
 });
+
+function applySettingsPanelCollapse(panel, collapsed) {
+  if (!panel) {
+    return;
+  }
+  panel.classList.toggle("panel-collapsed", collapsed);
+  const key = panel.dataset.collapseKey;
+  if (key) {
+    localStorage.setItem(`asqt-${key}`, collapsed ? "1" : "0");
+  }
+  const title = panel.querySelector("h2")?.textContent?.trim() || "区块";
+  const btn = panel.querySelector(".panel-collapse-toggle");
+  if (btn) {
+    btn.textContent = collapsed ? "▸" : "▾";
+    btn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    btn.setAttribute("aria-label", collapsed ? `展开${title}` : `收起${title}`);
+  }
+}
+
+function initSettingsCollapsiblePanels() {
+  document.querySelectorAll("#page-settings .panel[data-collapse-key]").forEach((panel) => {
+    const key = panel.dataset.collapseKey;
+    const saved = localStorage.getItem(`asqt-${key}`) === "1";
+    applySettingsPanelCollapse(panel, saved);
+    panel.querySelector(".panel-collapse-toggle")?.addEventListener("click", () => {
+      applySettingsPanelCollapse(panel, !panel.classList.contains("panel-collapsed"));
+    });
+  });
+}
 
 const TRADE_PAGE_SIZE = 10;
 const tradePages = { daily: 1, positions: 1, fills: 1, orders: 1, mock: 1 };
@@ -2396,6 +2869,10 @@ const STRATEGY_LABEL = {
   etf_momentum_topk: "ETF 动量 TopK",
   stock_lowvol_momentum: "股票低波动量",
   etf_ma_momentum_filter: "ETF 均线动量过滤",
+  stock_short_reversal_topk: "股票短反转 TopK",
+  stock_momentum_volume_confirm: "股票动量量能确认",
+  stock_momentum_skip_month: "股票跳月动量",
+  stock_holder_increase_follow: "股票股东增持跟随",
 };
 
 const PARAM_LABEL = {
@@ -2405,19 +2882,35 @@ const PARAM_LABEL = {
   gross_limit: "总仓上限",
   window: "均线窗口",
   vol_window: "波动窗口",
+  vol_z_window: "量能窗口",
+  min_volume_z: "最小量能Z",
+  skip: "跳过天数",
   ma_window: "均线窗口",
   mom_lookback: "动量回看",
+  event_lookback: "事件回看",
+  min_momentum: "最小动量",
 };
 
 const PARAM_PCT_KEYS = new Set(["max_weight", "gross_limit"]);
 
 /** 与后端 STRATEGY_SPECS.params 对齐；策略页无 params 字段时用此展示。 */
 const STRATEGY_PARAMS = {
-  etf_ma_rotate: { window: 20, max_weight: 0.2, gross_limit: 0.95 },
-  stock_momentum_topk: { lookback: 20, top_k: 5, max_weight: 0.1, gross_limit: 0.95 },
-  etf_momentum_topk: { lookback: 40, top_k: 3, max_weight: 0.2, gross_limit: 0.95 },
-  stock_lowvol_momentum: { lookback: 20, vol_window: 20, top_k: 5, max_weight: 0.1, gross_limit: 0.95 },
-  etf_ma_momentum_filter: { ma_window: 20, mom_lookback: 40, top_k: 3, max_weight: 0.2, gross_limit: 0.95 },
+  etf_ma_rotate: { window: 40, max_weight: 0.2, gross_limit: 0.95 },
+  stock_momentum_topk: { lookback: 40, top_k: 5, max_weight: 0.1, gross_limit: 0.95 },
+  etf_momentum_topk: { lookback: 20, top_k: 2, max_weight: 0.2, gross_limit: 0.95 },
+  stock_lowvol_momentum: { lookback: 40, vol_window: 20, top_k: 5, max_weight: 0.1, gross_limit: 0.95 },
+  etf_ma_momentum_filter: { ma_window: 20, mom_lookback: 20, top_k: 3, max_weight: 0.2, gross_limit: 0.95 },
+  stock_short_reversal_topk: { lookback: 5, top_k: 5, max_weight: 0.1, gross_limit: 0.95 },
+  stock_momentum_volume_confirm: { lookback: 40, vol_z_window: 20, min_volume_z: 0.0, top_k: 5, max_weight: 0.1, gross_limit: 0.95 },
+  stock_momentum_skip_month: { lookback: 252, skip: 21, top_k: 5, max_weight: 0.1, gross_limit: 0.95 },
+  stock_holder_increase_follow: {
+    event_lookback: 20,
+    lookback: 20,
+    min_momentum: 0.0,
+    top_k: 5,
+    max_weight: 0.1,
+    gross_limit: 0.95,
+  },
 };
 
 function formatParamValue(key, value) {
@@ -2480,27 +2973,243 @@ function renderStrategyVersions(rows) {
   if (!body) {
     return;
   }
+  strategyVersionRows = Array.isArray(rows) ? rows.slice() : [];
   body.innerHTML = "";
-  if (!rows.length) {
+  if (!strategyVersionRows.length) {
+    strategySelected.clear();
+    strategyPage = 1;
+    paintStrategyPager(0, 1, 1);
+    syncStrategyBatchUi();
     const tr = document.createElement("tr");
     const td = document.createElement("td");
-    td.colSpan = 6;
+    td.colSpan = 7;
     td.className = "table-empty";
-    td.textContent = "还没有策略版本。先点「重跑回测」或命令行 asqt research-backtest --strategy all。";
+    td.textContent = "还没有策略版本。勾选后点「重跑回测」或命令行 asqt research-backtest --strategy all。";
     tr.appendChild(td);
     body.appendChild(tr);
     return;
   }
-  for (const row of rows) {
+  const known = new Set(strategyVersionRows.map((row) => row.strategy_id));
+  for (const id of [...strategySelected]) {
+    if (!known.has(id)) {
+      strategySelected.delete(id);
+    }
+  }
+  const total = strategyVersionRows.length;
+  const pages = Math.max(1, Math.ceil(total / STRATEGY_PAGE_SIZE));
+  if (strategyPage > pages) {
+    strategyPage = pages;
+  }
+  if (strategyPage < 1) {
+    strategyPage = 1;
+  }
+  const start = (strategyPage - 1) * STRATEGY_PAGE_SIZE;
+  const pageRows = strategyVersionRows.slice(start, start + STRATEGY_PAGE_SIZE);
+  pageRows.forEach((row, offset) => {
+    const index = start + offset;
     const tr = document.createElement("tr");
+    tr.className = "strategy-row";
+    tr.dataset.strategyId = row.strategy_id;
+    tr.dataset.status = row.status || "";
+    tr.dataset.index = String(index);
+    if (strategySelected.has(row.strategy_id)) {
+      tr.classList.add("is-selected");
+    }
+    const checkTd = document.createElement("td");
+    checkTd.className = "strategy-check-col";
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.className = "strategy-row-check";
+    check.checked = strategySelected.has(row.strategy_id);
+    check.setAttribute("aria-label", `选择 ${STRATEGY_LABEL[row.strategy_id] || row.strategy_id}`);
+    check.addEventListener("click", (event) => {
+      event.stopPropagation();
+      toggleStrategySelection(row.strategy_id, index, { shiftKey: event.shiftKey, force: check.checked });
+    });
+    checkTd.appendChild(check);
+    tr.appendChild(checkTd);
     appendCell(tr, STRATEGY_LABEL[row.strategy_id] || row.strategy_id);
     appendCell(tr, row.version || "v1");
     appendCell(tr, STRATEGY_STATUS_LABEL[row.status] || row.status || "-", { tone: toneForStrategy(row.status) });
     appendCell(tr, formatParameterSetDisplay(row));
     appendCell(tr, row.code_version || "-");
     appendCell(tr, row.effective_date || "-");
+    tr.addEventListener("click", (event) => {
+      if (event.target.closest("input,button,a,label")) {
+        return;
+      }
+      toggleStrategySelection(row.strategy_id, index, { shiftKey: event.shiftKey });
+    });
     body.appendChild(tr);
+  });
+  paintStrategyPager(total, strategyPage, pages);
+  syncStrategyBatchUi();
+}
+
+const STRATEGY_PAGE_SIZE = 10;
+let strategyVersionRows = [];
+let strategySelected = new Set();
+let strategyLastIndex = -1;
+let strategyPage = 1;
+
+function strategyPageSlice() {
+  const start = (strategyPage - 1) * STRATEGY_PAGE_SIZE;
+  return strategyVersionRows.slice(start, start + STRATEGY_PAGE_SIZE);
+}
+
+function paintStrategyPager(total, page, pages) {
+  setText(
+    "strategy-page-label",
+    total ? `共 ${total} 条 · ${page} / ${pages} · 每页 ${STRATEGY_PAGE_SIZE}` : "共 0 条",
+  );
+  const prev = document.getElementById("strategy-prev");
+  const next = document.getElementById("strategy-next");
+  if (prev) {
+    prev.disabled = page <= 1 || total === 0;
   }
+  if (next) {
+    next.disabled = page >= pages || total === 0;
+  }
+}
+
+function strategyStatusById(strategyId) {
+  const row = strategyVersionRows.find((item) => item.strategy_id === strategyId);
+  return row?.status || "";
+}
+
+function toggleStrategySelection(strategyId, index, { shiftKey = false, force } = {}) {
+  if (!strategyId) {
+    return;
+  }
+  const selecting = force == null ? !strategySelected.has(strategyId) : Boolean(force);
+  if (shiftKey && strategyLastIndex >= 0 && index != null) {
+    const lo = Math.min(strategyLastIndex, index);
+    const hi = Math.max(strategyLastIndex, index);
+    for (let i = lo; i <= hi; i += 1) {
+      const id = strategyVersionRows[i]?.strategy_id;
+      if (!id) {
+        continue;
+      }
+      if (selecting) {
+        strategySelected.add(id);
+      } else {
+        strategySelected.delete(id);
+      }
+    }
+  } else if (selecting) {
+    strategySelected.add(strategyId);
+  } else {
+    strategySelected.delete(strategyId);
+  }
+  if (index != null) {
+    strategyLastIndex = index;
+  }
+  document.querySelectorAll("#strategy-body tr.strategy-row").forEach((tr) => {
+    const id = tr.dataset.strategyId;
+    const on = strategySelected.has(id);
+    tr.classList.toggle("is-selected", on);
+    const box = tr.querySelector(".strategy-row-check");
+    if (box) {
+      box.checked = on;
+    }
+  });
+  syncStrategyBatchUi();
+}
+
+function syncStrategyBatchUi() {
+  const count = strategySelected.size;
+  setText("strategy-batch-count", `已选 ${count}`);
+  const all = document.getElementById("strategy-select-all");
+  if (all) {
+    const pageIds = strategyPageSlice().map((row) => row.strategy_id);
+    const pageSelected = pageIds.filter((id) => strategySelected.has(id)).length;
+    all.checked = pageIds.length > 0 && pageSelected === pageIds.length;
+    all.indeterminate = pageSelected > 0 && pageSelected < pageIds.length;
+  }
+  const selected = [...strategySelected];
+  const canAdmit = selected.some((id) => strategyStatusById(id) === "candidate");
+  const canRemove = selected.some((id) => strategyStatusById(id) === "paper");
+  const canResume = selected.some((id) => strategyStatusById(id) === "paused");
+  const admitBtn = document.getElementById("strategy-batch-admit");
+  const removeBtn = document.getElementById("strategy-batch-remove");
+  const resumeBtn = document.getElementById("strategy-batch-resume");
+  const runBtn = document.getElementById("strategy-run");
+  if (admitBtn) {
+    admitBtn.disabled = !canAdmit || backtestBusy || paperBusy;
+  }
+  if (removeBtn) {
+    removeBtn.disabled = !canRemove || backtestBusy || paperBusy;
+  }
+  if (resumeBtn) {
+    resumeBtn.disabled = !canResume || backtestBusy || paperBusy;
+  }
+  if (runBtn && !backtestBusy && !paperBusy) {
+    runBtn.disabled = count === 0;
+    runBtn.title = count === 0 ? "请先勾选要重跑回测的策略" : "对勾选策略重跑回测";
+  }
+}
+
+function showStrategyBatchError(message) {
+  const el = document.getElementById("strategy-batch-error");
+  if (!el) {
+    return;
+  }
+  el.hidden = !message;
+  el.textContent = message || "";
+}
+
+async function runStrategyBatch(action, allowedStatuses, emptyHint) {
+  const reasonInput = document.getElementById("strategy-batch-reason");
+  const reason = (reasonInput?.value || "").trim();
+  const result = document.getElementById("strategy-life-result");
+  showStrategyBatchError("");
+  if (!reason) {
+    showStrategyBatchError("请填写原因（不能全是空格）");
+    reasonInput?.focus();
+    return;
+  }
+  const targets = [...strategySelected].filter((id) => allowedStatuses.includes(strategyStatusById(id)));
+  if (!targets.length) {
+    showStrategyBatchError(emptyHint);
+    return;
+  }
+  if (result) {
+    result.hidden = false;
+    result.textContent = `批量处理中 0/${targets.length}…`;
+  }
+  const ok = [];
+  const failed = [];
+  for (let i = 0; i < targets.length; i += 1) {
+    const strategyId = targets[i];
+    if (result) {
+      result.textContent = `批量处理中 ${i + 1}/${targets.length}… ${STRATEGY_LABEL[strategyId] || strategyId}`;
+    }
+    try {
+      const payload = await requestJson(`/api/strategies/${encodeURIComponent(strategyId)}/lifecycle`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, reason }),
+      });
+      ok.push(`${STRATEGY_LABEL[payload.strategy_id] || payload.strategy_id}→${STRATEGY_STATUS_LABEL[payload.status] || payload.status}`);
+    } catch (error) {
+      failed.push(`${STRATEGY_LABEL[strategyId] || strategyId}：${error.message || "失败"}`);
+    }
+  }
+  const summary = [
+    ok.length ? `成功 ${ok.length}：${ok.join("；")}` : "",
+    failed.length ? `失败 ${failed.length}：${failed.join("；")}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  if (result) {
+    result.textContent = summary || "无变更";
+  }
+  showToast(failed.length ? `批量完成（失败 ${failed.length}）` : `批量完成 ${ok.length} 条`, failed.length ? "warn" : "ok");
+  strategySelected.clear();
+  if (reasonInput) {
+    reasonInput.value = "";
+  }
+  await loadStrategyPage();
 }
 
 function renderExperiments(rows) {
@@ -2512,7 +3221,7 @@ function renderExperiments(rows) {
   if (!rows.length) {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
-    td.colSpan = 7;
+    td.colSpan = 8;
     td.className = "table-empty";
     td.textContent = "还没有实验记录。";
     tr.appendChild(td);
@@ -2537,6 +3246,7 @@ function renderExperiments(rows) {
       { className: "num" },
     );
     appendCell(tr, row.data_version || "-");
+    appendCell(tr, formatDateTime(row.created_at) || "-");
     body.appendChild(tr);
   }
 }
@@ -2732,6 +3442,10 @@ function lockSelectTriggers(root, on) {
   }
   root.querySelectorAll(".asqt-select-trigger").forEach((btn) => {
     setControlReadonly(btn, on);
+    btn.classList.toggle("is-locked", Boolean(on));
+  });
+  root.querySelectorAll(".asqt-select-search").forEach((input) => {
+    setControlReadonly(input, on);
   });
 }
 
@@ -2755,19 +3469,26 @@ function applyTradeLocks() {
   const locked = backtestBusy || paperBusy;
   const lockTitle = paperBusy ? "模拟盘运行中，请勿重复提交" : backtestBusy ? "回测进行中，请稍候" : "";
   const runBtn = document.getElementById("paper-run-submit");
+  const parallelBtn = document.getElementById("paper-run-parallel");
   setControlReadonly(document.getElementById("strategy-run"), locked, lockTitle);
-  setControlReadonly(document.getElementById("bootstrap"), locked, lockTitle);
-  setControlReadonly(document.getElementById("strategy-life-submit"), locked, lockTitle);
-  setControlReadonly(document.getElementById("strategy-life-reason"), locked, lockTitle);
+  setControlReadonly(document.getElementById("strategy-batch-admit"), locked, lockTitle);
+  setControlReadonly(document.getElementById("strategy-batch-remove"), locked, lockTitle);
+  setControlReadonly(document.getElementById("strategy-batch-resume"), locked, lockTitle);
+  setControlReadonly(document.getElementById("strategy-batch-reason"), locked, lockTitle);
+  setControlReadonly(document.getElementById("strategy-select-all"), locked, lockTitle);
   setControlReadonly(runBtn, locked, lockTitle);
+  setControlReadonly(parallelBtn, locked, lockTitle);
   if (runBtn && !backtestBusy) {
     runBtn.textContent = paperBusy ? "运行中…" : "跑模拟";
   }
+  if (parallelBtn && !backtestBusy) {
+    parallelBtn.textContent = paperBusy ? "运行中…" : "并行模式";
+  }
   setControlReadonly(document.getElementById("paper-reset"), locked, lockTitle);
+  setControlReadonly(document.getElementById("paper-clear-halt"), locked, lockTitle);
   setControlReadonly(document.getElementById("paper-run-days"), paperBusy, lockTitle);
   lockSelectTriggers(document.getElementById("paper-run-form"), locked);
-  lockSelectTriggers(document.getElementById("strategy-run-form"), locked);
-  lockSelectTriggers(document.getElementById("strategy-life-form"), locked);
+  syncStrategyBatchUi();
   refreshHeaderActionLocks();
 }
 
@@ -2854,23 +3575,28 @@ async function resumeActiveBacktest() {
   }
 }
 
-const strategyRunForm = document.getElementById("strategy-run-form");
-if (strategyRunForm) {
-  strategyRunForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
+const strategyRunBtn = document.getElementById("strategy-run");
+if (strategyRunBtn) {
+  strategyRunBtn.addEventListener("click", async () => {
     const result = document.getElementById("strategy-run-result");
+    const ids = [...strategySelected];
+    showStrategyBatchError("");
+    if (!ids.length) {
+      showStrategyBatchError("请先勾选要重跑回测的策略");
+      return;
+    }
     if (result) {
       result.hidden = false;
-      result.textContent = "回测入队中…";
+      result.textContent = `回测入队中…（${ids.length} 个策略）`;
     }
     setBacktestBusy(true);
     try {
       const payload = await requestJson("/api/research/backtest", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ strategy_id: document.getElementById("strategy-run-id").value }),
+        body: JSON.stringify({ strategy_ids: ids }),
       });
-      showToast("回测已在后台开始", "ok");
+      showToast(`回测已在后台开始（${ids.length}）`, "ok");
       watchBacktest(payload.run_id);
     } catch (error) {
       setBacktestBusy(false);
@@ -2882,36 +3608,137 @@ if (strategyRunForm) {
   });
 }
 
-const strategyLifeForm = document.getElementById("strategy-life-form");
-if (strategyLifeForm) {
-  strategyLifeForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const result = document.getElementById("strategy-life-result");
-    const strategyId = document.getElementById("strategy-life-id").value;
-    const action = document.getElementById("strategy-life-action").value;
-    const reason = document.getElementById("strategy-life-reason").value.trim();
-    if (result) {
-      result.hidden = false;
-      result.textContent = "提交中…";
+document.getElementById("strategy-select-all")?.addEventListener("change", (event) => {
+  const on = Boolean(event.target.checked);
+  const pageRows = strategyPageSlice();
+  for (const row of pageRows) {
+    if (on) {
+      strategySelected.add(row.strategy_id);
+    } else {
+      strategySelected.delete(row.strategy_id);
     }
-    try {
-      const payload = await requestJson(`/api/strategies/${encodeURIComponent(strategyId)}/lifecycle`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, reason }),
-      });
-      if (result) {
-        result.textContent = `${STRATEGY_LABEL[payload.strategy_id] || payload.strategy_id} → ${STRATEGY_STATUS_LABEL[payload.status] || payload.status}`;
-      }
-      showToast("生命周期已更新", "ok");
-      await loadStrategyPage();
-    } catch (error) {
-      if (result) {
-        result.textContent = `失败：${error.message}`;
-      }
-      showToast(error.message || "生命周期失败", "block");
+  }
+  strategyLastIndex = pageRows.length
+    ? (strategyPage - 1) * STRATEGY_PAGE_SIZE + pageRows.length - 1
+    : -1;
+  document.querySelectorAll("#strategy-body tr.strategy-row").forEach((tr) => {
+    const id = tr.dataset.strategyId;
+    const selected = strategySelected.has(id);
+    tr.classList.toggle("is-selected", selected);
+    const box = tr.querySelector(".strategy-row-check");
+    if (box) {
+      box.checked = selected;
     }
   });
+  syncStrategyBatchUi();
+});
+
+document.getElementById("strategy-prev")?.addEventListener("click", () => {
+  if (strategyPage <= 1) {
+    return;
+  }
+  strategyPage -= 1;
+  renderStrategyVersions(strategyVersionRows);
+});
+
+document.getElementById("strategy-next")?.addEventListener("click", () => {
+  const pages = Math.max(1, Math.ceil(strategyVersionRows.length / STRATEGY_PAGE_SIZE));
+  if (strategyPage >= pages) {
+    return;
+  }
+  strategyPage += 1;
+  renderStrategyVersions(strategyVersionRows);
+});
+
+document.getElementById("strategy-batch-admit")?.addEventListener("click", () => {
+  runStrategyBatch("paper", ["candidate"], "请先勾选状态为「候选」的策略").catch((error) => {
+    showToast(error.message || "批量准入失败", "block");
+  });
+});
+
+document.getElementById("strategy-batch-remove")?.addEventListener("click", () => {
+  runStrategyBatch("pause", ["paper"], "请先勾选状态为「模拟」的策略（移出后为暂停）").catch((error) => {
+    showToast(error.message || "批量移出失败", "block");
+  });
+});
+
+document.getElementById("strategy-batch-resume")?.addEventListener("click", () => {
+  runStrategyBatch("resume", ["paused"], "请先勾选状态为「暂停」的策略").catch((error) => {
+    showToast(error.message || "批量恢复失败", "block");
+  });
+});
+
+document.getElementById("strategy-batch-reason")?.addEventListener("input", () => {
+  if (document.getElementById("strategy-batch-error") && !document.getElementById("strategy-batch-error").hidden) {
+    const reason = (document.getElementById("strategy-batch-reason")?.value || "").trim();
+    if (reason) {
+      showStrategyBatchError("");
+    }
+  }
+});
+
+function getPaperSelectedStrategyIds() {
+  const select = document.getElementById("paper-run-id");
+  if (!select) {
+    return Object.keys(STRATEGY_LABEL);
+  }
+  return [...select.options]
+    .filter((option) => option.selected && option.value && option.value !== "all")
+    .map((option) => option.value);
+}
+
+/** Match backend split_parallel_cash: floor share each, remainder on first. */
+function splitPortfolioCash(total, n) {
+  const count = Math.max(0, Math.floor(Number(n) || 0));
+  if (count <= 0) {
+    return [];
+  }
+  const amount = Number(total) || 0;
+  const base = Math.floor(amount / count);
+  const shares = Array.from({ length: count }, () => base);
+  shares[0] = amount - base * (count - 1);
+  return shares;
+}
+
+function plannedPaperBookCash(strategyId, selectedIds) {
+  const ids = Array.isArray(selectedIds) && selectedIds.length
+    ? selectedIds
+    : getPaperSelectedStrategyIds();
+  if (!ids.length) {
+    return 0;
+  }
+  const total = Number(lastPaperConfig?.initial_cash) || 0;
+  const shares = splitPortfolioCash(total, ids.length);
+  const idx = ids.indexOf(strategyId);
+  return idx >= 0 ? shares[idx] : 0;
+}
+
+/** Empty books (sessions===0): show planned split of portfolio cash for UI. */
+function paperDisplayBoard(id, board, selectedIds) {
+  const src = board && typeof board === "object" ? board : {};
+  if (Number(src.sessions || 0) > 0) {
+    return src;
+  }
+  const planned = plannedPaperBookCash(id, selectedIds);
+  return {
+    ...src,
+    initial_cash: planned,
+    end_asset: planned,
+    cash: planned,
+    peak_asset: planned,
+  };
+}
+
+function paperStrategyRequestBody(extra = {}) {
+  const ids = getPaperSelectedStrategyIds();
+  if (!ids.length) {
+    return { error: "请至少选择一个策略" };
+  }
+  const allIds = Object.keys(STRATEGY_LABEL);
+  if (ids.length === allIds.length && allIds.every((id) => ids.includes(id))) {
+    return { ...extra, strategy_id: "all" };
+  }
+  return { ...extra, strategy_ids: ids };
 }
 
 const paperRunId = document.getElementById("paper-run-id");
@@ -2949,8 +3776,59 @@ function finishPaperWatch(row) {
   loadOrders().catch(() => {});
 }
 
+let paperLiveRefreshInFlight = false;
+let paperLiveRefreshQueued = false;
+let lastPaperLiveKey = "";
+let lastPaperLiveAt = 0;
+
+async function refreshPaperBooksDuringRun() {
+  if (paperLiveRefreshInFlight) {
+    paperLiveRefreshQueued = true;
+    return;
+  }
+  paperLiveRefreshInFlight = true;
+  try {
+    const selected = getPaperSelectedStrategyIds();
+    const ids = selected.length ? selected : Object.keys(STRATEGY_LABEL);
+    const [kill, paperGate, ...accounts] = await Promise.all([
+      requestJson("/api/ops/kill-switch"),
+      requestJson("/api/ops/paper-trading"),
+      ...ids.map((id) => requestJson(`/api/paper/account?strategy_id=${encodeURIComponent(id)}`)),
+    ]);
+    if (!watchedPaperRunId) {
+      return;
+    }
+    paperKillState = kill;
+    paperGateState = paperGate;
+    paperBooks = {};
+    for (const account of accounts) {
+      if (account?.strategy_id) {
+        paperBooks[account.strategy_id] = account;
+      }
+    }
+    const bookIds = paperBookIds();
+    if (
+      !paperFocusId
+      || (paperFocusId !== PAPER_OVERVIEW_ID && !paperBooks[paperFocusId])
+    ) {
+      paperFocusId = bookIds.length > 1 ? PAPER_OVERVIEW_ID : bookIds[0] || null;
+    }
+    await showPaperFocus({ skipOrders: true });
+  } finally {
+    paperLiveRefreshInFlight = false;
+    if (paperLiveRefreshQueued && watchedPaperRunId) {
+      paperLiveRefreshQueued = false;
+      refreshPaperBooksDuringRun().catch(() => {});
+    } else {
+      paperLiveRefreshQueued = false;
+    }
+  }
+}
+
 function watchPaperRun(runId) {
   watchedPaperRunId = runId;
+  lastPaperLiveKey = "";
+  lastPaperLiveAt = 0;
   window.clearInterval(paperRunTimer);
   setPaperBusy(true);
   setText("paper-account-hint", "模拟已入队…请勿重复提交。");
@@ -2962,9 +3840,22 @@ function watchPaperRun(runId) {
         }
         setText("paper-account-hint", paperProgressText(row));
         const runBtn = document.getElementById("paper-run-submit");
+        const parallelBtn = document.getElementById("paper-run-parallel");
+        const pct = row.progress_pct == null ? "" : ` ${row.progress_pct}%`;
         if (runBtn && paperBusy) {
-          const pct = row.progress_pct == null ? "" : ` ${row.progress_pct}%`;
           runBtn.textContent = row.status === "queued" ? "排队中…" : `运行中…${pct}`;
+        }
+        if (parallelBtn && paperBusy) {
+          parallelBtn.textContent = row.status === "queued" ? "排队中…" : `运行中…${pct}`;
+        }
+        if (row.status === "running" || row.status === "queued") {
+          const key = `${row.status}:${row.progress_done || 0}:${row.progress_label || ""}`;
+          const now = Date.now();
+          if (key !== lastPaperLiveKey && now - lastPaperLiveAt >= 1200) {
+            lastPaperLiveKey = key;
+            lastPaperLiveAt = now;
+            refreshPaperBooksDuringRun().catch(() => {});
+          }
         }
         if (row.status === "success" || row.status === "failed" || row.status === "partial") {
           window.clearInterval(paperRunTimer);
@@ -3002,29 +3893,51 @@ const paperRunForm = document.getElementById("paper-run-form");
 if (paperRunForm) {
   paperRunForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (paperBusy || backtestBusy) {
-      showToast("模拟盘运行中，请勿重复提交", "warn");
+    startPaperRunFromUi("sequential");
+  });
+}
+
+const paperRunParallel = document.getElementById("paper-run-parallel");
+if (paperRunParallel) {
+  paperRunParallel.addEventListener("click", () => {
+    startPaperRunFromUi("parallel");
+  });
+}
+
+async function startPaperRunFromUi(mode) {
+  if (paperBusy || backtestBusy) {
+    showToast("模拟盘运行中，请勿重复提交", "warn");
+    return;
+  }
+  setPaperBusy(true);
+  const parallel = mode === "parallel";
+  setText("paper-account-hint", parallel ? "并行模拟入队中…请勿重复提交。" : "模拟盘入队中…请勿重复提交。");
+  try {
+    const body = paperStrategyRequestBody({
+      days: Math.min(
+        paperRunDaysMax,
+        Math.max(2, Number(document.getElementById("paper-run-days").value) || 20),
+      ),
+      mode: parallel ? "parallel" : "sequential",
+    });
+    if (body.error) {
+      setPaperBusy(false);
+      setText("paper-account-hint", body.error);
+      showToast(body.error, "warn");
       return;
     }
-    setPaperBusy(true);
-    setText("paper-account-hint", "模拟盘入队中…请勿重复提交。");
-    try {
-      const payload = await requestJson("/api/paper/run", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          strategy_id: document.getElementById("paper-run-id").value,
-          days: Math.min(240, Math.max(2, Number(document.getElementById("paper-run-days").value) || 20)),
-        }),
-      });
-      showToast("模拟已在后台开始", "ok");
-      watchPaperRun(payload.run_id);
-    } catch (error) {
-      setPaperBusy(false);
-      setText("paper-account-hint", `模拟失败：${error.message}`);
-      showToast(error.message || "模拟失败", "block");
-    }
-  });
+    const payload = await requestJson("/api/paper/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    showToast(parallel ? "并行模拟已在后台开始" : "模拟已在后台开始", "ok");
+    watchPaperRun(payload.run_id);
+  } catch (error) {
+    setPaperBusy(false);
+    setText("paper-account-hint", `模拟失败：${error.message}`);
+    showToast(error.message || "模拟失败", "block");
+  }
 }
 
 const paperResetBtn = document.getElementById("paper-reset");
@@ -3034,7 +3947,16 @@ if (paperResetBtn) {
       showToast(paperBusy ? "模拟盘运行中，请勿重复提交" : "回测进行中，请稍候", "warn");
       return;
     }
-    const strategyId = document.getElementById("paper-run-id")?.value || "all";
+    const body = paperStrategyRequestBody();
+    if (body.error) {
+      showToast(body.error, "warn");
+      return;
+    }
+    const selectedIds = body.strategy_ids || Object.keys(STRATEGY_LABEL);
+    const selectedLabel =
+      body.strategy_id === "all"
+        ? "全部策略"
+        : selectedIds.map((id) => STRATEGY_LABEL[id] || id).join("、");
     let cash = Number(lastPaperConfig?.initial_cash) || 1000000;
     try {
       lastPaperConfig = await requestJson("/api/ops/paper-config");
@@ -3043,7 +3965,7 @@ if (paperResetBtn) {
       /* keep last known */
     }
     const ok = await confirmDialog(
-      `重置模拟账户数据后，所选策略的持仓、成交、快照和模拟订单将清空并回到本金 ${formatMoney(cash)}，此操作不可撤销。是否确定重置？`,
+      `重置模拟账户数据后，所选（${selectedLabel}）的持仓、成交、快照和模拟订单将清空并回到本金 ${formatMoney(cash)}，急停将恢复为关。此操作不可撤销。是否确定重置？`,
     );
     if (!ok) {
       return;
@@ -3053,19 +3975,80 @@ if (paperResetBtn) {
       const payload = await requestJson("/api/paper/reset", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ strategy_id: strategyId }),
+        body: JSON.stringify(body),
       });
       const deleted = (payload.reports || []).reduce(
         (sum, item) => sum + Number(item.deleted_snapshots || 0) + Number(item.deleted_orders || 0),
         0,
       );
-      showToast(deleted ? "模拟账户已重置" : "没有可清空的模拟数据", "ok");
+      const killCleared = Boolean(payload.kill_switch?.cleared);
+      showToast(
+        deleted
+          ? killCleared
+            ? "模拟账户已重置，急停已关"
+            : "模拟账户已重置"
+          : killCleared
+            ? "没有可清空的模拟数据，急停已关"
+            : "没有可清空的模拟数据",
+        "ok",
+      );
       await loadOrders();
     } catch (error) {
       showToast(error.message || "重置失败", "block");
     } finally {
       if (!backtestBusy && !paperBusy) {
         setControlReadonly(paperResetBtn, false);
+      }
+    }
+  });
+}
+
+const paperClearHaltBtn = document.getElementById("paper-clear-halt");
+if (paperClearHaltBtn) {
+  paperClearHaltBtn.addEventListener("click", async () => {
+    if (paperBusy || backtestBusy) {
+      showToast(paperBusy ? "模拟盘运行中，请勿重复提交" : "回测进行中，请稍候", "warn");
+      return;
+    }
+    if (isPaperOverview() || !paperFocusId || !paperBooks[paperFocusId]) {
+      showToast("请先点选处于平仓中或已平仓的策略账本", "warn");
+      return;
+    }
+    const status = paperHaltStatus(paperBooks[paperFocusId]);
+    if (status === "active") {
+      showToast("当前账本未处于平仓状态", "warn");
+      return;
+    }
+    const label = STRATEGY_LABEL[paperFocusId] || paperFocusId;
+    const statusLabel = PAPER_HALT_STATUS_LABEL[status] || status;
+    const result = await confirmDialog(
+      `将解除「${label}」的${statusLabel}状态，并按当前净值重置该账本回撤峰值，后续交易日可再买卖。是否继续？`,
+      { requireReason: true, reasonPlaceholder: "必填，说明解除原因" },
+    );
+    if (!result?.ok) {
+      return;
+    }
+    setControlReadonly(paperClearHaltBtn, true);
+    try {
+      const payload = await requestJson("/api/paper/halt/clear", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          strategy_id: paperFocusId,
+          reason: result.reason,
+        }),
+      });
+      showToast(
+        payload.changed ? `已解除 ${label} 的平仓状态` : `${label} 本来就不在平仓状态`,
+        "ok",
+      );
+      await loadOrders();
+    } catch (error) {
+      showToast(error.message || "解除失败", "block");
+    } finally {
+      if (!backtestBusy && !paperBusy) {
+        setControlReadonly(paperClearHaltBtn, false);
+        syncPaperClearHaltBtn();
       }
     }
   });
@@ -3140,7 +4123,31 @@ if (killSwitchForm) {
   });
 }
 
-let lastPaperConfig = { initial_cash: 1000000, commission_per_myriad: 2.5 };
+let lastPaperConfig = {
+  initial_cash: 1000000,
+  commission_per_myriad: 2.5,
+  portfolio_drawdown_stop_pct: 12,
+  strategy_drawdown_stop_pct: 12,
+  drawdown_warn_pct: 8,
+};
+
+const PAPER_INITIAL_CASH_MIN = 10000;
+const PAPER_INITIAL_CASH_MAX = 100000000;
+
+function readPaperInitialCashInput() {
+  const input = document.getElementById("paper-initial-cash");
+  const cash = Number(input?.value);
+  if (!Number.isFinite(cash) || cash < PAPER_INITIAL_CASH_MIN || cash > PAPER_INITIAL_CASH_MAX) {
+    const message = `初始资金需在 ${formatMoney(PAPER_INITIAL_CASH_MIN)} 到 ${formatMoney(PAPER_INITIAL_CASH_MAX)} 之间`;
+    if (input) {
+      input.setCustomValidity(message);
+      input.reportValidity();
+      input.setCustomValidity("");
+    }
+    throw new Error(message);
+  }
+  return cash;
+}
 
 async function loadPaperTradingSwitch() {
   const [gate, config] = await Promise.all([
@@ -3161,11 +4168,23 @@ async function loadPaperTradingSwitch() {
   if (wan && config.commission_per_myriad != null) {
     wan.value = String(config.commission_per_myriad);
   }
+  const port = document.getElementById("paper-dd-portfolio");
+  if (port && config.portfolio_drawdown_stop_pct != null) {
+    port.value = String(config.portfolio_drawdown_stop_pct);
+  }
+  const strat = document.getElementById("paper-dd-strategy");
+  if (strat && config.strategy_drawdown_stop_pct != null) {
+    strat.value = String(config.strategy_drawdown_stop_pct);
+  }
+  const warn = document.getElementById("paper-dd-warn");
+  if (warn && config.drawdown_warn_pct != null) {
+    warn.value = String(config.drawdown_warn_pct);
+  }
   setText(
     "paper-trading-hint",
     gate.enabled
-      ? `模拟交易已开。初始资金 ${formatMoney(config.initial_cash)}，佣金万分之 ${config.commission_per_myriad}。策略准入后可跑模拟；急停打开时仍会拒单。已有账本请先重置再跑。`
-      : "开关为关时不能跑模拟。急停打开时也会拒绝新订单。初始资金与佣金对之后新开的模拟生效。",
+      ? `模拟交易已开。本金 ${formatMoney(config.initial_cash)} 为组合资金：按本次参与跑模拟的策略数均分（只选 1 个则拿满），总览看组合净资产。佣金万分之 ${config.commission_per_myriad}；组合急停 ${config.portfolio_drawdown_stop_pct}%（相对组合峰值）/ 单策略平仓 ${config.strategy_drawdown_stop_pct}%（相对本账峰值）/ 单策略预警 ${config.drawdown_warn_pct}%。已有账本请先重置再跑。`
+      : "开关为关时不能跑模拟。组合回撤达线才全局急停；单策略回撤只平仓该账本。",
   );
 }
 
@@ -3187,8 +4206,11 @@ if (paperTradingForm) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          initial_cash: Number(document.getElementById("paper-initial-cash").value) || 1000000,
+          initial_cash: readPaperInitialCashInput(),
           commission_per_myriad: Number(document.getElementById("paper-commission-wan").value),
+          portfolio_drawdown_stop_pct: Number(document.getElementById("paper-dd-portfolio").value),
+          strategy_drawdown_stop_pct: Number(document.getElementById("paper-dd-strategy").value),
+          drawdown_warn_pct: Number(document.getElementById("paper-dd-warn").value),
         }),
       });
       showToast("模拟交易设置已保存", "ok");
@@ -3212,33 +4234,384 @@ if (reviewFilterForm) {
 }
 
 async function loadOrders() {
-  const strategyId = document.getElementById("paper-run-id")?.value || "stock_momentum_topk";
-  const ids = strategyId === "all" ? Object.keys(STRATEGY_LABEL) : [strategyId];
-  const [mockRows, kill, paperGate, ...accounts] = await Promise.all([
+  const selected = getPaperSelectedStrategyIds();
+  const ids = selected.length ? selected : Object.keys(STRATEGY_LABEL);
+  const [mockRows, kill, paperGate, paperConfig, ...accounts] = await Promise.all([
     requestJson("/api/orders?limit=200"),
     requestJson("/api/ops/kill-switch"),
     requestJson("/api/ops/paper-trading"),
+    requestJson("/api/ops/paper-config").catch(() => lastPaperConfig),
     ...ids.map((id) => requestJson(`/api/paper/account?strategy_id=${encodeURIComponent(id)}`)),
   ]);
+  if (paperConfig && paperConfig.initial_cash != null) {
+    lastPaperConfig = { ...lastPaperConfig, ...paperConfig };
+  }
   paperKillState = kill;
   paperGateState = paperGate;
+  const killSelect = document.getElementById("kill-engaged");
+  if (killSelect) {
+    killSelect.value = kill?.engaged ? "on" : "off";
+    killSelect.dispatchEvent(new Event("change", { bubbles: true }));
+  }
   paperBooks = {};
   for (const account of accounts) {
     if (account?.strategy_id) {
       paperBooks[account.strategy_id] = account;
     }
   }
-  if (!paperFocusId || !paperBooks[paperFocusId]) {
-    paperFocusId = ids[0];
+  const bookIds = paperBookIds();
+  if (
+    !paperFocusId
+    || (paperFocusId !== PAPER_OVERVIEW_ID && !paperBooks[paperFocusId])
+  ) {
+    paperFocusId = bookIds.length > 1 ? PAPER_OVERVIEW_ID : bookIds[0] || null;
   }
   renderOrders(mockRows, "mock-order-body");
   await showPaperFocus();
 }
 
+const PAPER_OVERVIEW_ID = "__overview__";
 let paperBooks = {};
 let paperFocusId = null;
 let paperKillState = null;
 let paperGateState = null;
+
+function paperBookIds() {
+  return Object.keys(STRATEGY_LABEL).filter((id) => paperBooks[id]);
+}
+
+function isPaperOverview() {
+  return paperFocusId === PAPER_OVERVIEW_ID;
+}
+
+function paperSessionStats(ids) {
+  const sessions = ids.map((id) => Number(paperBooks[id]?.summary?.sessions || 0));
+  const min = sessions.length ? Math.min(...sessions) : 0;
+  const max = sessions.length ? Math.max(...sessions) : 0;
+  return { sessions, min, max, aligned: sessions.length > 0 && min === max };
+}
+
+const PAPER_HALT_STATUS_LABEL = {
+  active: "运行中",
+  flatten_pending: "平仓中",
+  halted: "已平仓",
+};
+
+/** Card / gate labels: run lifecycle + risk halt (halt wins). */
+const PAPER_BOOK_STATUS_LABEL = {
+  pending: "待运行",
+  running: "运行中",
+  done: "已完成",
+  flatten_pending: "平仓中",
+  halted: "已平仓",
+};
+
+function paperHaltStatus(accountOrSummary) {
+  if (!accountOrSummary) {
+    return "active";
+  }
+  const summary = accountOrSummary.summary || accountOrSummary;
+  const state = accountOrSummary.state || {};
+  const status = summary.halt_status || state.halt_status;
+  if (status === "flatten_pending" || status === "halted" || status === "active") {
+    return status;
+  }
+  if (summary.flatten_pending || state.flatten_pending) {
+    return "flatten_pending";
+  }
+  if (summary.halted || state.halted) {
+    return "halted";
+  }
+  return "active";
+}
+
+function paperRequestedDays() {
+  const input = document.getElementById("paper-run-days");
+  const n = Number(input?.value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** Display status for book cards: 待运行 / 运行中 / 已完成, or risk 平仓中 / 已平仓. */
+function paperBookDisplayStatus(accountOrSummary, options = {}) {
+  const halt = paperHaltStatus(accountOrSummary);
+  if (halt === "flatten_pending" || halt === "halted") {
+    return halt;
+  }
+  const summary = accountOrSummary?.summary || accountOrSummary || {};
+  const sessions = Number(summary.sessions || 0);
+  if (sessions <= 0) {
+    return "pending";
+  }
+  const busy = options.busy != null ? Boolean(options.busy) : paperBusy;
+  const target = options.targetDays != null ? options.targetDays : paperRequestedDays();
+  if (busy && (target == null || sessions < target)) {
+    return "running";
+  }
+  return "done";
+}
+
+function paperHaltCounts(ids) {
+  let pending = 0;
+  let halted = 0;
+  for (const id of ids) {
+    const status = paperHaltStatus(paperBooks[id]);
+    if (status === "flatten_pending") {
+      pending += 1;
+    } else if (status === "halted") {
+      halted += 1;
+    }
+  }
+  return { pending, halted, active: Math.max(0, ids.length - pending - halted) };
+}
+
+function syncPaperClearHaltBtn() {
+  const btn = document.getElementById("paper-clear-halt");
+  if (!btn) {
+    return;
+  }
+  const focused = !isPaperOverview() && paperFocusId && paperBooks[paperFocusId];
+  const status = focused ? paperHaltStatus(paperBooks[paperFocusId]) : "active";
+  const show = Boolean(focused && status !== "active");
+  btn.hidden = !show;
+  if (show && !paperBusy && !backtestBusy) {
+    setControlReadonly(btn, false);
+  }
+}
+
+
+function buildPaperOverviewAccount(ids) {
+  const boards = ids.map((id) => paperBooks[id]?.summary || {});
+  const stats = paperSessionStats(ids);
+  const active = boards.filter((board) => Number(board.sessions || 0) > 0);
+  const portfolioCash = Number(lastPaperConfig?.initial_cash);
+  const deployed = active.reduce((sum, board) => sum + Number(board.initial_cash || 0), 0);
+  const endAsset = active.reduce((sum, board) => sum + Number(board.end_asset || 0), 0);
+  const cash = active.reduce((sum, board) => sum + Number(board.cash || 0), 0);
+  const marketValue = active.reduce((sum, board) => sum + Number(board.market_value || 0), 0);
+  const peakAsset = active.reduce((sum, board) => sum + Number(board.peak_asset || 0), 0);
+  const buyNotional = active.reduce((sum, board) => sum + Number(board.buy_notional || 0), 0);
+  const sellNotional = active.reduce((sum, board) => sum + Number(board.sell_notional || 0), 0);
+  const fees = active.reduce((sum, board) => sum + Number(board.fees || 0), 0);
+  const filled = active.reduce((sum, board) => sum + Number(board.orders_filled || 0), 0);
+  const rejected = active.reduce((sum, board) => sum + Number(board.orders_rejected || 0), 0);
+  // 组合本金以设置为准；若设置未加载/偏离已部署份额过大，回退到已部署，避免图表 Y 轴被错误本金撑爆。
+  let initial = Number.isFinite(portfolioCash) && portfolioCash > 0 ? portfolioCash : deployed;
+  if (deployed > 0 && initial > deployed * 2.5) {
+    initial = deployed;
+  }
+  const returnBase = deployed > 0 ? deployed : initial;
+  const starts = active.map((board) => board.window_start).filter(Boolean).sort();
+  const ends = active.map((board) => board.window_end).filter(Boolean).sort();
+  const maxDd = active.reduce((worst, board) => {
+    const value = Number(board.max_drawdown);
+    if (Number.isNaN(value)) {
+      return worst;
+    }
+    return worst == null || value < worst ? value : worst;
+  }, null);
+  const timeline = mergePaperTimelines(
+    ids.filter((id) => Number(paperBooks[id]?.summary?.sessions || 0) > 0),
+    returnBase,
+  );
+  const positions = [];
+  const fills = [];
+  for (const id of ids) {
+    if (!Number(paperBooks[id]?.summary?.sessions || 0)) {
+      continue;
+    }
+    for (const row of paperBooks[id]?.positions || []) {
+      positions.push({ ...row, strategy_id: id });
+    }
+    for (const row of paperBooks[id]?.fills || []) {
+      fills.push({ ...row, strategy_id: id });
+    }
+  }
+  positions.sort((a, b) => Number(b.market_value || 0) - Number(a.market_value || 0));
+  fills.sort((a, b) => String(b.trade_time || b.trade_date || "").localeCompare(String(a.trade_time || a.trade_date || "")));
+  const haltCounts = paperHaltCounts(ids);
+  const fundingComplete = active.length > 0
+    && active.length === ids.length
+    && Math.abs(deployed - initial) <= Math.max(1, initial * 1e-6);
+  const summary = {
+    window_start: starts[0] || null,
+    window_end: ends[ends.length - 1] || null,
+    sessions: stats.aligned ? stats.min : stats.max,
+    sessions_min: stats.min,
+    sessions_max: stats.max,
+    sessions_aligned: stats.aligned,
+    book_count: ids.length,
+    active_book_count: active.length,
+    halt_pending_count: haltCounts.pending,
+    halt_flat_count: haltCounts.halted,
+    halt_active_count: haltCounts.active,
+    initial_cash: initial,
+    deployed_cash: deployed,
+    funding_complete: fundingComplete,
+    end_asset: endAsset,
+    cash,
+    market_value: marketValue,
+    total_return: returnBase ? endAsset / returnBase - 1 : 0,
+    max_drawdown: maxDd == null ? 0 : maxDd,
+    peak_asset: peakAsset,
+    peak_return: returnBase ? peakAsset / returnBase - 1 : 0,
+    position_count: positions.length,
+    orders_filled: filled,
+    orders_rejected: rejected,
+    fills: fills.length,
+    buy_notional: buyNotional,
+    sell_notional: sellNotional,
+    fees,
+  };
+  const activeIds = ids.filter((id) => Number(paperBooks[id]?.summary?.sessions || 0) > 0);
+  const activeReconciles = activeIds.map((id) => paperBooks[id]?.reconcile || {});
+  const okCount = activeReconciles.filter((item) => item.ok).length;
+  const buyQty = activeReconciles.reduce((sum, item) => sum + Number(item.buy_qty || 0), 0);
+  const sellQty = activeReconciles.reduce((sum, item) => sum + Number(item.sell_qty || 0), 0);
+  const expectedCash = activeReconciles.reduce((sum, item) => sum + Number(item.expected_cash || 0), 0);
+  const actualCash = cash;
+  const cashDiff = roundMoney(actualCash - expectedCash);
+  const reconcileOk = activeReconciles.length > 0
+    && okCount === activeReconciles.length
+    && Math.abs(cashDiff) <= 0.05;
+  const reconcileChecks = [
+    {
+      name: "现金",
+      expected: roundMoney(expectedCash),
+      actual: roundMoney(actualCash),
+      diff: cashDiff,
+      ok: Math.abs(cashDiff) <= 0.05,
+    },
+    {
+      name: "买入额",
+      expected: roundMoney(buyNotional),
+      actual: roundMoney(buyNotional),
+      diff: 0,
+      ok: true,
+    },
+    {
+      name: "卖出额",
+      expected: roundMoney(sellNotional),
+      actual: roundMoney(sellNotional),
+      diff: 0,
+      ok: true,
+    },
+    {
+      name: "费用",
+      expected: roundMoney(fees),
+      actual: roundMoney(fees),
+      diff: 0,
+      ok: true,
+    },
+    {
+      name: "持仓市值",
+      expected: roundMoney(marketValue),
+      actual: roundMoney(marketValue),
+      diff: 0,
+      ok: true,
+    },
+    {
+      name: "总资产",
+      expected: roundMoney(expectedCash + marketValue),
+      actual: roundMoney(endAsset),
+      diff: roundMoney(endAsset - (expectedCash + marketValue)),
+      ok: Math.abs(endAsset - (expectedCash + marketValue)) <= 0.05,
+    },
+    {
+      name: "通过账本数量",
+      expected: activeReconciles.length,
+      actual: okCount,
+      diff: activeReconciles.length - okCount,
+      ok: okCount === activeReconciles.length,
+    },
+  ];
+  return {
+    account_id: "paper:overview",
+    strategy_id: PAPER_OVERVIEW_ID,
+    summary,
+    timeline,
+    positions,
+    fills,
+    state: {
+      cash: actualCash,
+      initial_cash: initial,
+      peak_asset: peakAsset,
+    },
+    reconcile: {
+      ok: reconcileOk && reconcileChecks.every((row) => row.ok),
+      asof: ends[ends.length - 1] || null,
+      formula:
+        `组合净资产=已跑账本合计；本金 ${formatMoney(initial)}；`
+        + `对账通过 ${okCount}/${activeReconciles.length}（已跑 ${active.length}/${ids.length}）。`
+        + `期末现金 = 各账本金合计 − 买入 + 卖出 − 费用。`,
+      initial_cash: initial,
+      buy_notional: roundMoney(buyNotional),
+      sell_notional: roundMoney(sellNotional),
+      fees: roundMoney(fees),
+      buy_qty: buyQty,
+      sell_qty: sellQty,
+      expected_cash: roundMoney(expectedCash),
+      actual_cash: roundMoney(actualCash),
+      cash_diff: cashDiff,
+      market_value: roundMoney(marketValue),
+      end_asset: roundMoney(endAsset),
+      peak_asset: roundMoney(peakAsset),
+      peak_return: summary.peak_return,
+      checks: reconcileChecks,
+      qty_mismatches: activeReconciles.flatMap((item) => item.qty_mismatches || []),
+    },
+  };
+}
+
+function roundMoney(value) {
+  return Math.round((Number(value) || 0) * 10000) / 10000;
+}
+
+function mergePaperTimelines(ids, initialCash) {
+  const byDate = new Map();
+  for (const id of ids) {
+    for (const row of paperBooks[id]?.timeline || []) {
+      const day = row.trade_date;
+      if (!day) {
+        continue;
+      }
+      const cur = byDate.get(day) || {
+        trade_date: day,
+        cash: 0,
+        market_value: 0,
+        total_asset: 0,
+        buys: 0,
+        sells: 0,
+        buy_notional: 0,
+        sell_notional: 0,
+        fees: 0,
+        books: 0,
+      };
+      cur.cash += Number(row.cash || 0);
+      cur.market_value += Number(row.market_value || 0);
+      cur.total_asset += Number(row.total_asset || 0);
+      cur.buys += Number(row.buys || 0);
+      cur.sells += Number(row.sells || 0);
+      cur.buy_notional += Number(row.buy_notional || 0);
+      cur.sell_notional += Number(row.sell_notional || 0);
+      cur.fees += Number(row.fees || 0);
+      cur.books += 1;
+      byDate.set(day, cur);
+    }
+  }
+  const timeline = [...byDate.values()].sort((a, b) => String(a.trade_date).localeCompare(String(b.trade_date)));
+  let prev = initialCash;
+  let peak = initialCash;
+  for (const row of timeline) {
+    const asset = Number(row.total_asset || 0);
+    row.daily_pnl = asset - prev;
+    row.daily_return = prev ? row.daily_pnl / prev : 0;
+    row.total_return = initialCash ? asset / initialCash - 1 : 0;
+    peak = Math.max(peak, asset);
+    row.drawdown = peak ? asset / peak - 1 : 0;
+    prev = asset;
+  }
+  return timeline;
+}
 
 function renderPaperGates(kill, paperGate, account, multi) {
   const summary = document.getElementById("paper-summary");
@@ -3246,21 +4619,37 @@ function renderPaperGates(kill, paperGate, account, multi) {
     return;
   }
   summary.innerHTML = "";
+  summary.className = "paper-gates";
   const gates = [
     ["模拟交易", paperGate?.enabled ? "开" : "关"],
     ["急停", kill?.engaged ? "开" : "关"],
   ];
-  if (!multi && account) {
-    gates.push(["账户", "独立模拟账户"]);
+  if (isPaperOverview() && multi) {
+    const stats = paperSessionStats(paperBookIds());
+    const haltCounts = paperHaltCounts(paperBookIds());
+    gates.push(["账本", `${paperBookIds().length} 本`]);
+    gates.push([
+      "交易日",
+      stats.aligned ? `${stats.min} 日对齐` : `${stats.min}~${stats.max} 日未对齐`,
+    ]);
+    if (haltCounts.pending || haltCounts.halted) {
+      gates.push(["风控", `平仓中 ${haltCounts.pending} · 已平仓 ${haltCounts.halted}`]);
+    }
+  } else if (account && account.strategy_id && account.strategy_id !== PAPER_OVERVIEW_ID) {
     gates.push(["策略", STRATEGY_LABEL[account.strategy_id] || account.strategy_id || "-"]);
+    const status = paperBookDisplayStatus(account);
+    gates.push(["状态", PAPER_BOOK_STATUS_LABEL[status] || status]);
   }
   for (const [label, value] of gates) {
     const item = document.createElement("div");
-    item.className = "kv-item";
+    item.className = "paper-gate";
     const k = document.createElement("span");
     const v = document.createElement("strong");
     k.textContent = label;
     v.textContent = value;
+    if (label === "交易日" && String(value).includes("未对齐")) {
+      v.className = "warn";
+    }
     item.append(k, v);
     summary.appendChild(item);
   }
@@ -3276,57 +4665,145 @@ function renderPaperBookSwitcher(ids) {
   if (ids.length < 2) {
     return;
   }
-  for (const id of ids) {
-    const account = paperBooks[id];
-    const board = account?.summary || {};
+  const stats = paperSessionStats(ids);
+  const haltCounts = paperHaltCounts(ids);
+  const cards = [
+    {
+      id: PAPER_OVERVIEW_ID,
+      title: "账户总览",
+      subtitle: haltCounts.pending || haltCounts.halted
+        ? `${ids.length} 本 · 平仓中 ${haltCounts.pending} · 已平仓 ${haltCounts.halted}`
+        : `${ids.length} 本账本合计`,
+      overview: true,
+    },
+    ...ids.map((id) => {
+      const haltStatus = paperHaltStatus(paperBooks[id]);
+      const displayStatus = paperBookDisplayStatus(paperBooks[id]);
+      return {
+        id,
+        title: STRATEGY_LABEL[id] || id,
+        subtitle: PAPER_BOOK_STATUS_LABEL[displayStatus] || "独立账本",
+        overview: false,
+        haltStatus,
+        displayStatus,
+      };
+    }),
+  ];
+  for (const card of cards) {
+    const rawBoard = card.overview
+      ? buildPaperOverviewAccount(ids).summary
+      : paperBooks[card.id]?.summary || {};
+    const selected = getPaperSelectedStrategyIds();
+    const board = card.overview
+      ? rawBoard
+      : paperDisplayBoard(card.id, rawBoard, selected.length ? selected : ids);
     const btn = document.createElement("button");
+    const haltClass = card.haltStatus && card.haltStatus !== "active"
+      ? ` is-${String(card.haltStatus).split("_").join("-")}`
+      : card.displayStatus
+        ? ` is-${String(card.displayStatus)}`
+        : "";
     btn.type = "button";
-    btn.className = `paper-book${id === paperFocusId ? " is-active" : ""}`;
+    btn.className = `paper-book${paperFocusId === card.id ? " is-active" : ""}${card.overview ? " is-overview" : ""}${haltClass}`;
+    const titleRow = document.createElement("span");
+    titleRow.className = "paper-book-title-row";
     const title = document.createElement("strong");
-    title.textContent = STRATEGY_LABEL[id] || id;
+    title.textContent = card.title;
+    titleRow.appendChild(title);
+    if (!card.overview && card.haltStatus && card.haltStatus !== "active") {
+      const badge = document.createElement("span");
+      badge.className = `paper-halt-badge is-${String(card.haltStatus).split("_").join("-")}`;
+      badge.textContent = PAPER_HALT_STATUS_LABEL[card.haltStatus];
+      titleRow.appendChild(badge);
+    } else if (!card.overview && card.displayStatus === "done") {
+      const badge = document.createElement("span");
+      badge.className = "paper-halt-badge is-done";
+      badge.textContent = PAPER_BOOK_STATUS_LABEL.done;
+      titleRow.appendChild(badge);
+    }
+    if (card.overview && (haltCounts.pending || haltCounts.halted)) {
+      const badge = document.createElement("span");
+      badge.className = "paper-halt-badge is-overview";
+      badge.textContent = haltCounts.pending
+        ? `平仓中 ${haltCounts.pending}`
+        : `已平仓 ${haltCounts.halted}`;
+      titleRow.appendChild(badge);
+    }
     const acc = document.createElement("span");
     acc.className = "paper-book-id";
-    acc.textContent = "独立模拟账户";
+    acc.textContent = card.subtitle;
     const meta = document.createElement("span");
     meta.className = "paper-book-meta";
     if (board.sessions) {
       const ret = document.createElement("em");
       ret.className = pnlClass(board.total_return);
       ret.textContent = formatPct(board.total_return);
+      const peak = document.createElement("em");
+      peak.className = pnlClass(board.peak_return);
+      peak.textContent = formatPct(board.peak_return);
+      const dayLabel = card.overview && !stats.aligned
+        ? `${stats.min}~${stats.max} 日`
+        : `${board.sessions} 日`;
       meta.append(
-        document.createTextNode(`${board.sessions} 日 · ${formatMoney(board.end_asset)} · `),
+        document.createTextNode(`${dayLabel} · 资产 ${formatMoney(board.end_asset)} · 累计 `),
         ret,
+        document.createTextNode(" · 峰值 "),
+        peak,
       );
+      if (!card.overview && !stats.aligned) {
+        btn.classList.add("is-misaligned");
+      }
+    } else if (paperBusy) {
+      meta.textContent = "回放中…等待快照";
+    } else if (!card.overview) {
+      meta.textContent = `计划本金 ${formatMoney(board.initial_cash)} · 还没有快照`;
     } else {
       meta.textContent = "还没有快照";
     }
-    btn.append(title, acc, meta);
+    btn.append(titleRow, acc, meta);
     btn.addEventListener("click", () => {
-      if (paperFocusId === id) {
+      if (paperFocusId === card.id) {
         return;
       }
-      paperFocusId = id;
+      paperFocusId = card.id;
       showPaperFocus().catch((error) => showToast(error.message || "切换账户失败", "block"));
     });
     host.appendChild(btn);
   }
 }
 
-async function showPaperFocus() {
-  const ids = Object.keys(STRATEGY_LABEL).filter((id) => paperBooks[id]);
-  const account = paperBooks[paperFocusId];
+async function showPaperFocus(options = {}) {
+  const skipOrders = Boolean(options.skipOrders);
+  const ids = paperBookIds();
   const multi = ids.length > 1;
+  const account = isPaperOverview()
+    ? buildPaperOverviewAccount(ids)
+    : paperBooks[paperFocusId];
   renderPaperGates(paperKillState, paperGateState, account, multi);
   renderPaperBookSwitcher(ids);
   renderPaperCompare(ids);
+  syncPaperClearHaltBtn();
   if (!account) {
     return;
   }
   renderPaperAccount(account, paperKillState, paperGateState, multi);
-  const paperRows = await requestJson(
-    `/api/paper/orders?limit=2000&strategy_id=${encodeURIComponent(paperFocusId)}`,
-  );
-  renderOrders(paperRows, "order-body");
+  if (skipOrders) {
+    return;
+  }
+  if (isPaperOverview()) {
+    const orderLists = await Promise.all(
+      ids.map((id) => requestJson(`/api/paper/orders?limit=500&strategy_id=${encodeURIComponent(id)}`)),
+    );
+    const merged = orderLists.flat().sort((a, b) =>
+      String(b.created_at || b.trade_date || "").localeCompare(String(a.created_at || a.trade_date || "")),
+    );
+    renderOrders(merged.slice(0, 2000), "order-body");
+  } else {
+    const paperRows = await requestJson(
+      `/api/paper/orders?limit=2000&strategy_id=${encodeURIComponent(paperFocusId)}`,
+    );
+    renderOrders(paperRows, "order-body");
+  }
 }
 
 function renderPaperCompare(ids) {
@@ -3343,15 +4820,28 @@ function renderPaperCompare(ids) {
   if (!show) {
     return;
   }
+  const stats = paperSessionStats(ids);
+  const span = title.querySelector("span");
+  if (span) {
+    span.textContent = stats.aligned
+      ? `同一窗口 ${stats.min} 个交易日 · 各策略独立账本`
+      : `交易日未对齐（${stats.min}~${stats.max}）· 并行模式会按日对齐`;
+    span.className = stats.aligned ? "" : "warn";
+  }
   for (const id of ids) {
     const account = paperBooks[id];
-    const board = account?.summary || {};
+    const selected = getPaperSelectedStrategyIds();
+    const board = paperDisplayBoard(id, account?.summary || {}, selected.length ? selected : ids);
     const reconcile = account?.reconcile || {};
     const tr = document.createElement("tr");
+    if (!stats.aligned && board.sessions !== stats.max) {
+      tr.classList.add("is-misaligned");
+    }
     appendCell(tr, STRATEGY_LABEL[id] || id);
     appendCell(tr, board.sessions ? String(board.sessions) : "0", { className: "num" });
     appendCell(tr, board.end_asset == null ? "-" : formatMoney(board.end_asset), { className: "num" });
     appendCell(tr, formatPct(board.total_return), { className: pnlClass(board.total_return) });
+    appendCell(tr, formatPct(board.peak_return), { className: pnlClass(board.peak_return) });
     appendCell(tr, formatPct(board.max_drawdown), { className: pnlClass(board.max_drawdown) });
     appendCell(tr, !board.sessions ? "尚无" : reconcile.ok ? "通过" : "不一致", {
       tone: !board.sessions ? "muted" : reconcile.ok ? "ok" : "block",
@@ -3365,11 +4855,23 @@ function renderPaperAccount(account, kill, paperGate, multi = false) {
   if (!body) {
     return;
   }
-  const board = account.summary || {};
+  const overview = account.strategy_id === PAPER_OVERVIEW_ID;
+  const rawBoard = account.summary || {};
+  const selected = getPaperSelectedStrategyIds();
+  const board = overview
+    ? rawBoard
+    : paperDisplayBoard(
+      account.strategy_id,
+      rawBoard,
+      selected.length ? selected : paperBookIds(),
+    );
   const timeline = account.timeline || [];
-  renderPaperBoard(board);
+  renderPaperBoard(board, overview);
   renderPaperReconcile(account.reconcile || {});
-  renderPaperChart(timeline, board);
+  renderPaperChart(timeline, board, {
+    strategyId: account.strategy_id,
+    overview,
+  });
   paperDailyState.rows = timeline;
   paperDailyState.fillsByDate = groupFillsByDate(account.fills || []);
   paperDailyState.expanded = null;
@@ -3386,7 +4888,9 @@ function renderPaperAccount(account, kill, paperGate, multi = false) {
   const windowText = board.window_start && board.window_end
     ? `${board.window_start} ~ ${board.window_end}，共 ${board.sessions || 0} 个交易日`
     : "还没有模拟快照";
-  const bookName = STRATEGY_LABEL[account.strategy_id] || account.strategy_id || "当前账户";
+  const bookName = overview
+    ? "账户总览"
+    : STRATEGY_LABEL[account.strategy_id] || account.strategy_id || "当前账户";
   const cashText = formatMoney(board.initial_cash);
   if (!paperGate?.enabled) {
     setText("paper-account-hint", "设置页「模拟交易」为关，跑模拟不会成功。请先到设置打开开关。");
@@ -3394,16 +4898,49 @@ function renderPaperAccount(account, kill, paperGate, multi = false) {
     setText(
       "paper-account-hint",
       multi
-        ? `急停已开，禁止新的模拟订单。点选账户查看各自曲线。当前 ${bookName}：${windowText}。`
+        ? `急停已开，禁止新的模拟订单。点选总览或账户查看曲线。当前 ${bookName}：${windowText}。`
         : `急停已开，禁止新的模拟订单。当前窗口 ${windowText}。`,
     );
-  } else if (multi) {
+  } else if (overview) {
+    const alignText = board.sessions_aligned
+      ? `各账本 ${board.sessions || 0} 日已对齐`
+      : `各账本交易日未对齐（${board.sessions_min}~${board.sessions_max}）；请用「并行模式」重跑以按日对齐`;
+    const haltText = (board.halt_pending_count || board.halt_flat_count)
+      ? `风控：平仓中 ${board.halt_pending_count || 0} 本、已平仓 ${board.halt_flat_count || 0} 本。`
+      : "";
+    const fundingText = board.funding_complete
+      ? `组合本金 ${cashText}，净资产 ${formatMoney(board.end_asset)}。`
+      : `组合本金 ${cashText}；已部署 ${formatMoney(board.deployed_cash || 0)}（${board.active_book_count || 0}/${board.book_count || 0} 本已跑），净资产 ${formatMoney(board.end_asset)}。`;
     setText(
       "paper-account-hint",
-      `两本账独立资金、互不占仓。当前查看 ${bookName}：${windowText}。收益相对该账本金 ${cashText}。`,
+      `${fundingText}${alignText}。${haltText}本金按本次参与跑模拟的策略数均分；总览看组合净资产而非各账满额加总。`,
+    );
+  }   else if (multi) {
+    const status = paperHaltStatus({ summary: board, state: account.state });
+    const haltText = status === "active"
+      ? ""
+      : status === "flatten_pending"
+        ? "该账本处于平仓中：禁买，未卖出部分会在后续交易日继续强平。可用「解除单策略平仓」恢复交易。"
+        : "该账本已平仓：禁买，仅现金记账。可用「解除单策略平仓」恢复交易。";
+    setText(
+      "paper-account-hint",
+      `各账独立资金、互不占仓。当前查看 ${bookName}：${windowText}。收益相对该账本金 ${cashText}。${haltText}`,
     );
   } else {
-    setText("paper-account-hint", `${windowText}。收益相对本金 ${cashText}；折线与下表可对每日盈亏和成交。`);
+    const status = paperHaltStatus({ summary: board, state: account.state });
+    if (status === "flatten_pending") {
+      setText(
+        "paper-account-hint",
+        `${windowText}。该账本平仓中：禁买，后续交易日继续强平。可用「解除单策略平仓」恢复交易。`,
+      );
+    } else if (status === "halted") {
+      setText(
+        "paper-account-hint",
+        `${windowText}。该账本已平仓：禁买。可用「解除单策略平仓」恢复交易。`,
+      );
+    } else {
+      setText("paper-account-hint", `${windowText}。收益相对本金 ${cashText}；折线与下表可对每日盈亏和成交。`);
+    }
   }
 }
 
@@ -3437,6 +4974,7 @@ function renderPaperReconcile(reconcile) {
       ["对账日", reconcile.asof || "-"],
       ["本金", formatMoney(reconcile.initial_cash)],
       ["账户峰值", formatMoney(reconcile.peak_asset)],
+      ["峰值收益", formatPct(reconcile.peak_return), pnlClass(reconcile.peak_return)],
       ["买入额 / 量", `${formatMoney(reconcile.buy_notional)} / ${reconcile.buy_qty ?? 0}`],
       ["卖出额 / 量", `${formatMoney(reconcile.sell_notional)} / ${reconcile.sell_qty ?? 0}`],
       ["费用", formatMoney(reconcile.fees)],
@@ -3471,8 +5009,13 @@ function renderPaperReconcile(reconcile) {
     body.appendChild(tr);
     return;
   }
-  const qtyName = (name) => String(name || "").includes("数量");
-  const formatValue = (name, value) => (qtyName(name) ? String(Math.round(Number(value) || 0)) : formatMoney(value));
+  const qtyName = (name) => /数量|账本/.test(String(name || ""));
+  const formatValue = (name, value) => {
+    if (qtyName(name)) {
+      return String(Math.round(Number(value) || 0));
+    }
+    return formatMoney(value);
+  };
   for (const row of checks) {
     const tr = document.createElement("tr");
     appendCell(tr, row.name || "-");
@@ -3493,7 +5036,7 @@ function renderPaperReconcile(reconcile) {
   }
 }
 
-function renderPaperBoard(board) {
+function renderPaperBoard(board, overview = false) {
   const host = document.getElementById("paper-board");
   if (!host) {
     return;
@@ -3502,15 +5045,28 @@ function renderPaperBoard(board) {
   if (!board.sessions) {
     const empty = document.createElement("p");
     empty.className = "hint";
-    empty.textContent = "还没有模拟快照，跑完连续交易日后这里会给出区间收益、回撤和成交汇总。";
+    const planned = Number(board.initial_cash);
+    empty.textContent = Number.isFinite(planned) && planned > 0
+      ? `计划本金 ${formatMoney(planned)}。还没有模拟快照，跑完连续交易日后这里会给出区间收益、回撤和成交汇总。`
+      : "还没有模拟快照，跑完连续交易日后这里会给出区间收益、回撤和成交汇总。";
     host.appendChild(empty);
     return;
   }
+  const rangeLabel = overview && board.sessions_aligned === false
+    ? `${board.window_start} ~ ${board.window_end}（${board.sessions_min}~${board.sessions_max} 日未对齐）`
+    : `${board.window_start} ~ ${board.window_end}`;
   const cards = [
-    ["区间", `${board.window_start} ~ ${board.window_end}`],
-    ["本金", formatMoney(board.initial_cash)],
-    ["期末总资产", formatMoney(board.end_asset)],
+    ["区间", rangeLabel],
+    ...(overview ? [["账本数", String(board.book_count || 0)]] : []),
+    ...(overview
+      ? [["组合本金", formatMoney(board.initial_cash)]]
+      : [["本金", formatMoney(board.initial_cash)]]),
+    ...(overview && board.deployed_cash != null && board.funding_complete === false
+      ? [["已部署", formatMoney(board.deployed_cash)]]
+      : []),
+    [overview ? "净资产" : "期末总资产", formatMoney(board.end_asset)],
     ["区间收益", formatPct(board.total_return), pnlClass(board.total_return)],
+    ["峰值收益", formatPct(board.peak_return), pnlClass(board.peak_return)],
     ["最大回撤", formatPct(board.max_drawdown), pnlClass(board.max_drawdown)],
     ["现金 / 市值", `${formatMoney(board.cash)} / ${formatMoney(board.market_value)}`],
     ["成交 / 拒单", `${board.orders_filled || 0} / ${board.orders_rejected || 0}`],
@@ -3518,6 +5074,14 @@ function renderPaperBoard(board) {
     ["费用", formatMoney(board.fees)],
     ["持仓只数", String(board.position_count || 0)],
   ];
+  // Keep lifecycle / risk status after title block by injecting before money metrics.
+  if (!overview) {
+    const displayStatus = paperBookDisplayStatus(board);
+    cards.splice(1, 0, ["状态", PAPER_BOOK_STATUS_LABEL[displayStatus] || displayStatus]);
+  }
+  if (overview && (board.halt_pending_count || board.halt_flat_count)) {
+    cards.splice(2, 0, ["风控", `平仓中 ${board.halt_pending_count || 0} · 已平仓 ${board.halt_flat_count || 0}`]);
+  }
   for (const [label, value, className] of cards) {
     const item = document.createElement("div");
     item.className = "kv-item";
@@ -3527,6 +5091,9 @@ function renderPaperBoard(board) {
     v.textContent = value;
     if (className) {
       v.className = className;
+    }
+    if (label === "区间" && overview && board.sessions_aligned === false) {
+      v.className = "warn";
     }
     item.append(k, v);
     host.appendChild(item);
@@ -3574,6 +5141,28 @@ function formatAxisMoney(value) {
 function shortMd(date) {
   const parts = String(date || "").split("-");
   return parts.length === 3 ? `${parts[1]}-${parts[2]}` : date || "";
+}
+
+/** X-axis tick: include year when the series spans multiple years (YY-MM-DD). */
+function axisDateLabel(date, { spanYears = false } = {}) {
+  const parts = String(date || "").split("-");
+  if (parts.length !== 3) {
+    return date || "";
+  }
+  const [year, month, day] = parts;
+  if (spanYears) {
+    return `${year.slice(-2)}-${month}-${day}`;
+  }
+  return `${month}-${day}`;
+}
+
+function xAxisSpanYears(rows) {
+  const years = new Set(
+    (rows || [])
+      .map((row) => String(row?.trade_date || "").slice(0, 4))
+      .filter(Boolean),
+  );
+  return years.size > 1;
 }
 
 function xTickIndexes(count) {
@@ -3904,18 +5493,82 @@ function renderPaperFills(rows) {
   paintTradePager("paper-fill", info);
 }
 
-function renderPaperChart(rows, board) {
+function paperChartPrincipal(board, dataMin, dataMax) {
+  // Overview: portfolio cash. Single book: that book's share. Never snap to series mid.
+  const initial = Number(board?.initial_cash);
+  const deployed = Number(board?.deployed_cash);
+  if (Number.isFinite(initial) && initial > 0) {
+    const dataMaxNum = Number(dataMax);
+    // Stale oversized principal (e.g. default 1e6 vs ~1e5 NAV) must not become the baseline.
+    if (Number.isFinite(dataMaxNum) && dataMaxNum > 0 && initial > dataMaxNum * 2.5) {
+      if (Number.isFinite(deployed) && deployed > 0 && deployed <= dataMaxNum * 2.5) {
+        return deployed;
+      }
+      return null;
+    }
+    return initial;
+  }
+  if (Number.isFinite(deployed) && deployed > 0) {
+    return deployed;
+  }
+  return null;
+}
+
+function paperChartYDomain(assets, principal) {
+  const dataMin = Math.min(...assets);
+  const dataMax = Math.max(...assets);
+  const rawSpan = dataMax - dataMin;
+  const span = rawSpan > 0 ? rawSpan : Math.max(Math.abs(dataMax) * 0.02, 1);
+  const pad = Math.max(span * 0.12, Math.abs(dataMax) * 0.004, 1);
+  let minY = dataMin - pad;
+  let maxY = dataMax + pad;
+  const hasPrincipal = Number.isFinite(principal) && principal > 0;
+  if (hasPrincipal) {
+    minY = Math.min(minY, principal - pad * 0.2);
+    maxY = Math.max(maxY, principal + pad * 0.2);
+  }
+  if (maxY <= minY) {
+    maxY = minY + 1;
+  }
+  return {
+    minY,
+    maxY,
+    showPrincipal: Boolean(hasPrincipal && principal >= minY && principal <= maxY),
+  };
+}
+
+function paperChartBookLabel(board, opts = {}) {
+  const overview = Boolean(
+    opts.overview
+    || opts.strategyId === PAPER_OVERVIEW_ID
+    || board?.strategy_id === PAPER_OVERVIEW_ID
+    || paperFocusId === PAPER_OVERVIEW_ID,
+  );
+  if (overview) {
+    return "账户总览";
+  }
+  const strategyId = opts.strategyId || board?.strategy_id || paperFocusId;
+  return STRATEGY_LABEL[strategyId] || strategyId || "当前账户";
+}
+
+function renderPaperChart(rows, board, opts = {}) {
   const host = document.getElementById("paper-equity-chart");
   const meta = document.getElementById("paper-chart-meta");
+  const bookEl = document.getElementById("paper-chart-book");
   paperChartView = null;
   if (!host) {
     return;
   }
   host.innerHTML = "";
+  if (bookEl) {
+    const label = paperChartBookLabel(board, opts);
+    bookEl.textContent = label;
+    bookEl.dataset.tone = label === "账户总览" ? "info" : "accent";
+  }
   if (meta) {
     meta.textContent = board.window_start
       ? `${board.window_start} ~ ${board.window_end} · 本金 ${formatMoney(board.initial_cash)} · 区间 ${formatPct(board.total_return)}`
-      : "相对本金 1,000,000";
+      : `相对本金 ${formatMoney(board.initial_cash ?? lastPaperConfig?.initial_cash ?? 0)}`;
   }
   if (!rows.length) {
     host.textContent = "暂无净值曲线";
@@ -3923,37 +5576,83 @@ function renderPaperChart(rows, board) {
   }
   const width = 720;
   const height = 248;
-  const pad = { top: 16, right: 36, bottom: 28, left: 58 };
+  const pad = { top: 16, right: 44, bottom: 28, left: 58 };
   const innerW = width - pad.left - pad.right;
   const innerH = height - pad.top - pad.bottom;
   const assets = rows.map((row) => Number(row.total_asset));
-  const minY = Math.min(...assets);
-  const maxY = Math.max(...assets);
-  const spanY = maxY - minY || Math.abs(maxY) * 0.02 || 1;
+  const dataMin = Math.min(...assets);
+  const dataMax = Math.max(...assets);
+  const principal = paperChartPrincipal(board, dataMin, dataMax);
+  const domain = paperChartYDomain(assets, principal);
+  const minY = domain.minY;
+  const maxY = domain.maxY;
+  const spanY = maxY - minY || 1;
   const xAt = (index) => pad.left + (rows.length === 1 ? innerW / 2 : (index / (rows.length - 1)) * innerW);
   const yAt = (value) => pad.top + (1 - (value - minY) / spanY) * innerH;
   const ns = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(ns, "svg");
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.setAttribute("class", "paper-chart-svg");
-  const ticks = [maxY, (maxY + minY) / 2, minY];
-  ticks.forEach((value, tickIndex) => {
+  const ticks = [];
+  ticks.push(maxY);
+  if (domain.showPrincipal && principal != null) {
+    ticks.push(principal);
+  }
+  ticks.push(minY);
+    ticks.forEach((value, tickIndex) => {
     const y = yAt(value);
-    const grid = document.createElementNS(ns, "line");
-    grid.setAttribute("x1", String(pad.left));
-    grid.setAttribute("x2", String(width - pad.right));
-    grid.setAttribute("y1", String(y));
-    grid.setAttribute("y2", String(y));
-    grid.setAttribute("class", "paper-chart-grid");
-    svg.appendChild(grid);
+    const isPrincipalTick = domain.showPrincipal && principal != null && Math.abs(value - principal) < 1e-6;
+    if (!isPrincipalTick) {
+      const grid = document.createElementNS(ns, "line");
+      grid.setAttribute("x1", String(pad.left));
+      grid.setAttribute("x2", String(width - pad.right));
+      grid.setAttribute("y1", String(y));
+      grid.setAttribute("y2", String(y));
+      grid.setAttribute("class", "paper-chart-grid");
+      svg.appendChild(grid);
+    }
     const label = document.createElementNS(ns, "text");
     label.setAttribute("x", String(pad.left - 8));
-    label.setAttribute("y", String(tickIndex === 0 ? y + 9 : tickIndex === ticks.length - 1 ? y - 2 : y + 3));
+    label.setAttribute(
+      "y",
+      String(tickIndex === 0 ? y + 9 : tickIndex === ticks.length - 1 ? y - 2 : y + 3),
+    );
     label.setAttribute("text-anchor", "end");
-    label.setAttribute("class", "paper-chart-label");
+    label.setAttribute("class", isPrincipalTick ? "paper-chart-label is-principal" : "paper-chart-label");
     label.textContent = formatAxisMoney(value);
     svg.appendChild(label);
   });
+  // Ensure principal amount is always labeled on the left even when near the Y edge.
+  if (domain.showPrincipal && principal != null) {
+    const principalInTicks = ticks.some((value) => Math.abs(value - principal) < 1e-6);
+    if (!principalInTicks) {
+      const y = yAt(principal);
+      const label = document.createElementNS(ns, "text");
+      label.setAttribute("x", String(pad.left - 8));
+      label.setAttribute("y", String(y + 3));
+      label.setAttribute("text-anchor", "end");
+      label.setAttribute("class", "paper-chart-label is-principal");
+      label.textContent = formatAxisMoney(principal);
+      svg.appendChild(label);
+    }
+  }
+  if (domain.showPrincipal && principal != null) {
+    const baseY = yAt(principal);
+    const baseline = document.createElementNS(ns, "line");
+    baseline.setAttribute("x1", String(pad.left));
+    baseline.setAttribute("x2", String(width - pad.right));
+    baseline.setAttribute("y1", String(baseY));
+    baseline.setAttribute("y2", String(baseY));
+    baseline.setAttribute("class", "paper-chart-baseline");
+    svg.appendChild(baseline);
+    const baseLabel = document.createElementNS(ns, "text");
+    baseLabel.setAttribute("x", String(width - pad.right + 4));
+    baseLabel.setAttribute("y", String(baseY + 3));
+    baseLabel.setAttribute("text-anchor", "start");
+    baseLabel.setAttribute("class", "paper-chart-baseline-label");
+    baseLabel.textContent = "本金";
+    svg.appendChild(baseLabel);
+  }
   const points = rows.map((row, index) => ({
     date: row.trade_date,
     x: xAt(index),
@@ -3973,16 +5672,17 @@ function renderPaperChart(rows, board) {
   line.setAttribute("class", "paper-chart-line");
   svg.appendChild(line);
   const tickIndexes = xTickIndexes(rows.length);
+  const spanYears = xAxisSpanYears(rows);
   tickIndexes.forEach((index, order) => {
     const text = document.createElementNS(ns, "text");
     text.setAttribute("x", String(xAt(index)));
-    text.setAttribute("y", String(height - 8));
+    text.setAttribute("y", String(height - 6));
     text.setAttribute(
       "text-anchor",
       order === 0 ? "start" : order === tickIndexes.length - 1 ? "end" : "middle",
     );
-    text.setAttribute("class", "paper-chart-label");
-    text.textContent = shortMd(rows[index].trade_date);
+    text.setAttribute("class", "paper-chart-label paper-chart-x-label");
+    text.textContent = axisDateLabel(rows[index].trade_date, { spanYears });
     svg.appendChild(text);
   });
   points.forEach((point) => {
@@ -4053,6 +5753,1054 @@ bindTradePager("paper-position", "positions", () => renderPaperPositions());
 bindTradePager("paper-fill", "fills", () => renderPaperFills());
 bindTradePager("paper-order", "orders", () => renderOrders(tradeLists.orders, "order-body"));
 bindTradePager("mock-order", "mock", () => renderOrders(tradeLists.mock, "mock-order-body"));
+
+/* ——— 1B: factors / selector / events / tags / overrides ——— */
+
+let factorComputeTimer = 0;
+let factorComputeBusy = false;
+
+function setHint(id, message, show = true) {
+  const el = document.getElementById(id);
+  if (!el) {
+    return;
+  }
+  if (!message) {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  el.hidden = !show;
+  el.textContent = message;
+}
+
+function factorProgressText(row) {
+  if (!row) {
+    return "因子计算中…";
+  }
+  const status = SYNC_STATUS_LABEL[row.status] || row.status || "进行中";
+  const pct = row.progress_pct;
+  const label = row.progress_label || "";
+  if (pct != null && pct !== "") {
+    return `因子计算 ${status} ${pct}%${label ? ` · ${label}` : ""}`;
+  }
+  return `因子计算 ${status}${label ? ` · ${label}` : ""}`;
+}
+
+function setFactorComputeBusy(busy) {
+  factorComputeBusy = Boolean(busy);
+  const btn = document.getElementById("factor-compute-submit");
+  if (btn) {
+    btn.disabled = factorComputeBusy;
+    btn.setAttribute("aria-busy", factorComputeBusy ? "true" : "false");
+  }
+}
+
+function finishFactorCompute(row) {
+  window.clearInterval(factorComputeTimer);
+  factorComputeTimer = 0;
+  setFactorComputeBusy(false);
+  if (!row) {
+    return;
+  }
+  if (row.status === "success") {
+    let detail = row.detail;
+    if (typeof detail === "string") {
+      try {
+        detail = JSON.parse(detail);
+      } catch (_err) {
+        detail = null;
+      }
+    }
+    const n = detail?.factor_rows ?? detail?.sqlite_rows ?? row.factor_rows;
+    setHint(
+      "factor-compute-result",
+      `计算完成${n != null ? ` · ${n} 行` : ""} · run ${row.run_id || ""}`.trim(),
+    );
+    setText("factor-compute-meta", "计算完成");
+    showToast("因子计算完成", "ok");
+    loadFactorSignals().catch(() => {});
+  } else if (row.status === "failed") {
+    setHint("factor-compute-result", `计算失败：${row.fail_reason || "unknown"}`);
+    setText("factor-compute-meta", "计算失败");
+    showToast(row.fail_reason || "因子计算失败", "block");
+  }
+}
+
+function watchFactorCompute(runId) {
+  window.clearInterval(factorComputeTimer);
+  setFactorComputeBusy(true);
+  const tick = () => {
+    requestJsonOrMissing(`/api/factors/compute/${encodeURIComponent(runId)}`, undefined, "因子任务接口暂不可用")
+      .then((row) => {
+        if (!row) {
+          finishFactorCompute(null);
+          return;
+        }
+        setHint("factor-compute-result", factorProgressText(row));
+        setText("factor-compute-meta", factorProgressText(row));
+        if (row.status === "success" || row.status === "failed") {
+          finishFactorCompute(row);
+        }
+      })
+      .catch((error) => {
+        finishFactorCompute(null);
+        setHint("factor-compute-result", `轮询失败：${error.message}`);
+        showToast(error.message, "block");
+      });
+  };
+  tick();
+  factorComputeTimer = window.setInterval(tick, 1000);
+}
+
+async function resumeActiveFactorCompute() {
+  const payload = await requestJsonOrMissing("/api/factors/compute/active", undefined, "因子任务接口暂不可用");
+  if (!payload) {
+    return;
+  }
+  const active = payload.active;
+  if (active && (active.inflight || active.status === "queued" || active.status === "running")) {
+    setHint("factor-compute-result", factorProgressText(active));
+    watchFactorCompute(active.run_id);
+  }
+}
+
+const FACTOR_PAGE_SIZE = 10;
+const factorViewState = {
+  page: 1,
+  pages: 1,
+  total: 0,
+  seq: 0,
+};
+
+function renderFactorSignals(payload) {
+  const body = document.getElementById("factor-body");
+  if (!body) {
+    return;
+  }
+  body.innerHTML = "";
+  const list = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.items)
+      ? payload.items
+      : [];
+  const total = Array.isArray(payload) ? list.length : Number(payload?.total) || 0;
+  const page = Array.isArray(payload) ? 1 : Number(payload?.page) || 1;
+  const pages = Array.isArray(payload) ? 1 : Number(payload?.pages) || 1;
+  const size = Array.isArray(payload) ? list.length || FACTOR_PAGE_SIZE : Number(payload?.page_size) || FACTOR_PAGE_SIZE;
+  factorViewState.page = page;
+  factorViewState.pages = pages;
+  factorViewState.total = total;
+  if (!list.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 5;
+    td.className = "empty-hint";
+    td.textContent = "暂无因子信号。可先触发计算，或换日期 / 关键词查看。";
+    tr.appendChild(td);
+    body.appendChild(tr);
+  } else {
+    for (const row of list) {
+      const tr = document.createElement("tr");
+      appendCell(tr, row.trade_date || "-");
+      appendCell(tr, row.symbol || "-");
+      appendCell(tr, row.factor_name || "-");
+      const value = row.value;
+      appendCell(tr, value == null || value === "" ? "-" : Number(value).toFixed(6), { className: "num" });
+      const hash = row.params_hash ? String(row.params_hash).slice(0, 8) : "-";
+      appendCell(tr, hash, { title: row.params_hash ? `参数指纹完整值：${row.params_hash}` : "无参数指纹" });
+      body.appendChild(tr);
+    }
+  }
+  setText("factor-page-label", `共 ${total} 条 · ${page} / ${pages} · 每页 ${size}`);
+  const prev = document.getElementById("factor-prev");
+  const next = document.getElementById("factor-next");
+  if (prev) {
+    prev.disabled = page <= 1 || total === 0;
+  }
+  if (next) {
+    next.disabled = page >= pages || total === 0;
+  }
+  const date = document.getElementById("factor-view-date")?.value;
+  setText(
+    "factor-compute-meta",
+    total
+      ? date
+        ? `${date} · 共 ${total} 行 · 第 ${page}/${pages} 页`
+        : `共 ${total} 行 · 第 ${page}/${pages} 页`
+      : "暂无匹配",
+  );
+}
+
+function factorViewQuery(page = factorViewState.page) {
+  const params = new URLSearchParams();
+  const date = document.getElementById("factor-view-date")?.value;
+  const name = document.getElementById("factor-view-name")?.value?.trim();
+  const symbol = document.getElementById("factor-view-symbol")?.value?.trim();
+  if (date) {
+    params.set("trade_date", date);
+  }
+  if (name) {
+    params.set("factor_name", name);
+  }
+  if (symbol) {
+    params.set("symbol", symbol);
+  }
+  params.set("page", String(Math.max(1, Number(page) || 1)));
+  params.set("page_size", String(FACTOR_PAGE_SIZE));
+  return params;
+}
+
+async function loadFactorSignals(page = factorViewState.page) {
+  const seq = ++factorViewState.seq;
+  const prev = document.getElementById("factor-prev");
+  const next = document.getElementById("factor-next");
+  if (prev) {
+    prev.disabled = true;
+  }
+  if (next) {
+    next.disabled = true;
+  }
+  const qs = factorViewQuery(page).toString();
+  const payload = await requestJsonOrMissing(`/api/factors?${qs}`, undefined, "因子查询接口暂不可用");
+  if (seq !== factorViewState.seq) {
+    return;
+  }
+  if (payload == null) {
+    renderFactorSignals({ items: [], total: 0, page: 1, pages: 1, page_size: FACTOR_PAGE_SIZE });
+    setText("factor-compute-meta", "接口暂不可用");
+    return;
+  }
+  renderFactorSignals(payload);
+}
+
+async function loadFactorsPage() {
+  await resumeActiveFactorCompute().catch(() => {});
+  factorViewState.page = 1;
+  await loadFactorSignals(1);
+  renderSelectorPreview(null);
+}
+
+function renderSelectorPreview(payload) {
+  const body = document.getElementById("selector-preview-body");
+  if (!body) {
+    return;
+  }
+  body.innerHTML = "";
+  const weights = payload?.weights && typeof payload.weights === "object" ? payload.weights : {};
+  const entries = Object.entries(weights).sort((a, b) => Number(b[1]) - Number(a[1]));
+  const meta = document.getElementById("selector-preview-meta");
+  if (meta) {
+    if (payload) {
+      meta.hidden = false;
+      meta.textContent = `${STRATEGY_LABEL[payload.strategy_id] || payload.strategy_id} · 截至 ${payload.asof} · ${payload.n ?? entries.length} 只 · gross ${formatPct(payload.gross)}`;
+    } else {
+      meta.hidden = true;
+      meta.textContent = "";
+    }
+  }
+  if (!payload) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 3;
+    td.className = "empty-hint";
+    td.textContent = "暂无选股预览。选择策略与截至日后点「预览权重」。";
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+  if (!entries.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 3;
+    td.className = "empty-hint";
+    td.textContent = "暂无选股结果（该日无信号或数据不足）。";
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+  entries.forEach(([symbol, weight], index) => {
+    const tr = document.createElement("tr");
+    appendCell(tr, String(index + 1), { className: "num" });
+    appendCell(tr, symbol);
+    appendCell(tr, formatPct(weight), { className: "num" });
+    body.appendChild(tr);
+  });
+}
+
+document.getElementById("factor-compute-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (factorComputeBusy) {
+    showToast("因子计算进行中，请稍候", "warn");
+    return;
+  }
+  const strategyId = document.getElementById("factor-compute-strategy")?.value || "all";
+  setHint("factor-compute-result", "入队中…");
+  setFactorComputeBusy(true);
+  try {
+    const payload = await requestJsonOrMissing(
+      "/api/factors/compute",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ strategy_id: strategyId }),
+      },
+      "因子计算接口暂不可用",
+    );
+    if (!payload) {
+      setFactorComputeBusy(false);
+      return;
+    }
+    setHint("factor-compute-result", factorProgressText(payload));
+    if (payload.run_id) {
+      watchFactorCompute(payload.run_id);
+    } else {
+      setFactorComputeBusy(false);
+    }
+  } catch (error) {
+    setFactorComputeBusy(false);
+    setHint("factor-compute-result", `失败：${error.message}`);
+    showToast(error.message, "block");
+  }
+});
+
+document.getElementById("factor-view-form")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  factorViewState.page = 1;
+  loadFactorSignals(1).catch((error) => showToast(error.message, "block"));
+});
+
+document.getElementById("factor-prev")?.addEventListener("click", () => {
+  if (factorViewState.page <= 1) {
+    return;
+  }
+  loadFactorSignals(factorViewState.page - 1).catch((error) => showToast(error.message, "block"));
+});
+
+document.getElementById("factor-next")?.addEventListener("click", () => {
+  if (factorViewState.page >= factorViewState.pages) {
+    return;
+  }
+  loadFactorSignals(factorViewState.page + 1).catch((error) => showToast(error.message, "block"));
+});
+
+document.getElementById("selector-preview-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const strategyId = document.getElementById("selector-preview-strategy")?.value;
+  const asof = document.getElementById("selector-preview-asof")?.value;
+  if (!strategyId || !asof) {
+    showToast("请选择策略并填写截至日", "warn");
+    return;
+  }
+  try {
+    const payload = await requestJsonOrMissing(
+      "/api/selectors/preview",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ strategy_id: strategyId, asof }),
+      },
+      "选股预览接口暂不可用",
+    );
+    if (!payload) {
+      renderSelectorPreview(null);
+      return;
+    }
+    renderSelectorPreview(payload);
+  } catch (error) {
+    showToast(error.message, "block");
+  }
+});
+
+const EVENTS_PAGE_SIZE = 10;
+const EVENT_TYPE_LABEL = {
+  holder_increase: "增持",
+  holder_decrease: "减持",
+};
+
+function eventTypeLabel(type) {
+  const key = String(type || "").trim();
+  if (!key) {
+    return "-";
+  }
+  return EVENT_TYPE_LABEL[key] || key;
+}
+
+const eventsViewState = {
+  page: 1,
+  pages: 1,
+  total: 0,
+  seq: 0,
+};
+
+function renderEvents(payload) {
+  const body = document.getElementById("events-body");
+  if (!body) {
+    return;
+  }
+  body.innerHTML = "";
+  const list = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.items)
+      ? payload.items
+      : [];
+  const total = Array.isArray(payload) ? list.length : Number(payload?.total) || 0;
+  const page = Array.isArray(payload) ? 1 : Number(payload?.page) || 1;
+  const pages = Array.isArray(payload) ? 1 : Number(payload?.pages) || 1;
+  const size = Array.isArray(payload)
+    ? list.length || EVENTS_PAGE_SIZE
+    : Number(payload?.page_size) || EVENTS_PAGE_SIZE;
+  eventsViewState.page = page;
+  eventsViewState.pages = pages;
+  eventsViewState.total = total;
+  if (!list.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 7;
+    td.className = "empty-hint";
+    td.textContent = "暂无事件。可导入 fixture，或配置 Tushare token 后拉取。";
+    tr.appendChild(td);
+    body.appendChild(tr);
+  } else {
+    for (const row of list) {
+      const tr = document.createElement("tr");
+      appendCell(tr, row.event_date || "-");
+      appendCell(tr, row.asof_date || "-");
+      appendCell(tr, eventTypeLabel(row.event_type), { tone: "info", title: row.event_type || "" });
+      appendCell(tr, row.symbol || "-");
+      const actor = row.actor || "-";
+      appendCell(tr, actor, { className: "col-actor", title: actor });
+      const value = row.value;
+      appendCell(tr, value == null || value === "" ? "-" : String(value), { className: "num" });
+      appendCell(tr, row.source || "-");
+      body.appendChild(tr);
+    }
+  }
+  setText("events-page-label", `共 ${total} 条 · ${page} / ${pages} · 每页 ${size}`);
+  const prev = document.getElementById("events-prev");
+  const next = document.getElementById("events-next");
+  if (prev) {
+    prev.disabled = page <= 1 || total === 0;
+  }
+  if (next) {
+    next.disabled = page >= pages || total === 0;
+  }
+  setText("events-page-meta", total ? `共 ${total} 条 · 第 ${page}/${pages} 页` : "暂无匹配");
+}
+
+async function loadEventTypes() {
+  const select = document.getElementById("events-type");
+  if (!select) {
+    return;
+  }
+  const types = await requestJsonOrMissing("/api/events/types", undefined, "事件类型接口暂不可用");
+  if (!types) {
+    return;
+  }
+  const current = select.value;
+  const keep = new Set(["", ...(Array.isArray(types) ? types : [])]);
+  select.innerHTML = "";
+  const all = document.createElement("option");
+  all.value = "";
+  all.textContent = "全部";
+  select.appendChild(all);
+  for (const type of Array.isArray(types) ? types : []) {
+    const opt = document.createElement("option");
+    opt.value = type;
+    opt.textContent = eventTypeLabel(type);
+    select.appendChild(opt);
+  }
+  if (keep.has(current)) {
+    select.value = current;
+  }
+  select.dispatchEvent(new Event("change"));
+}
+
+function eventsQuery(page = eventsViewState.page) {
+  const params = new URLSearchParams();
+  const type = document.getElementById("events-type")?.value;
+  const symbol = document.getElementById("events-symbol")?.value?.trim();
+  const start = document.getElementById("events-start")?.value;
+  const end = document.getElementById("events-end")?.value;
+  if (type) {
+    params.set("event_type", type);
+  }
+  if (symbol) {
+    params.set("symbol", symbol);
+  }
+  if (start) {
+    params.set("start", start);
+  }
+  if (end) {
+    params.set("end", end);
+  }
+  params.set("page", String(Math.max(1, Number(page) || 1)));
+  params.set("page_size", String(EVENTS_PAGE_SIZE));
+  return params;
+}
+
+async function loadEventsPage(page = eventsViewState.page) {
+  const seq = ++eventsViewState.seq;
+  await loadEventTypes().catch(() => {});
+  const prev = document.getElementById("events-prev");
+  const next = document.getElementById("events-next");
+  if (prev) {
+    prev.disabled = true;
+  }
+  if (next) {
+    next.disabled = true;
+  }
+  const payload = await requestJsonOrMissing(
+    `/api/events?${eventsQuery(page).toString()}`,
+    undefined,
+    "事件列表接口暂不可用",
+  );
+  if (seq !== eventsViewState.seq) {
+    return;
+  }
+  if (payload == null) {
+    renderEvents({ items: [], total: 0, page: 1, pages: 1, page_size: EVENTS_PAGE_SIZE });
+    setText("events-page-meta", "接口暂不可用");
+    return;
+  }
+  renderEvents(payload);
+}
+
+document.getElementById("events-filters")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  eventsViewState.page = 1;
+  loadEventsPage(1).catch((error) => showToast(error.message, "block"));
+});
+
+document.getElementById("events-reset")?.addEventListener("click", () => {
+  const type = document.getElementById("events-type");
+  if (type) {
+    type.value = "";
+    type.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+  const symbol = document.getElementById("events-symbol");
+  if (symbol) {
+    symbol.value = "";
+  }
+  const start = document.getElementById("events-start");
+  if (start) {
+    start.value = "";
+  }
+  const end = document.getElementById("events-end");
+  if (end) {
+    end.value = "";
+  }
+  eventsViewState.page = 1;
+  loadEventsPage(1).catch((error) => showToast(error.message, "block"));
+});
+
+document.getElementById("events-prev")?.addEventListener("click", () => {
+  if (eventsViewState.page <= 1) {
+    return;
+  }
+  loadEventsPage(eventsViewState.page - 1).catch((error) => showToast(error.message, "block"));
+});
+
+document.getElementById("events-next")?.addEventListener("click", () => {
+  if (eventsViewState.page >= eventsViewState.pages) {
+    return;
+  }
+  loadEventsPage(eventsViewState.page + 1).catch((error) => showToast(error.message, "block"));
+});
+
+document.getElementById("events-import")?.addEventListener("click", async () => {
+  setHint("events-action-hint", "导入中…");
+  try {
+    const payload = await requestJsonOrMissing(
+      "/api/events/import",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
+      "事件导入接口暂不可用",
+    );
+    if (!payload) {
+      setHint("events-action-hint", "");
+      return;
+    }
+    const n = payload.imported ?? payload.upserted ?? payload.n ?? payload.rows ?? payload.count;
+    setHint("events-action-hint", `已导入${n != null ? ` ${n} 条` : ""}${payload.source_path ? ` · ${payload.source_path}` : ""}`);
+    showToast("事件 fixture 已导入", "ok");
+    eventsViewState.page = 1;
+    await loadEventsPage(1);
+  } catch (error) {
+    setHint("events-action-hint", `导入失败：${error.message}`);
+    showToast(error.message, "block");
+  }
+});
+
+let eventsPullTimer = 0;
+let eventsPullBusy = false;
+
+function setEventsPullBusy(busy) {
+  eventsPullBusy = Boolean(busy);
+  const btn = document.getElementById("events-pull");
+  if (btn) {
+    btn.disabled = eventsPullBusy;
+    btn.setAttribute("aria-busy", eventsPullBusy ? "true" : "false");
+    btn.textContent = eventsPullBusy ? "拉取中…" : "拉取增减持";
+  }
+}
+
+function eventsPullProgressText(row) {
+  if (!row) {
+    return "拉取中…";
+  }
+  const status = row.status || "进行中";
+  const label = row.progress_label || "";
+  const pct = row.progress_pct;
+  if (pct != null && pct !== "") {
+    return `增减持拉取 ${status} ${pct}%${label ? ` · ${label}` : ""}`;
+  }
+  return `增减持拉取 ${status}${label ? ` · ${label}` : ""}`;
+}
+
+function formatEventsPullResult(payload) {
+  if (!payload || typeof payload !== "object") {
+    return "拉取完成（已写入 SQLite + parquet）";
+  }
+  const written = payload.upserted ?? payload.n ?? payload.rows ?? payload.count;
+  const fetched = payload.fetched;
+  const unique = payload.unique_in_batch;
+  const stored = payload.stored_total;
+  const deduped = payload.deduped_in_batch;
+  const requests = payload.requests ?? payload.chunks;
+  const parts = ["拉取完成"];
+  if (payload.range_start && payload.range_end) {
+    parts.push(`${payload.range_start}~${payload.range_end}`);
+  }
+  if (payload.default_lookback_days != null && !payload.range_start) {
+    parts.push(`默认近 ${payload.default_lookback_days} 天`);
+  }
+  if (requests != null) {
+    parts.push(`${requests} 次请求`);
+  }
+  if (fetched != null) {
+    parts.push(`抓取 ${fetched}`);
+  }
+  if (written != null) {
+    parts.push(`规范化 ${written}`);
+  }
+  if (unique != null) {
+    parts.push(`去重后 ${unique}`);
+  }
+  if (deduped != null && Number(deduped) > 0) {
+    parts.push(`批次内重复 ${deduped}`);
+  }
+  if (stored != null) {
+    parts.push(`库内共 ${stored}`);
+  }
+  const dayHits = Array.isArray(payload.day_hits_limit) ? payload.day_hits_limit : [];
+  if (dayHits.length) {
+    parts.push(`仍触顶 ${dayHits.length} 日`);
+  }
+  parts.push("已写入 SQLite + parquet");
+  return `${parts.join(" · ")}（按月分片，满 3000 再按日；列表走库内分页）`;
+}
+
+function finishEventsPull(row) {
+  window.clearInterval(eventsPullTimer);
+  eventsPullTimer = 0;
+  setEventsPullBusy(false);
+  if (!row) {
+    return;
+  }
+  if (row.status === "success") {
+    const payload = row.result && typeof row.result === "object" ? row.result : null;
+    const dayHits = Array.isArray(payload?.day_hits_limit) ? payload.day_hits_limit : [];
+    setHint("events-action-hint", formatEventsPullResult(payload));
+    showToast(dayHits.length ? "增减持已拉取（部分日期仍触顶）" : "股东增减持已拉取", dayHits.length ? "warn" : "ok");
+    eventsViewState.page = 1;
+    loadEventsPage(1).catch((error) => showToast(error.message, "block"));
+  } else if (row.status === "failed") {
+    const msg = row.fail_reason || "unknown";
+    const noToken = /token|TUSHARE|未配置|missing/i.test(msg);
+    setHint(
+      "events-action-hint",
+      noToken
+        ? `拉取失败：未配置 Tushare token（${msg}）。可先「导入 fixture」离线验证。`
+        : `拉取失败：${msg}`,
+    );
+    showToast(noToken ? "未配置 Tushare token，请先导入 fixture 或配置 token" : msg, "warn");
+  }
+}
+
+function watchEventsPull(runId) {
+  window.clearInterval(eventsPullTimer);
+  setEventsPullBusy(true);
+  const tick = () => {
+    requestJsonOrMissing(`/api/events/pull/${encodeURIComponent(runId)}`, undefined, "事件拉取任务接口暂不可用")
+      .then((row) => {
+        if (!row) {
+          finishEventsPull(null);
+          return;
+        }
+        setHint("events-action-hint", eventsPullProgressText(row));
+        if (row.status === "success" || row.status === "failed") {
+          finishEventsPull(row);
+        }
+      })
+      .catch((error) => {
+        finishEventsPull(null);
+        setHint("events-action-hint", `轮询失败：${error.message}`);
+        showToast(error.message, "block");
+      });
+  };
+  tick();
+  eventsPullTimer = window.setInterval(tick, 1000);
+}
+
+async function resumeActiveEventsPull() {
+  const payload = await requestJsonOrMissing("/api/events/pull/active", undefined, "事件拉取任务接口暂不可用");
+  if (!payload) {
+    return;
+  }
+  const active = payload.active;
+  if (active && (active.inflight || active.status === "queued" || active.status === "running")) {
+    setHint("events-action-hint", eventsPullProgressText(active));
+    watchEventsPull(active.run_id);
+  }
+}
+
+document.getElementById("events-pull")?.addEventListener("click", async () => {
+  if (eventsPullBusy) {
+    showToast("增减持拉取进行中，请勿重复点击", "warn");
+    return;
+  }
+  setEventsPullBusy(true);
+  setHint("events-action-hint", "排队中…");
+  const start = document.getElementById("events-start")?.value || null;
+  const end = document.getElementById("events-end")?.value || null;
+  try {
+    const payload = await requestJsonOrMissing(
+      "/api/events/pull",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: "tushare", start, end }),
+      },
+      "事件拉取接口暂不可用",
+    );
+    if (!payload) {
+      setEventsPullBusy(false);
+      setHint("events-action-hint", "");
+      return;
+    }
+    if (payload.run_id) {
+      watchEventsPull(payload.run_id);
+      return;
+    }
+    // sync fallback (should not happen with async jobs)
+    setEventsPullBusy(false);
+    setHint("events-action-hint", formatEventsPullResult(payload));
+    eventsViewState.page = 1;
+    await loadEventsPage(1);
+  } catch (error) {
+    setEventsPullBusy(false);
+    const msg = error.message || "";
+    const busy = error.status === 409 || /进行中|busy/i.test(msg);
+    const noToken = /token|TUSHARE|未配置|missing/i.test(msg);
+    setHint(
+      "events-action-hint",
+      busy
+        ? `拉取进行中：${msg}`
+        : noToken
+          ? `拉取失败：未配置 Tushare token（${msg}）。可先「导入 fixture」离线验证。`
+          : `拉取失败：${msg}`,
+    );
+    showToast(
+      busy ? "已有拉取任务进行中" : noToken ? "未配置 Tushare token，请先导入 fixture 或配置 token" : msg,
+      "warn",
+    );
+    if (busy) {
+      resumeActiveEventsPull().catch(() => {});
+    }
+  }
+});
+
+function renderTags(rows) {
+  const body = document.getElementById("tags-body");
+  const summary = document.getElementById("tags-summary");
+  if (!body) {
+    return;
+  }
+  body.innerHTML = "";
+  if (summary) {
+    summary.innerHTML = "";
+  }
+  const list = Array.isArray(rows) ? rows : [];
+  const counts = new Map();
+  for (const row of list) {
+    const tag = row.tag || "-";
+    counts.set(tag, (counts.get(tag) || 0) + 1);
+  }
+  if (summary) {
+    const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
+    if (!top.length) {
+      const item = document.createElement("div");
+      item.className = "kv-item";
+      item.innerHTML = "<span>池</span><strong>暂无标签</strong>";
+      summary.appendChild(item);
+    } else {
+      for (const [tag, count] of top) {
+        const item = document.createElement("div");
+        item.className = "kv-item";
+        const k = document.createElement("button");
+        k.type = "button";
+        k.className = "linkish";
+        k.textContent = tag;
+        k.title = `查看池 ${tag}`;
+        k.addEventListener("click", () => {
+          const input = document.getElementById("tags-filter-tag");
+          if (input) {
+            input.value = tag;
+          }
+          loadTagsPage().catch((error) => showToast(error.message, "block"));
+        });
+        const v = document.createElement("strong");
+        v.textContent = `${count} 只`;
+        item.append(k, v);
+        summary.appendChild(item);
+      }
+    }
+  }
+  if (!list.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 5;
+    td.className = "empty-hint";
+    td.textContent = "暂无标签。宇宙同步或手工写入后会显示。";
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+  for (const row of list.slice(0, 500)) {
+    const tr = document.createElement("tr");
+    appendCell(tr, row.tag || "-");
+    appendCell(tr, row.symbol || "-");
+    appendCell(tr, row.source || "-");
+    appendCell(tr, row.note || "-");
+    appendCell(tr, formatDateTime(row.updated_at, false));
+    body.appendChild(tr);
+  }
+}
+
+async function loadTagsPage() {
+  const params = new URLSearchParams();
+  const tag = document.getElementById("tags-filter-tag")?.value?.trim();
+  const symbol = document.getElementById("tags-filter-symbol")?.value?.trim();
+  if (tag) {
+    params.set("tag", tag);
+  }
+  if (symbol) {
+    params.set("symbol", symbol);
+  }
+  params.set("limit", "2000");
+  const rows = await requestJsonOrMissing(`/api/tags?${params.toString()}`, undefined, "标签接口暂不可用");
+  if (rows == null) {
+    renderTags([]);
+    setText("tags-page-meta", "接口暂不可用");
+    return;
+  }
+  renderTags(rows);
+  setText("tags-page-meta", tag ? `池 ${tag} · ${rows.length} 只` : `${rows.length} 条`);
+}
+
+document.getElementById("tags-filters")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  loadTagsPage().catch((error) => showToast(error.message, "block"));
+});
+
+document.getElementById("tags-upsert-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const tag = document.getElementById("tags-upsert-tag")?.value?.trim();
+  const symbol = document.getElementById("tags-upsert-symbol")?.value?.trim();
+  const note = document.getElementById("tags-upsert-note")?.value?.trim() || null;
+  if (!tag || !symbol) {
+    showToast("请填写标签与代码", "warn");
+    return;
+  }
+  try {
+    const payload = await requestJsonOrMissing(
+      "/api/tags",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rows: [{ tag, symbol, source: "manual", note }], actor: "operator" }),
+      },
+      "标签写入接口暂不可用",
+    );
+    if (!payload) {
+      return;
+    }
+    setHint("tags-action-hint", `已写入 ${tag} / ${symbol}`);
+    showToast("标签已写入", "ok");
+    document.getElementById("tags-upsert-form")?.reset();
+    await loadTagsPage();
+  } catch (error) {
+    setHint("tags-action-hint", `写入失败：${error.message}`);
+    showToast(error.message, "block");
+  }
+});
+
+function renderOverrides(rows) {
+  const body = document.getElementById("override-body");
+  if (!body) {
+    return;
+  }
+  body.innerHTML = "";
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 8;
+    td.className = "empty-hint";
+    td.textContent = "暂无覆盖。可为策略添加强制纳入 / 剔除 / 权重上限。";
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+  for (const row of list) {
+    const tr = document.createElement("tr");
+    appendCell(tr, STRATEGY_LABEL[row.strategy_id] || row.strategy_id || "-");
+    appendCell(tr, row.symbol || "-");
+    appendCell(tr, OVERRIDE_ACTION_LABEL[row.action] || row.action || "-", {
+      tone: row.action === "force_out" ? "block" : row.action === "force_in" ? "ok" : "accent",
+    });
+    appendCell(tr, row.weight == null || row.weight === "" ? "-" : formatPct(row.weight), { className: "num" });
+    appendCell(tr, row.reason || "-");
+    appendCell(tr, row.actor || "-");
+    appendCell(tr, formatDateTime(row.updated_at, false));
+    const td = document.createElement("td");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "secondary";
+    btn.textContent = "删除";
+    btn.addEventListener("click", async () => {
+      const ok = await confirmDialog(`删除覆盖 ${row.symbol}？`);
+      if (!ok) {
+        return;
+      }
+      try {
+        const params = new URLSearchParams({
+          strategy_id: row.strategy_id,
+          symbol: row.symbol,
+          actor: "operator",
+        });
+        const result = await requestJsonOrMissing(
+          `/api/paper/overrides?${params.toString()}`,
+          { method: "DELETE" },
+          "覆盖接口暂不可用",
+        );
+        if (result == null) {
+          return;
+        }
+        showToast("已删除覆盖", "ok");
+        await loadOverridesPage();
+      } catch (error) {
+        showToast(error.message, "block");
+      }
+    });
+    td.appendChild(btn);
+    tr.appendChild(td);
+    body.appendChild(tr);
+  }
+}
+
+async function loadOverridesPage() {
+  const params = new URLSearchParams();
+  const strategyId = document.getElementById("override-filter-strategy")?.value;
+  if (strategyId) {
+    params.set("strategy_id", strategyId);
+  }
+  const qs = params.toString();
+  const rows = await requestJsonOrMissing(
+    `/api/paper/overrides${qs ? `?${qs}` : ""}`,
+    undefined,
+    "覆盖接口暂不可用",
+  );
+  if (rows == null) {
+    renderOverrides([]);
+    setText("override-page-meta", "接口暂不可用");
+    return;
+  }
+  renderOverrides(rows);
+  setText("override-page-meta", `${rows.length} 条`);
+}
+
+document.getElementById("override-filters")?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  loadOverridesPage().catch((error) => showToast(error.message, "block"));
+});
+
+document.getElementById("override-action")?.addEventListener("change", () => {
+  const action = document.getElementById("override-action")?.value;
+  const weight = document.getElementById("override-weight");
+  if (!weight) {
+    return;
+  }
+  weight.required = action === "force_in" || action === "cap";
+  weight.disabled = action === "force_out";
+  if (action === "force_out") {
+    weight.value = "";
+  }
+});
+document.getElementById("override-action")?.dispatchEvent(new Event("change"));
+
+document.getElementById("override-upsert-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const strategyId = document.getElementById("override-strategy")?.value;
+  const symbol = document.getElementById("override-symbol")?.value?.trim();
+  const action = document.getElementById("override-action")?.value;
+  const reason = document.getElementById("override-reason")?.value?.trim() || null;
+  const weightRaw = document.getElementById("override-weight")?.value;
+  if (!strategyId || !symbol || !action) {
+    showToast("请填写策略、代码与动作", "warn");
+    return;
+  }
+  const body = {
+    strategy_id: strategyId,
+    symbol,
+    action,
+    reason,
+    actor: "operator",
+  };
+  if (action === "force_in" || action === "cap") {
+    if (weightRaw === "" || weightRaw == null) {
+      showToast(`${OVERRIDE_ACTION_LABEL[action] || action} 需要权重`, "warn");
+      return;
+    }
+    body.weight = Number(weightRaw);
+  }
+  try {
+    const payload = await requestJsonOrMissing(
+      "/api/paper/overrides",
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      "覆盖接口暂不可用",
+    );
+    if (!payload) {
+      return;
+    }
+    setHint("override-action-hint", `已保存 ${symbol} · ${OVERRIDE_ACTION_LABEL[action] || action}`);
+    showToast("覆盖已保存", "ok");
+    document.getElementById("override-symbol").value = "";
+    document.getElementById("override-reason").value = "";
+    document.getElementById("override-weight").value = "";
+    await loadOverridesPage();
+  } catch (error) {
+    setHint("override-action-hint", `保存失败：${error.message}`);
+    showToast(error.message, "block");
+  }
+});
 
 document.getElementById("mock-order-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -4142,6 +6890,7 @@ enhanceSelects();
 bindTips();
 applySidebar(localStorage.getItem("asqt-sidebar") === "1");
 applyTasks(localStorage.getItem("asqt-tasks") === "1");
+initSettingsCollapsiblePanels();
 showPage(currentPage());
 refresh().catch((error) => {
   setText("runtime", `加载失败：${error.message}`);

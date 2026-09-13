@@ -192,7 +192,7 @@ def test_append_placeholder_etf_adj_does_not_block_quality(tmp_path):
     assert full["trade_allowed"] is True
 
 
-def test_pipeline_blocks_when_calendar_day_missing(tmp_path):
+def test_pipeline_warns_when_calendar_day_missing(tmp_path):
     settings = make_settings(tmp_path)
     adapter = FakeAdapter(
         [_bar("000001.SZ", "2024-01-02")],
@@ -202,8 +202,12 @@ def test_pipeline_blocks_when_calendar_day_missing(tmp_path):
         ],
     )
     result = pull_daily(["000001.SZ"], "2024-01-02", "2024-01-03", settings=settings, adapter=adapter)
-    assert result["quality"]["trade_allowed"] is False
-    assert any(item["check_type"] == "missing" for item in result["quality"]["issues"])
+    # Isolated calendar holes (halts / source gaps) stay visible as warn, not hard blocks.
+    assert result["quality"]["trade_allowed"] is True
+    assert any(
+        item["check_type"] == "missing" and item["severity"] == "warn"
+        for item in result["quality"]["issues"]
+    )
 
 
 def test_api_does_not_import_baostock_and_marks_p1_ports_wired(tmp_path, monkeypatch):

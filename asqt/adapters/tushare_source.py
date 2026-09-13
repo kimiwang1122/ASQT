@@ -8,6 +8,8 @@ import ssl
 import time
 import urllib.error
 import urllib.request
+from calendar import monthrange
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,63 @@ MCP_URL = "https://api.tushare.pro/mcp/"
 DAILY_FIELDS = "ts_code,trade_date,open,high,low,close,pre_close,vol,amount"
 # 5000+ 积分档官方约 500 次/分钟；默认按约 300 次/分钟留余量。
 DEFAULT_THROTTLE_S = 0.2
+# Official stk_holdertrade cap: 3000 rows per request.
+STK_HOLDERTRADE_MAX_ROWS = 3000
+# Default lookback when start/end omitted (full history is too slow; pass start for longer).
+DEFAULT_HOLDERTRADE_LOOKBACK_DAYS = 730
+DEFAULT_HOLDERTRADE_START = "2010-01-01"  # used only when explicitly requested via long start
+HOLDERTRADE_FIELDS = (
+    "ts_code,ann_date,holder_name,holder_type,in_de,change_vol,change_ratio,"
+    "after_share,after_ratio,avg_price,total_share,begin_date,close_date"
+)
+
+
+def _parse_iso_date(value: str | None, *, fallback: date) -> date:
+    text = str(value or "").strip().replace("/", "-")
+    if len(text) == 8 and text.isdigit():
+        text = f"{text[:4]}-{text[4:6]}-{text[6:8]}"
+    if len(text) >= 10:
+        try:
+            return date.fromisoformat(text[:10])
+        except ValueError:
+            pass
+    return fallback
+
+
+def _compact_date(value: date) -> str:
+    return value.strftime("%Y%m%d")
+
+
+def iter_month_windows(start: date, end: date) -> list[tuple[date, date]]:
+    """Inclusive month slices covering [start, end]."""
+    if end < start:
+        return []
+    windows: list[tuple[date, date]] = []
+    cursor = date(start.year, start.month, 1)
+    while cursor <= end:
+        last_day = monthrange(cursor.year, cursor.month)[1]
+        month_end = date(cursor.year, cursor.month, last_day)
+        win_start = max(start, cursor)
+        win_end = min(end, month_end)
+        if win_start <= win_end:
+            windows.append((win_start, win_end))
+        if cursor.month == 12:
+            cursor = date(cursor.year + 1, 1, 1)
+        else:
+            cursor = date(cursor.year, cursor.month + 1, 1)
+    return windows
+
+
+def iter_day_windows(start: date, end: date) -> list[tuple[date, date]]:
+    """Inclusive one-day slices covering [start, end]."""
+    if end < start:
+        return []
+    windows: list[tuple[date, date]] = []
+    cursor = start
+    while cursor <= end:
+        windows.append((cursor, cursor))
+        cursor += timedelta(days=1)
+    return windows
 
 
 class TushareAdapter:
@@ -29,6 +88,7 @@ class TushareAdapter:
         self.throttle_s = DEFAULT_THROTTLE_S
         self.last_errors: list[dict[str, str]] = []
         self._skip_apis: set[str] = set()
+        self.last_holdertrade_meta: dict[str, Any] = {}
 
     def health(self) -> dict[str, Any]:
         try:
@@ -120,6 +180,129 @@ class TushareAdapter:
                 }
             )
         return packed
+
+    def fetch_stk_holdertrade(
+        self,
+        symbols: list[str] | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        *,
+        trade_type: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch shareholder increase/decrease rows (Tushare stk_holdertrade).
+
+        Tushare caps each call at 3000 rows. We page by calendar month and, if a
+        month still hits the cap, subdivide by day. Default range is
+        2010-01-01 → today when start/end are omitted.
+        """
+        self.last_errors = []
+        today = date.today()
+        if start:
+            start_d = _parse_iso_date(start, fallback=today - timedelta(days=DEFAULT_HOLDERTRADE_LOOKBACK_DAYS))
+        else:
+            start_d = today - timedelta(days=DEFAULT_HOLDERTRADE_LOOKBACK_DAYS)
+        end_d = _parse_iso_date(end, fallback=today)
+        if end_d < start_d:
+            start_d, end_d = end_d, start_d
+        wanted = [str(item).strip() for item in (symbols or []) if str(item).strip()]
+        self.last_holdertrade_meta = {
+            "start": start_d.isoformat(),
+            "end": end_d.isoformat(),
+            "symbols": wanted,
+            "default_lookback_days": None if start else DEFAULT_HOLDERTRADE_LOOKBACK_DAYS,
+            "chunks": 0,
+            "chunk_hits_limit": [],
+            "day_hits_limit": [],
+            "requests": 0,
+        }
+        rows: list[dict[str, Any]] = []
+        if wanted:
+            total = len(wanted)
+            for index, symbol in enumerate(wanted, 1):
+                base: dict[str, Any] = {"ts_code": symbol}
+                if trade_type:
+                    base["trade_type"] = trade_type
+                rows.extend(self._fetch_holdertrade_range(base, start_d, end_d))
+                if index < total and self.throttle_s:
+                    time.sleep(self.throttle_s)
+        else:
+            base = {}
+            if trade_type:
+                base["trade_type"] = trade_type
+            rows.extend(self._fetch_holdertrade_range(base, start_d, end_d))
+        deduped = _dedupe_holdertrade_rows(rows)
+        self.last_holdertrade_meta["fetched_raw"] = len(rows)
+        self.last_holdertrade_meta["fetched_deduped"] = len(deduped)
+        return deduped
+
+    def _fetch_holdertrade_range(
+        self,
+        base_params: dict[str, Any],
+        start_d: date,
+        end_d: date,
+    ) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        windows = iter_month_windows(start_d, end_d)
+        for index, (win_start, win_end) in enumerate(windows):
+            if index and self.throttle_s:
+                time.sleep(self.throttle_s)
+            chunk = self._query_holdertrade_window(base_params, win_start, win_end)
+            if len(chunk) >= STK_HOLDERTRADE_MAX_ROWS and win_start < win_end:
+                label = f"{win_start.isoformat()}~{win_end.isoformat()}"
+                self.last_holdertrade_meta.setdefault("chunk_hits_limit", []).append(label)
+                out.extend(self._fetch_holdertrade_by_day(base_params, win_start, win_end))
+            else:
+                if len(chunk) >= STK_HOLDERTRADE_MAX_ROWS:
+                    self.last_holdertrade_meta.setdefault("day_hits_limit", []).append(win_start.isoformat())
+                out.extend(chunk)
+        return out
+
+    def _fetch_holdertrade_by_day(
+        self,
+        base_params: dict[str, Any],
+        start_d: date,
+        end_d: date,
+    ) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for index, (day_start, day_end) in enumerate(iter_day_windows(start_d, end_d)):
+            if index and self.throttle_s:
+                time.sleep(self.throttle_s)
+            chunk = self._query_holdertrade_window(base_params, day_start, day_end)
+            if len(chunk) >= STK_HOLDERTRADE_MAX_ROWS:
+                self.last_holdertrade_meta.setdefault("day_hits_limit", []).append(day_start.isoformat())
+                self.last_errors.append(
+                    {
+                        "symbol": str(base_params.get("ts_code") or "*"),
+                        "error": (
+                            f"stk_holdertrade still capped at {STK_HOLDERTRADE_MAX_ROWS} "
+                            f"on {day_start.isoformat()}"
+                        ),
+                    }
+                )
+            out.extend(chunk)
+        return out
+
+    def _query_holdertrade_window(
+        self,
+        base_params: dict[str, Any],
+        start_d: date,
+        end_d: date,
+    ) -> list[dict[str, Any]]:
+        params = dict(base_params)
+        params["start_date"] = _compact_date(start_d)
+        params["end_date"] = _compact_date(end_d)
+        self.last_holdertrade_meta["requests"] = int(self.last_holdertrade_meta.get("requests") or 0) + 1
+        self.last_holdertrade_meta["chunks"] = int(self.last_holdertrade_meta.get("chunks") or 0) + 1
+        try:
+            return self._query("stk_holdertrade", params, HOLDERTRADE_FIELDS)
+        except Exception as exc:  # noqa: BLE001
+            self.last_errors.append(
+                {
+                    "symbol": str(base_params.get("ts_code") or "*"),
+                    "error": f"{params['start_date']}~{params['end_date']}: {str(exc)[:240]}",
+                }
+            )
+            return []
 
     def _query_bars(self, apis: list[str], symbol: str, start: str, end: str) -> list[dict[str, Any]]:
         last_error = None
@@ -236,6 +419,27 @@ class TushareAdapter:
         token = resolve_tushare_token()
         self._token = token
         return token
+
+
+def _dedupe_holdertrade_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop exact duplicates across month/day chunk overlaps."""
+    seen: set[tuple[Any, ...]] = set()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        key = (
+            str(row.get("ts_code") or ""),
+            str(row.get("ann_date") or ""),
+            str(row.get("holder_name") or ""),
+            str(row.get("in_de") or ""),
+            str(row.get("change_vol") or ""),
+            str(row.get("begin_date") or ""),
+            str(row.get("close_date") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
 
 
 def resolve_tushare_token() -> str:

@@ -1,7 +1,7 @@
 # ASQT 实施与验收进度
 
 状态：**现行跟踪件**（代码完成度以本文件为准）  
-修订：2026-09-11  
+修订：2026-09-13  
 阶段定义： [p0/priority.md](p0/priority.md)  
 冻结口径： [p0/README.md](p0/README.md)  
 未决问题： [p0/open_questions.md](p0/open_questions.md)  
@@ -59,7 +59,7 @@
 
 | ID | 项 | 状态 | 验收 | 未完成理由 |
 |---|---|---|---|---|
-| D1 | POC 宇宙 CSV → `instrument_master` | 完成 | `universe-load`；56 股 + 6 ETF | Q6：固定名单，不是历史成分时点池 |
+| D1 | POC 宇宙 CSV → `instrument_master` | 完成 | `universe-load`；**100 股 + 10 ETF** | Q6：固定名单，不是历史成分时点池；扩池脚本 `scripts/build_universe.py` |
 | D2 | BaoStock 主源日 K 适配器 | 完成 | `pull-daily --source baostock` | — |
 | D3 | AkShare 备源适配器 | 完成 | `asqt/adapters/akshare_source.py` | 对账用，不作交易主源 |
 | D3b | Tushare 第三源 | 完成 | `asqt/adapters/tushare_source.py`；`--peer tushare`；5000 分档节流 0.2s | 不作默认主源 |
@@ -72,7 +72,7 @@
 | D10 | 控制台行情不全量加载 | 完成 | `/api/market/daily` 默认 limit | — |
 | D11 | 质量问题分页列表 | 完成 | `/api/quality/issues`；代码/市场拆列；检查类型中文；序号 | 见 [console_fixes.md](console_fixes.md) C3/C5/C6/C8 |
 
-已知数据口径：POC 约 55,304 根日 K（2023-01-03–2026-09-07）；2026-09-07 四只 ETF 的 BaoStock 占位 `adj_factor=1.0` 已按前日因子补回；`trade_allowed` 现为 true。
+已知数据口径：POC 约 **227k** 根日 K（**2018-01-02–2026-09-11**），**110** 标的（100 股 + 10 ETF）；股票主源 BaoStock，ETF 长历史用 Tushare 回补（BaoStock ETF 历史常空）；质检对上市前空洞按 `list_date` 豁免，日历单日缺口与 ETF `adj_factor=1.0` 占位跳变为 **warn**；`trade_allowed` 现为 true。
 
 ### D7 在做什么（避免再读成「没做完」）
 
@@ -100,6 +100,8 @@
 | R2 | `stock_momentum_topk`（TopK=5，20 日动量） | 完成 | 同上 | — |
 | R2b | `etf_momentum_topk`（TopK=3，40 日动量） | 完成 | 第三套规则策略；新 `parameter_set_id` | 已 paper 参数组不可改 |
 | R10 | 量价因子库 + 低波动量 / 均线动量过滤 | 完成 | `asqt/factors.py`；`stock_lowvol_momentum`、`etf_ma_momentum_filter` | 仅日 K；无财务因子 |
+| R12 | `stock_short_reversal_topk`（短反转 TopK） | 完成 | `factors.reversal`；现行 `stock_short_reversal_topk.k2.l10`（paper 暂停：费用拖累） | 与动量族互补；改参须新 id；可选 `rebalance_every_n` |
+| R13 | `stock_holder_increase_follow`（股东增持跟随） | 完成 | 近 N 日净增持 + 可选动量过滤；`default_lifecycle=draft`；`tests/test_events.py` | 试点策略，不自动准入 paper；事件依赖 `market_event` |
 | R11 | IS 网格调参 CLI | 完成 | `asqt tune`；报告 `data/experiment/tune_*.json` | 不自动改 paper；walk-forward 暂缓 |
 | R3 | 同策略 + 同 `data_version` 可复现 | 完成 | P2 测试 | — |
 | R4 | IS/OOS 时间切开，无未来函数 | 完成 | `asof` 只看 `trade_date <= asof` | — |
@@ -149,6 +151,24 @@
 | U5 | 数据同步页 | 完成 | 追加行情按钮、toast、`#sync` 记录 | 状态列显示进行中百分比；热加载会中断后台任务并收尸 |
 | U3 | 策略 / 交易 / 复盘页 | 完成 | 策略生命周期；交易页账户/订单/急停；复盘含模拟偏差 | — |
 | U4 | 端口边界显示真实接线 | 完成 | `/api/ports` 按 WIRED_PORTS 显示；Execution/Alert 已接线 | — |
+| U6 | 因子 / 选股预览 | 完成 | `#research`：`POST /api/factors/compute`、`GET /api/factors`、`POST /api/selectors/preview` | 预览不写 paper |
+| U7 | 事件列表 / 导入 / 拉取 | 完成 | `#data` 事件区；fixture 导入；Tushare `stk_holdertrade`；无 token 明确提示 | 非全量事件主数据 |
+| U8 | 标签池与模拟 override | 完成 | `#tags` / 模拟账户 per-strategy 覆盖；写 `operation_audit` | — |
+
+---
+
+## Record / Factor / Event / Tag 层
+
+在 P1–P3 之上补齐的横切能力（灵感来自 zvt 分层，**不引入 zvt 依赖**）。验收入口：`tests/test_records.py`、`tests/test_factors_tune.py`、`tests/test_events.py`、`tests/test_tags_overrides.py`。
+
+| ID | 项 | 状态 | 验收 | 未完成理由 |
+|---|---|---|---|---|
+| L1 | Record schema + upsert/query/pull | 完成 | `asqt/records.py`；`market_daily` / `market_event`；`GET|POST /api/records/{schema}` | 首期仅此两 schema |
+| L2 | Provider 声明 | 完成 | `asqt/provider_registry.py`；Tushare 声明 `market_event` | — |
+| L3 | Factor 三段式 + Selector | 完成 | `factor_pipeline`（data→factor→result）+ `selectors.select_targets`；策略/回测接入；`params_hash` 防互盖 | 无财务因子；X3 仍暂缓 |
+| L4 | `symbol_tag` + 宇宙 pool 同步 | 完成 | `apply_universe` → `symbol_tag(source=universe_csv)`；`GET/POST /api/tags`、`GET /api/pools/{tag}` | — |
+| L5 | `paper_override` → 目标仓 | 完成 | `apply_overrides` 在 `generate_target_positions` 写库前；`reason=override:*`；draft 仍不可 emit | — |
+| L6 | `market_event`（fixture + Tushare） | 完成 | asof 无未来函数；`POST /api/events/import|pull`；试点见 R13 | 仅股东增减持；财务/两融事件不做 |
 
 ---
 
@@ -156,9 +176,8 @@
 
 1. **P4 实接**：等 Q2（MiniQMT 权限）再按 [p4/README.md](p4/README.md)「Q2 具备后才开的验收」接线；禁止把预留适配器标成完成。Qlib bin（R9）同理：目录预留，业务层零 `import qlib`。  
 2. **日终闭环**：交易日同步成功后会自动 `paper-daily`；空账本不会自动回放长窗口，需先手工「跑模拟」。进程外兜底见 `scripts/crontab.example`（跨源 19:15、财务对账 19:45、同步兜底 20:05）。  
-3. **财务对账**：`asqt cash-reconcile` / 进程内 `ASQT_CASH_RECONCILE_AUTO`；无账本记「跳过」；有账本才验现金/持仓。  
+3. **财务对账**：`asqt cash-reconcile` / 进程内 `ASQT_CASH_RECONCILE_AUTO`；无账本记「跳过」；有账本验现金/持仓回推，并校验组合本金份额与净资产合计（防满额加总）。  
 4. **跨源对账**：因子恒定基准差已对齐后再比；真残差仍 warn。方案 2（入库统一权威因子）暂不做。  
-5. **研究扩展**：新策略先 `research-backtest` → 生命周期 paper → 跑模拟；改参用 `asqt tune` 出报告后**手写**新 `parameter_set_id`，勿改已 paper 组。walk-forward / 基本面因子暂缓。  
-6. **Q1**：付费数据源仍暂缓。
-
-修订：2026-09-11
+5. **研究扩展**：新策略先 `research-backtest` → 生命周期 paper → 跑模拟；改参用 `asqt tune` 出报告后**手写**新 `parameter_set_id`，勿改已 paper 组。已增 `stock_momentum_volume_confirm`、`stock_momentum_skip_month`（`CODE_VERSION=p2.4`）；股东增持试点 `stock_holder_increase_follow` 保持 draft。walk-forward / 基本面因子暂缓。  
+6. **Record/Event**：新事件类型先扩 `RECORD_SCHEMAS` + normalizer + fixture；财务/两融全量仍属 X3。  
+7. **Q1**：付费数据源仍暂缓。

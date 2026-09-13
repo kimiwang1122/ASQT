@@ -11,15 +11,19 @@ from uuid import uuid4
 
 from asqt.config import Settings, ensure_runtime_dirs, get_settings
 from asqt.db import execute, executemany, initialize_database, query_all
+from asqt.factor_pipeline import compute_factor_frame, write_factor_signals
 from asqt.pipeline import check_market_daily
+from asqt.selectors import select_targets
 from asqt.storage import read_market_daily
 from asqt.strategies import (
     CODE_VERSION,
+    STOCK_HOLDER_INCREASE_FOLLOW,
     STRATEGY_SPECS,
     adj_close,
     asof_rows,
-    factor_rows,
+    factor_specs_for,
     market_by_symbol,
+    selector_rules_for,
     suspended_keys,
     weights_for,
 )
@@ -98,13 +102,53 @@ class LocalStrategyService:
             (trade_date,),
             settings=self.settings,
         )
-        weights = weights_for(strategy_id, rows, trade_date, limits=limits)
+        params = dict(STRATEGY_SPECS[strategy_id]["params"])
+        rebalance_every_n = max(1, int(params.get("rebalance_every_n") or 1))
+        dates = sorted({str(row["trade_date"]) for row in rows})
+        signal_index = dates.index(trade_date) if trade_date in dates else -1
+        hold_prior = (
+            rebalance_every_n > 1
+            and signal_index > 0
+            and signal_index % rebalance_every_n != 0
+        )
+        if hold_prior:
+            prior = query_all(
+                """
+                SELECT symbol, target_weight FROM target_position
+                WHERE strategy_id = ? AND trade_date = (
+                    SELECT MAX(trade_date) FROM target_position
+                    WHERE strategy_id = ? AND trade_date < ?
+                )
+                """,
+                (strategy_id, strategy_id, trade_date),
+                settings=self.settings,
+            )
+            weights = {str(row["symbol"]): float(row["target_weight"]) for row in prior}
+        else:
+            weights = weights_for(
+                strategy_id,
+                rows,
+                trade_date,
+                limits=limits,
+                params=params,
+                settings=self.settings,
+            )
+        pool_tags = params.get("pool_tags")
+        if pool_tags:
+            from asqt.tags import resolve_pool
+
+            allowed = resolve_pool(pool_tags, settings=self.settings)
+            weights = {symbol: weight for symbol, weight in weights.items() if symbol in allowed}
+        from asqt.overrides import apply_overrides
+
+        weights, override_reasons = apply_overrides(weights, strategy_id, settings=self.settings)
         data_version = data_version_for(asof_rows(rows, trade_date))
         execute(
             "DELETE FROM target_position WHERE strategy_id = ? AND trade_date = ?",
             (strategy_id, trade_date),
             settings=self.settings,
         )
+        default_reason = STRATEGY_SPECS[strategy_id]["kind"]
         records = [
             {
                 "target_id": str(uuid4()),
@@ -115,7 +159,7 @@ class LocalStrategyService:
                 "target_weight": weight,
                 "target_amount": None,
                 "target_volume": None,
-                "reason": STRATEGY_SPECS[strategy_id]["kind"],
+                "reason": override_reasons.get(symbol, default_reason),
                 "data_version": data_version,
             }
             for symbol, weight in weights.items()
@@ -299,32 +343,43 @@ class LocalResearchEngine:
         is_points: list[dict[str, Any]] = []
         oos_points: list[dict[str, Any]] = []
         last_weights: dict[str, float] = {}
-        factor_payload: list[dict[str, Any]] = []
 
         by_date_symbol = {(str(row["trade_date"]), str(row["symbol"])): row for row in rows}
         params = dict(spec["params"])
-        for index, signal_date in enumerate(dates[:-1]):
+        rebalance_every_n = max(1, int(params.get("rebalance_every_n") or 1))
+        # Precompute factors once; daily loop only select_targets (plan §2).
+        signal_dates = dates[:-1]
+        event_rows = None
+        if strategy_id == STOCK_HOLDER_INCREASE_FOLLOW:
+            from asqt.events import query_events
+
+            event_rows = query_events(settings=self.settings, newest_first=False)
+        factor_payload = compute_factor_frame(
+            grouped,
+            factor_specs_for(strategy_id, params, events=event_rows, settings=self.settings),
+            dates=signal_dates,
+            source_run_id=run_id,
+            model_version=CODE_VERSION,
+        )
+        factors_by_date: dict[str, list[dict[str, Any]]] = {}
+        for row in factor_payload:
+            factors_by_date.setdefault(str(row["trade_date"]), []).append(row)
+        rules = selector_rules_for(strategy_id, params)
+        for index, signal_date in enumerate(signal_dates):
             fill_date = dates[index + 1]
-            weights = weights_for(
-                strategy_id,
-                rows,
-                signal_date,
-                limits=limits,
-                params=params,
-                market_by_symbol=grouped,
-                suspended=halted,
-            )
-            last_weights = weights
-            factor_payload.extend(
-                factor_rows(
-                    strategy_id,
-                    rows,
+            if index % rebalance_every_n == 0 or not last_weights:
+                weights = select_targets(
+                    factors_by_date.get(signal_date, []),
                     signal_date,
-                    source_run_id=run_id,
-                    params=params,
-                    market_by_symbol=grouped,
+                    rules,
+                    limits=limits,
+                    suspended=halted,
                 )
-            )
+            else:
+                weights = dict(last_weights)
+            # Hook point for tags/overrides on paper targets lives in
+            # generate_target_positions (apply_overrides); backtest stays pure.
+            last_weights = weights
             period_return = 0.0
             for symbol, weight in weights.items():
                 left = by_date_symbol.get((signal_date, symbol))
@@ -486,31 +541,7 @@ class LocalResearchEngine:
         return report
 
     def _write_factors(self, rows: list[dict[str, Any]]) -> None:
-        if not rows:
-            return
-        unique: dict[tuple[str, str, str], dict[str, Any]] = {}
-        for row in rows:
-            unique[(row["trade_date"], row["symbol"], row["factor_name"])] = row
-        payload = list(unique.values())
-        executemany(
-            """
-            INSERT OR REPLACE INTO factor_signal
-                (trade_date, symbol, factor_name, value, model_version, source_run_id)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    row["trade_date"],
-                    row["symbol"],
-                    row["factor_name"],
-                    row["value"],
-                    row["model_version"],
-                    row["source_run_id"],
-                )
-                for row in payload
-            ],
-            settings=self.settings,
-        )
+        write_factor_signals(rows, settings=self.settings)
 
     def _write_report(self, report: dict[str, Any]) -> Path:
         import json

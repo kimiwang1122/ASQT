@@ -1,7 +1,7 @@
 # ASQT 词汇表
 
 状态：**现行参考件**（解释本仓库口径，不是交易所国家标准）  
-修订：2026-09-11  
+修订：2026-09-13  
 进度：[progress.md](progress.md)  
 冻结：[p0/README.md](p0/README.md)
 
@@ -45,6 +45,9 @@
 | 公司行为 | 送转分红配股 | 完整事件主数据未做；少量 CSV 只抑制 `adj_conflict` 误报。 |
 | 北向 | 沪深股通 | 陆股通资金/持股；X3，未入库。 |
 | 两融 | 融资融券 | 汇总/明细/标的；X3，未入库。 |
+| Record | `records` / schema | 注册表驱动的标准数据：`RECORD_SCHEMAS` → parquet `data/standard_data/{schema}.parquet`；`upsert_records` 按 PK 幂等合并，`query_records` 过滤查询。首期 `market_daily`、`market_event`。 |
+| `market_event` | 市场事件 | 统一事件行：`event_id/type/symbol/event_date/asof_date/…`。可 fixture 导入或 Tushare `stk_holdertrade` 拉取；查询/策略只看 `event_date <= asof`。 |
+| `holder_increase` / `holder_decrease` | 股东增减持 | 已落地的事件类型；净增持窗口见 `events.holder_net_in_window`。 |
 
 ## 行情粒度与成交摩擦
 
@@ -64,10 +67,16 @@
 |---|---|---|
 | 动量 | `stock_momentum_topk` | 近约 20 日涨得多的股票里选 TopK（默认 5）。 |
 | ETF 均线轮动 | `etf_ma_rotate` | ETF 相对 20 日均线轮动，规则策略。 |
-| ETF 动量 TopK | `etf_momentum_topk` | ETF 池内近 40 日动量取 Top3；第三套规则策略，独立 `parameter_set_id`。 |
-| 目标仓 | target position | 策略输出权重/数量，不直接报券商单。 |
+| ETF 动量 TopK | `etf_momentum_topk` | ETF 池内近窗动量取 TopK；独立 `parameter_set_id`。 |
+| 股票短反转 TopK | `stock_short_reversal_topk` | 股票池内近窗收益取负（`factors.reversal`）取 TopK；现行 `k2.l10`（短窗高换手 `k5.l5` 已弃用）；可选 `rebalance_every_n` 降频。 |
+| 股东增持跟随 | `stock_holder_increase_follow` | 近 N 日股东净增持命中 + 可选动量过滤，经 Selector 出权；默认 `draft`，不自动准入 paper。参数组 `k5.e20.l20`。 |
+| Factor pipeline | 因子三段式 | `build_data_frame` → `compute_factor_frame` → `select_targets`（result）。可全窗预计算后再按日取靶；`factor_signal` 带 `params_hash` 避免同名不同窗互盖。 |
+| Selector | TargetSelector / `selectors` | 按 top_k / filter / clip 规则从因子行选出当日权重；对齐 `STRATEGY_SPECS`；`POST /api/selectors/preview` 不写 paper。 |
+| 目标仓 | target position | 策略输出权重/数量，不直接报券商单。写库前可经 `paper_override` 改写。 |
 | 生命周期 | draft→…→paper | 仅 `paper` 可生成可下单目标仓。`candidate` 还不能下单。 |
-| 前视 / 未来函数 | look-ahead | 用后来才知道的信息回测昨天。时点池、公告日就是为了防这个。 |
+| 前视 / 未来函数 | look-ahead | 用后来才知道的信息回测昨天。时点池、公告日、`event_date <= asof` 就是为了防这个。 |
+| `symbol_tag` | 标签 / 池 | `(tag, symbol)` 可查询标签；宇宙 CSV 的 `pool` 同步为 `source=universe_csv`。策略 params 可选 `pool_tags`。 |
+| `paper_override` | 人工覆盖 | 按 `(strategy_id, symbol)`：`force_in` / `force_out` / `cap` 改写目标仓；`reason` 标 `override:*`；写 `operation_audit`。 |
 | IS / OOS | 样本内 / 外 | 按时间切开（约前 70% / 后 30%）；信号日只看 `trade_date <= asof`。样本内用来定规则，样本外检验是否还能赚。 |
 | 复盘 | `#review` / 归因 | 把回测收益拆到标的，并对照 Paper 净值。接口 `GET /api/research/attribution`。加强展示：样本天数、贡献占比、OOS Top/拖累、参数组、样本区间、Paper vs 回测表。 |
 | 净值 / 复利收益 | `nav` / `total_return` | 每日组合收益连乘；复利收益 = 净值 − 1。不含滑点费用。 |

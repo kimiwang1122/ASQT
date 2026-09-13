@@ -12,12 +12,17 @@ from uuid import uuid4
 from asqt.config import Settings, get_settings
 from asqt.db import execute, initialize_database, query_all
 from asqt.paper import PaperBusy, PAPER_BUSY_MESSAGE, run_paper_days
-from asqt.strategies import STRATEGY_SPECS
 
 STRATEGY_LABEL = {
     "etf_ma_rotate": "ETF 均线轮动",
     "stock_momentum_topk": "股票动量 TopK",
     "etf_momentum_topk": "ETF 动量 TopK",
+    "stock_lowvol_momentum": "股票低波动量",
+    "etf_ma_momentum_filter": "ETF 均线动量过滤",
+    "stock_short_reversal_topk": "股票短反转 TopK",
+    "stock_momentum_volume_confirm": "股票动量量能确认",
+    "stock_momentum_skip_month": "股票跳月动量",
+    "stock_holder_increase_follow": "股票股东增持跟随",
 }
 
 
@@ -75,16 +80,19 @@ def start_paper_job(
     strategy_id: str = "all",
     days: int = 20,
     *,
+    strategy_ids: list[str] | None = None,
+    mode: str = "sequential",
     settings: Settings | None = None,
     background: bool = True,
 ) -> dict[str, Any]:
     settings = settings or get_settings()
     initialize_database(settings)
-    if strategy_id != "all" and strategy_id not in STRATEGY_SPECS:
-        raise ValueError(f"unknown strategy: {strategy_id}")
+    from asqt.paper import normalize_paper_mode, normalize_paper_targets, paper_run_locked
+
+    job_key, _ids = normalize_paper_targets(strategy_id, strategy_ids)
+    run_mode = normalize_paper_mode(mode)
     if active_paper_run(settings=settings):
         raise PaperBusy(PAPER_BUSY_MESSAGE)
-    from asqt.paper import paper_run_locked
 
     if paper_run_locked(settings=settings):
         raise PaperBusy(PAPER_BUSY_MESSAGE)
@@ -100,8 +108,9 @@ def start_paper_job(
             now,
             json.dumps(
                 {
-                    "strategy_id": strategy_id,
+                    "strategy_id": job_key,
                     "days": days,
+                    "mode": run_mode,
                     "progress_pct": 0,
                     "progress_done": 0,
                     "progress_total": 0,
@@ -115,21 +124,27 @@ def start_paper_job(
     if background:
         threading.Thread(
             target=_execute,
-            args=(run_id, strategy_id, days, settings),
+            args=(run_id, job_key, days, settings, run_mode),
             daemon=True,
             name=f"asqt-paper-{run_id[:8]}",
         ).start()
     else:
-        _execute(run_id, strategy_id, days, settings)
+        _execute(run_id, job_key, days, settings, run_mode)
     return get_paper_run(run_id, settings=settings) or {"run_id": run_id, "status": "queued"}
 
 
-def _execute(run_id: str, strategy_id: str, days: int, settings: Settings) -> None:
+def _execute(
+    run_id: str,
+    strategy_id: str,
+    days: int,
+    settings: Settings,
+    mode: str = "sequential",
+) -> None:
     _patch(
         run_id,
         settings,
         status="running",
-        progress_label="开始模拟",
+        progress_label="开始模拟" if mode != "parallel" else "并行模拟",
         progress_pct=0,
     )
     try:
@@ -153,6 +168,7 @@ def _execute(run_id: str, strategy_id: str, days: int, settings: Settings) -> No
             settings=settings,
             progress=progress,
             record_task=False,
+            mode=mode,
         )
         if summary.get("ok"):
             finish_status = "success"
@@ -181,9 +197,19 @@ def _execute(run_id: str, strategy_id: str, days: int, settings: Settings) -> No
         _finish(run_id, status="failed", fail_reason=str(exc)[:500], settings=settings)
 
 
+def _message_dict(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return dict(raw)
+    try:
+        value = json.loads(raw or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def _patch(run_id: str, settings: Settings, **fields: Any) -> None:
     row = get_paper_run(run_id, settings=settings) or {}
-    message = dict(row.get("message") or {})
+    message = _message_dict(row.get("message"))
     for key in (
         "progress_pct",
         "progress_done",
@@ -191,6 +217,7 @@ def _patch(run_id: str, settings: Settings, **fields: Any) -> None:
         "progress_label",
         "strategy_id",
         "days",
+        "mode",
     ):
         if key in fields and fields[key] is not None:
             message[key] = fields[key]
@@ -217,16 +244,16 @@ def _finish(
     progress_label: str | None = None,
 ) -> None:
     row = get_paper_run(run_id, settings=settings) or {}
-    message: dict[str, Any]
-    try:
-        message = json.loads(row.get("message") or "{}")
-    except (TypeError, json.JSONDecodeError):
-        message = {}
+    message = _message_dict(row.get("message"))
     if detail:
         message["result"] = {
             "ok": detail.get("ok"),
             "days": detail.get("days"),
+            "mode": detail.get("mode"),
             "window": detail.get("window"),
+            "portfolio_cash": detail.get("portfolio_cash"),
+            "book_cash": detail.get("book_cash"),
+            "funding_universe": detail.get("funding_universe"),
             "incomplete_reasons": detail.get("incomplete_reasons"),
             "detail": detail.get("detail"),
             "reports": [
@@ -270,6 +297,7 @@ def _public_row(row: dict[str, Any]) -> dict[str, Any]:
         "status": row["status"],
         "strategy_id": message.get("strategy_id"),
         "days": message.get("days"),
+        "mode": message.get("mode") or "sequential",
         "progress_pct": message.get("progress_pct"),
         "progress_done": message.get("progress_done"),
         "progress_total": message.get("progress_total"),

@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ASQT 控制台</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=p3-ui48" />
+    <link rel="stylesheet" href="/assets/styles.css?v=p3-ui88" />
   </head>
   <body>
     <div class="shell">
@@ -43,22 +43,19 @@
             <span class="nav-label">设置</span>
           </a>
         </nav>
-        <div class="sidebar-note">P3 模拟盘已接 · 未接券商</div>
+        <div class="sidebar-footer">
+          <div class="sidebar-note">P3 模拟盘已接 · 未接券商</div>
+          <div class="theme-toggle" role="group" aria-label="主题切换">
+            <button id="theme-dark" type="button" aria-label="黑夜模式" title="黑夜模式">☾</button>
+            <button id="theme-light" type="button" aria-label="白天模式" title="白天模式">☀</button>
+          </div>
+        </div>
       </aside>
       <main>
         <header>
           <div>
             <h1 id="page-title">系统总览</h1>
             <p id="runtime">加载中</p>
-          </div>
-          <div class="header-actions">
-            <div class="theme-toggle" role="group" aria-label="主题切换">
-              <button id="theme-dark" type="button" aria-label="黑夜模式" title="黑夜模式">☾</button>
-              <button id="theme-light" type="button" aria-label="白天模式" title="白天模式">☀</button>
-            </div>
-            <button id="sync-now" type="button" aria-busy="false" aria-readonly="false">追加行情</button>
-            <button id="bootstrap" type="button">初始化演示数据</button>
-            <p id="action-error" class="field-error" hidden></p>
           </div>
         </header>
 
@@ -141,7 +138,7 @@
                     <th>主题</th>
                     <th>条数</th>
                     <th>建议</th>
-                    <th></th>
+                    <th>操作</th>
                   </tr>
                 </thead>
                 <tbody id="alert-intel-body"></tbody>
@@ -323,6 +320,71 @@
               </table>
             </div>
           </section>
+          <section class="panel">
+            <div class="panel-title">
+              <h2>市场事件</h2>
+              <span id="events-page-meta">fixture / Tushare</span>
+            </div>
+            <p class="hint">列表走 `/api/events`（SQLite `market_event` + parquet）。可导入 fixture，或异步拉取 Tushare 增减持；未填日期默认近 2 年。拉取中不可重复点击。</p>
+            <form class="filters filters-inline" id="events-filters">
+              <label class="filter-inline">
+                类型
+                <select id="events-type" data-asqt-select>
+                  <option value="">全部</option>
+                </select>
+              </label>
+              <label class="filter-inline">
+                代码
+                <input id="events-symbol" type="search" placeholder="模糊，如 600" autocomplete="off" />
+              </label>
+              <label class="filter-inline">
+                起始
+                <input id="events-start" type="date" />
+              </label>
+              <label class="filter-inline">
+                截止
+                <input id="events-end" type="date" />
+              </label>
+              <label class="filter-action">
+                <button type="submit">筛选</button>
+              </label>
+              <label class="filter-action">
+                <button type="button" class="secondary" id="events-reset">重置</button>
+              </label>
+              <label class="filter-action">
+                <button type="button" class="secondary" id="events-import">导入 fixture</button>
+              </label>
+              <label class="filter-action">
+                <button type="button" class="secondary" id="events-pull">拉取增减持</button>
+              </label>
+            </form>
+            <p id="events-action-hint" class="hint" hidden></p>
+            <div class="pager" id="events-pager">
+              <button type="button" class="secondary" id="events-prev">上一页</button>
+              <span id="events-page-label">-</span>
+              <button type="button" class="secondary" id="events-next">下一页</button>
+            </div>
+            <div class="table-wrap">
+              <table id="events-table" class="events-table">
+                <thead>
+                  <tr>
+                    <th>事件日</th>
+                    <th>可见日</th>
+                    <th>类型</th>
+                    <th>代码</th>
+                    <th class="col-actor">主体</th>
+                    <th class="num">数值</th>
+                    <th>来源</th>
+                  </tr>
+                </thead>
+                <tbody id="events-body">
+                  <tr>
+                    <td colspan="7" class="empty-hint">暂无事件。可导入 fixture，或配置 Tushare token 后拉取。</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
         </section>
 
         <section class="page hidden" id="page-sync">
@@ -333,6 +395,10 @@
             </div>
             <p class="hint" id="sync-scheduler-hint">人工点「追加行情」立即异步执行；每个交易日 16:30 起等主源当日 K 再质检，18:00 起按原逻辑重试直到成功；跨源对账 19:15；财务对账 19:45；进程外 cron 兜底 20:05。</p>
             <p class="hint" id="sync-ops-hint" hidden></p>
+            <div class="sync-toolbar">
+              <button id="sync-now" type="button" aria-busy="false" aria-readonly="false">追加行情</button>
+              <p id="action-error" class="field-error" hidden></p>
+            </div>
             <form class="filters filters-inline" id="sync-filters">
               <label class="filter-inline">
                 状态
@@ -390,58 +456,42 @@
               <h2>策略版本</h2>
               <span>生命周期 · 仅 paper 可下单</span>
             </div>
-            <p class="hint">草稿 / 回测 / 候选不能写可下单目标仓。准入模拟后才生成目标仓并由 PaperBroker 撮合。改参必须新版本，禁止改已 paper 的参数组。另有 `stock_lowvol_momentum`（动量/波动）、`etf_ma_momentum_filter`（均线过滤+动量）；调参用 CLI `asqt tune`，禁止改已 paper 参数组。样本沿用完整日 K（约 2023 起）。</p>
+            <p class="hint">草稿 / 回测 / 候选不能写可下单目标仓。准入模拟后才生成目标仓并由 PaperBroker 撮合。改参必须新版本，禁止改已 paper 的参数组。另有 `stock_lowvol_momentum`（动量/波动）、`etf_ma_momentum_filter`（均线过滤+动量）、`stock_short_reversal_topk`（短反转 TopK）、`stock_momentum_volume_confirm`（动量量能确认）、`stock_momentum_skip_month`（跳月动量）；调参用 CLI `asqt tune`，禁止改已 paper 参数组。样本沿用完整日 K（约 2018 起）。</p>
             <p class="hint" id="strategy-gate-hint" hidden></p>
-            <form class="filters filters-inline" id="strategy-run-form">
-              <label class="filter-inline">
-                策略
-                <select id="strategy-run-id" data-asqt-select="wide">
-                  <option value="all">全部</option>
-                  <option value="etf_ma_rotate">ETF 均线轮动</option>
-                  <option value="stock_momentum_topk">股票动量 TopK</option>
-                  <option value="etf_momentum_topk">ETF 动量 TopK</option>
-                  <option value="stock_lowvol_momentum">股票低波动量</option>
-                  <option value="etf_ma_momentum_filter">ETF 均线动量过滤</option>
-                </select>
-              </label>
-              <label class="filter-action">
-                <button type="submit" id="strategy-run">重跑回测</button>
-              </label>
-            </form>
-            <p id="strategy-run-result" class="hint" hidden></p>
-            <form class="filters filters-inline" id="strategy-life-form">
-              <label class="filter-inline">
-                生命周期
-                <select id="strategy-life-id" data-asqt-select="wide">
-                  <option value="etf_ma_rotate">ETF 均线轮动</option>
-                  <option value="stock_momentum_topk">股票动量 TopK</option>
-                  <option value="etf_momentum_topk">ETF 动量 TopK</option>
-                  <option value="stock_lowvol_momentum">股票低波动量</option>
-                  <option value="etf_ma_momentum_filter">ETF 均线动量过滤</option>
-                </select>
-              </label>
-              <label class="filter-inline">
-                动作
-                <select id="strategy-life-action" data-asqt-select>
-                  <option value="paper">准入模拟</option>
-                  <option value="pause">暂停</option>
-                  <option value="resume">恢复</option>
-                  <option value="retire">退役</option>
-                </select>
-              </label>
-              <label class="filter-inline">
-                原因
-                <input id="strategy-life-reason" type="text" placeholder="必填" required />
-              </label>
-              <label class="filter-action">
-                <button type="submit" id="strategy-life-submit">提交</button>
-              </label>
-            </form>
-            <p id="strategy-life-result" class="hint" hidden></p>
+            <div class="strategy-batch" id="strategy-batch-bar">
+              <div class="strategy-batch-meta">
+                <span id="strategy-batch-count">已选 0</span>
+                <span class="hint strategy-batch-tip">点行勾选；Shift+点选连续圈选；全选仅当前页。勾选后可准入 / 移出 / 恢复 / 重跑回测。</span>
+              </div>
+              <div class="strategy-batch-actions filters filters-inline">
+                <label class="filter-inline">
+                  原因
+                  <input id="strategy-batch-reason" type="text" placeholder="准入/移出/恢复必填" autocomplete="off" />
+                </label>
+                <label class="filter-action">
+                  <button type="button" id="strategy-batch-admit">准入模拟池</button>
+                </label>
+                <label class="filter-action">
+                  <button type="button" class="secondary" id="strategy-batch-remove">移出准入池</button>
+                </label>
+                <label class="filter-action">
+                  <button type="button" class="secondary" id="strategy-batch-resume">恢复模拟</button>
+                </label>
+                <label class="filter-action">
+                  <button type="button" class="secondary" id="strategy-run">重跑回测</button>
+                </label>
+              </div>
+              <p id="strategy-batch-error" class="field-error" hidden></p>
+              <p id="strategy-life-result" class="hint" hidden></p>
+              <p id="strategy-run-result" class="hint" hidden></p>
+            </div>
             <div class="table-wrap">
-              <table>
+              <table class="strategy-table">
                 <thead>
                   <tr>
+                    <th class="strategy-check-col">
+                      <input type="checkbox" id="strategy-select-all" aria-label="全选本页策略" />
+                    </th>
                     <th>策略</th>
                     <th>版本</th>
                     <th>状态</th>
@@ -453,11 +503,15 @@
                 <tbody id="strategy-body"></tbody>
               </table>
             </div>
+            <div class="pager" id="strategy-pager">
+              <button type="button" class="secondary" id="strategy-prev">上一页</button>
+              <span id="strategy-page-label">-</span>
+              <button type="button" class="secondary" id="strategy-next">下一页</button>
+            </div>
           </section>
           <section class="panel">
             <div class="panel-title">
               <h2>最近实验</h2>
-              <span>data/experiment/latest-*.json</span>
             </div>
             <div class="table-wrap">
               <table>
@@ -470,9 +524,179 @@
                     <th>样本外回撤</th>
                     <th>样本内/外天数</th>
                     <th>数据版本</th>
+                    <th>操作时间</th>
                   </tr>
                 </thead>
                 <tbody id="experiment-body"></tbody>
+              </table>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-title">
+              <h2>因子计算</h2>
+              <span id="factor-compute-meta">预计算 → factor_signal</span>
+            </div>
+            <p class="hint">触发全窗因子计算（异步）。计算完成后可按日查看信号；选股预览不写模拟目标仓。</p>
+            <form class="filters filters-inline" id="factor-compute-form">
+              <label class="filter-inline">
+                策略
+                <select id="factor-compute-strategy" data-asqt-select="wide">
+                  <option value="all" selected>全部</option>
+                  <option value="etf_ma_rotate">ETF 均线轮动</option>
+                  <option value="stock_momentum_topk">股票动量 TopK</option>
+                  <option value="etf_momentum_topk">ETF 动量 TopK</option>
+                  <option value="stock_lowvol_momentum">股票低波动量</option>
+                  <option value="etf_ma_momentum_filter">ETF 均线动量过滤</option>
+                  <option value="stock_short_reversal_topk">股票短反转 TopK</option>
+                  <option value="stock_momentum_volume_confirm">股票动量量能确认</option>
+                  <option value="stock_momentum_skip_month">股票跳月动量</option>
+                  <option value="stock_holder_increase_follow">股票股东增持跟随</option>
+                </select>
+              </label>
+              <label class="filter-action">
+                <button type="submit" id="factor-compute-submit">计算因子</button>
+              </label>
+            </form>
+            <p id="factor-compute-result" class="hint" hidden></p>
+            <form class="filters filters-inline" id="factor-view-form">
+              <label class="filter-inline">
+                日期
+                <input id="factor-view-date" type="date" />
+              </label>
+              <label class="filter-inline">
+                因子名
+                <input id="factor-view-name" type="search" placeholder="模糊，如 momentum" autocomplete="off" />
+              </label>
+              <label class="filter-inline">
+                代码
+                <input id="factor-view-symbol" type="search" placeholder="模糊，如 600" autocomplete="off" />
+              </label>
+              <label class="filter-action">
+                <button type="submit">查看</button>
+              </label>
+            </form>
+            <div class="pager" id="factor-pager">
+              <button type="button" class="secondary" id="factor-prev">上一页</button>
+              <span id="factor-page-label">-</span>
+              <button type="button" class="secondary" id="factor-next">下一页</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>日期</th>
+                    <th>代码</th>
+                    <th>因子</th>
+                    <th class="num">值</th>
+                    <th title="参数指纹：窗口/阈值等参数的短哈希，避免同名因子不同参数互相覆盖">参数指纹</th>
+                  </tr>
+                </thead>
+                <tbody id="factor-body">
+                  <tr>
+                    <td colspan="5" class="empty-hint">暂无因子信号。可先触发计算，或换日期查看。</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="hint">参数指纹 = 因子计算参数（如 lookback、window）的短哈希；同名因子不同窗口会并存。</p>
+          </section>
+          <section class="panel">
+            <div class="panel-title">
+              <h2>选股预览</h2>
+              <span>selector · 不写 paper</span>
+            </div>
+            <p class="hint">按策略与截至日预览目标权重，不落库、不生成模拟订单。</p>
+            <form class="filters filters-inline" id="selector-preview-form">
+              <label class="filter-inline">
+                策略
+                <select id="selector-preview-strategy" data-asqt-select="wide">
+                  <option value="etf_ma_rotate">ETF 均线轮动</option>
+                  <option value="stock_momentum_topk" selected>股票动量 TopK</option>
+                  <option value="etf_momentum_topk">ETF 动量 TopK</option>
+                  <option value="stock_lowvol_momentum">股票低波动量</option>
+                  <option value="etf_ma_momentum_filter">ETF 均线动量过滤</option>
+                  <option value="stock_short_reversal_topk">股票短反转 TopK</option>
+                  <option value="stock_momentum_volume_confirm">股票动量量能确认</option>
+                  <option value="stock_momentum_skip_month">股票跳月动量</option>
+                  <option value="stock_holder_increase_follow">股票股东增持跟随</option>
+                </select>
+              </label>
+              <label class="filter-inline">
+                截至日
+                <input id="selector-preview-asof" type="date" required />
+              </label>
+              <label class="filter-action">
+                <button type="submit">预览权重</button>
+              </label>
+            </form>
+            <p id="selector-preview-meta" class="hint" hidden></p>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th class="num">#</th>
+                    <th>代码</th>
+                    <th class="num">权重</th>
+                  </tr>
+                </thead>
+                <tbody id="selector-preview-body">
+                  <tr>
+                    <td colspan="3" class="empty-hint">暂无选股预览。选择策略与截至日后点「预览权重」。</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-title">
+              <h2>标签 / 股票池</h2>
+              <span id="tags-page-meta">symbol_tag</span>
+            </div>
+            <p class="hint">宇宙 CSV 的 pool 会同步成标签。可手工追加；点标签名查看池内标的。</p>
+            <form class="filters filters-inline" id="tags-filters">
+              <label class="filter-inline">
+                标签
+                <input id="tags-filter-tag" type="search" placeholder="筛选 tag" autocomplete="off" />
+              </label>
+              <label class="filter-inline">
+                代码
+                <input id="tags-filter-symbol" type="search" placeholder="筛选 symbol" autocomplete="off" />
+              </label>
+              <label class="filter-action">
+                <button type="submit">筛选</button>
+              </label>
+            </form>
+            <form class="filters filters-inline" id="tags-upsert-form">
+              <label class="filter-inline">
+                新标签
+                <input id="tags-upsert-tag" type="text" placeholder="如 core" autocomplete="off" required />
+              </label>
+              <label class="filter-inline">
+                代码
+                <input id="tags-upsert-symbol" type="text" placeholder="600519.SH" autocomplete="off" required />
+              </label>
+              <label class="filter-inline">
+                备注
+                <input id="tags-upsert-note" type="text" placeholder="可选" autocomplete="off" />
+              </label>
+              <label class="filter-action">
+                <button type="submit">写入标签</button>
+              </label>
+            </form>
+            <p id="tags-action-hint" class="hint" hidden></p>
+            <div class="kv-grid" id="tags-summary"></div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>标签</th>
+                    <th>代码</th>
+                    <th>来源</th>
+                    <th>备注</th>
+                    <th>更新</th>
+                  </tr>
+                </thead>
+                <tbody id="tags-body"></tbody>
               </table>
             </div>
           </section>
@@ -488,24 +712,33 @@
             <form class="filters filters-inline" id="paper-run-form">
               <label class="filter-inline">
                 策略
-                <select id="paper-run-id" data-asqt-select="wide">
-                  <option value="all">全部</option>
-                  <option value="etf_ma_rotate">ETF 均线轮动</option>
-                  <option value="stock_momentum_topk">股票动量 TopK</option>
-                  <option value="etf_momentum_topk">ETF 动量 TopK</option>
-                  <option value="stock_lowvol_momentum">股票低波动量</option>
-                  <option value="etf_ma_momentum_filter">ETF 均线动量过滤</option>
+                <select id="paper-run-id" data-asqt-select="wide multi" data-max-tags="1" multiple>
+                  <option value="all" selected>全部</option>
+                  <option value="etf_ma_rotate" selected>ETF 均线轮动</option>
+                  <option value="stock_momentum_topk" selected>股票动量 TopK</option>
+                  <option value="etf_momentum_topk" selected>ETF 动量 TopK</option>
+                  <option value="stock_lowvol_momentum" selected>股票低波动量</option>
+                  <option value="etf_ma_momentum_filter" selected>ETF 均线动量过滤</option>
+                  <option value="stock_short_reversal_topk" selected>股票短反转 TopK</option>
+                  <option value="stock_momentum_volume_confirm" selected>股票动量量能确认</option>
+                  <option value="stock_momentum_skip_month" selected>股票跳月动量</option>
                 </select>
               </label>
               <label class="filter-inline">
                 天数
-                <input id="paper-run-days" type="number" min="2" max="240" value="20" />
+                <input id="paper-run-days" type="number" min="2" max="2000" value="20" title="最多可跑到当前行情可用交易日上限" />
               </label>
               <label class="filter-action">
-                <button type="submit" id="paper-run-submit">跑模拟</button>
+                <button type="submit" id="paper-run-submit" title="组合本金按本次勾选/参与跑模拟的策略数均分；只选 1 个则拿满组合本金；总览看净资产合计">跑模拟</button>
               </label>
               <label class="filter-action">
-                <button type="button" class="secondary" id="paper-reset" title="清空持仓、成交、快照和模拟订单，不改策略准入">重置模拟</button>
+                <button type="button" class="secondary" id="paper-run-parallel" title="均分组合本金给本次参与策略，按日对齐并发；总览净资产=各账合计；组合回撤达线才全局急停">并行模式</button>
+              </label>
+              <label class="filter-action">
+                <button type="button" class="secondary" id="paper-reset" title="清空持仓、成交、快照和模拟订单，并解除急停；不改策略准入">重置模拟</button>
+              </label>
+              <label class="filter-action">
+                <button type="button" class="secondary" id="paper-clear-halt" hidden title="清除当前账本的平仓中/已平仓状态，后续交易日可再买卖；需填写原因">解除单策略平仓</button>
               </label>
             </form>
             <form class="filters filters-inline" id="kill-switch-form">
@@ -529,7 +762,7 @@
             <div class="paper-books" id="paper-books" hidden></div>
             <div class="panel-title paper-compare-head" id="paper-compare-title" hidden>
               <h2>多账本对比</h2>
-              <span>同一窗口下各策略独立账本</span>
+              <span>同一窗口下各策略独立账本（多策略均分设定本金）</span>
             </div>
             <div class="table-wrap" id="paper-compare-wrap" hidden>
               <table>
@@ -539,6 +772,7 @@
                     <th>交易日</th>
                     <th>期末资产</th>
                     <th>收益</th>
+                    <th>峰值收益</th>
                     <th>最大回撤</th>
                     <th>对账</th>
                   </tr>
@@ -569,7 +803,10 @@
             </div>
             <div class="paper-chart-card">
               <div class="paper-chart-head">
-                <strong>净值与成交时间线</strong>
+                <div class="paper-chart-title">
+                  <strong>净值与成交时间线</strong>
+                  <span id="paper-chart-book" class="tag paper-chart-book" data-tone="accent">—</span>
+                </div>
                 <span id="paper-chart-meta">相对本金 1,000,000</span>
               </div>
               <div id="paper-equity-chart" class="paper-chart" role="img" aria-label="模拟净值时间线"></div>
@@ -683,6 +920,88 @@
           </section>
           <section class="panel">
             <div class="panel-title">
+              <h2>人工覆盖</h2>
+              <span id="override-page-meta">force_in / force_out / cap</span>
+            </div>
+            <p class="hint">按策略改写目标仓后再进模拟撮合；写入会记 operation_audit。force_out 剔除，force_in / cap 需填权重（0–1）。</p>
+            <form class="filters filters-inline" id="override-filters">
+              <label class="filter-inline">
+                策略
+                <select id="override-filter-strategy" data-asqt-select="wide">
+                  <option value="">全部</option>
+                  <option value="etf_ma_rotate">ETF 均线轮动</option>
+                  <option value="stock_momentum_topk">股票动量 TopK</option>
+                  <option value="etf_momentum_topk">ETF 动量 TopK</option>
+                  <option value="stock_lowvol_momentum">股票低波动量</option>
+                  <option value="etf_ma_momentum_filter">ETF 均线动量过滤</option>
+                  <option value="stock_short_reversal_topk">股票短反转 TopK</option>
+                  <option value="stock_momentum_volume_confirm">股票动量量能确认</option>
+                  <option value="stock_momentum_skip_month">股票跳月动量</option>
+                </select>
+              </label>
+              <label class="filter-action">
+                <button type="submit">刷新</button>
+              </label>
+            </form>
+            <form class="filters filters-inline" id="override-upsert-form">
+              <label class="filter-inline">
+                策略
+                <select id="override-strategy" data-asqt-select="wide" required>
+                  <option value="etf_ma_rotate">ETF 均线轮动</option>
+                  <option value="stock_momentum_topk" selected>股票动量 TopK</option>
+                  <option value="etf_momentum_topk">ETF 动量 TopK</option>
+                  <option value="stock_lowvol_momentum">股票低波动量</option>
+                  <option value="etf_ma_momentum_filter">ETF 均线动量过滤</option>
+                  <option value="stock_short_reversal_topk">股票短反转 TopK</option>
+                  <option value="stock_momentum_volume_confirm">股票动量量能确认</option>
+                  <option value="stock_momentum_skip_month">股票跳月动量</option>
+                </select>
+              </label>
+              <label class="filter-inline">
+                代码
+                <input id="override-symbol" type="text" placeholder="600519.SH" autocomplete="off" required />
+              </label>
+              <label class="filter-inline">
+                动作
+                <select id="override-action" data-asqt-select>
+                  <option value="force_out">强制剔除</option>
+                  <option value="force_in">强制纳入</option>
+                  <option value="cap">权重上限</option>
+                </select>
+              </label>
+              <label class="filter-inline">
+                权重
+                <input id="override-weight" type="number" min="0" max="1" step="0.01" placeholder="force_in/cap" />
+              </label>
+              <label class="filter-inline">
+                原因
+                <input id="override-reason" type="text" placeholder="可选备注" autocomplete="off" />
+              </label>
+              <label class="filter-action">
+                <button type="submit">保存覆盖</button>
+              </label>
+            </form>
+            <p id="override-action-hint" class="hint" hidden></p>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>策略</th>
+                    <th>代码</th>
+                    <th>动作</th>
+                    <th class="num">权重</th>
+                    <th>原因</th>
+                    <th>操作人</th>
+                    <th>更新</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="override-body"></tbody>
+              </table>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-title">
               <h2>Mock 下单</h2>
               <span>质检闸门演示</span>
             </div>
@@ -764,6 +1083,9 @@
                   <option value="etf_momentum_topk">ETF 动量 TopK</option>
                   <option value="stock_lowvol_momentum">股票低波动量</option>
                   <option value="etf_ma_momentum_filter">ETF 均线动量过滤</option>
+                  <option value="stock_short_reversal_topk">股票短反转 TopK</option>
+                  <option value="stock_momentum_volume_confirm">股票动量量能确认</option>
+                  <option value="stock_momentum_skip_month">股票跳月动量</option>
                 </select>
               </label>
               <label class="filter-action">
@@ -813,17 +1135,19 @@
         </section>
 
         <section class="page hidden" id="page-settings">
-          <section class="panel">
-            <div class="panel-title">
+          <section class="panel" id="settings-layout-panel" data-collapse-key="settings-layout">
+            <div class="panel-title panel-title-collapsible">
               <h2>运行目录</h2>
               <span>技术设计存储约定</span>
+              <button type="button" class="icon-btn panel-collapse-toggle" aria-expanded="true" aria-label="收起运行目录" title="收起/展开">▾</button>
             </div>
             <div class="kv-grid" id="layout-grid"></div>
           </section>
-          <section class="panel">
-            <div class="panel-title">
+          <section class="panel" id="settings-ports-panel" data-collapse-key="settings-ports">
+            <div class="panel-title panel-title-collapsible">
               <h2>端口边界</h2>
               <span>Adapter / Service 接线状态</span>
+              <button type="button" class="icon-btn panel-collapse-toggle" aria-expanded="true" aria-label="收起端口边界" title="收起/展开">▾</button>
             </div>
             <p class="hint" id="ports-reserved-hint">ExecutionAdapter 当前是 PaperBroker。QMT 预留适配器恒为不可用（available=false）；Qlib bin 目录预留，业务层禁止 import qlib。不要把预留项当成已接券商。</p>
             <ul id="port-list" class="task-list"></ul>
@@ -833,15 +1157,15 @@
               <h2>主题</h2>
               <span>参考样例图的纯黑控制台风格</span>
             </div>
-            <p class="hint">通过右上角月/日切换主题。总览页按交易台密度排版：质量门做焦点，单强调色，边框分层。</p>
+            <p class="hint">通过左侧栏底部月/日切换主题。总览页按交易台密度排版：质量门做焦点，单强调色，边框分层。</p>
           </section>
           <section class="panel">
             <div class="panel-title">
               <h2>模拟交易</h2>
               <span>总开关 · 默认关闭</span>
             </div>
-            <p class="hint" id="paper-trading-hint">开关为关时不能跑模拟。急停打开时也会拒绝新订单。初始资金与佣金对之后新开的模拟生效；已有账本请先重置再跑。</p>
-            <form class="filters filters-inline" id="paper-trading-form">
+            <p class="hint" id="paper-trading-hint">开关为关时不能跑模拟。组合回撤达线才全局急停；单策略回撤只平仓该账本。初始资金最小 10,000（组合本金）；与佣金、兜底线对之后新开的模拟生效；已有账本请先重置再跑。</p>
+            <form class="filters filters-inline paper-trading-form" id="paper-trading-form">
               <label class="filter-inline">
                 开关
                 <select id="paper-trading-enabled" data-asqt-select>
@@ -851,11 +1175,56 @@
               </label>
               <label class="filter-inline">
                 初始资金
-                <input id="paper-initial-cash" type="number" min="10000" max="100000000" step="10000" value="1000000" />
+                <input
+                  id="paper-initial-cash"
+                  type="number"
+                  min="10000"
+                  max="100000000"
+                  step="10000"
+                  value="1000000"
+                  required
+                  title="组合初始资金，最小 10,000，最大 100,000,000"
+                />
               </label>
               <label class="filter-inline">
                 佣金万分之
                 <input id="paper-commission-wan" type="number" min="0" max="50" step="0.1" value="2.5" />
+              </label>
+              <label class="filter-inline">
+                组合急停%
+                <input
+                  id="paper-dd-portfolio"
+                  type="number"
+                  min="0"
+                  max="80"
+                  step="0.5"
+                  value="12"
+                  title="组合净资产相对组合峰值回撤达此线时全局急停"
+                />
+              </label>
+              <label class="filter-inline">
+                单策略平仓%
+                <input
+                  id="paper-dd-strategy"
+                  type="number"
+                  min="0"
+                  max="80"
+                  step="0.5"
+                  value="12"
+                  title="该账本净资产相对本账峰值回撤达此线时清仓并禁买，不影响其他账本"
+                />
+              </label>
+              <label class="filter-inline">
+                单策略预警%
+                <input
+                  id="paper-dd-warn"
+                  type="number"
+                  min="0"
+                  max="80"
+                  step="0.5"
+                  value="8"
+                  title="按单账本相对本账峰值回撤预警；未达平仓/组合急停线"
+                />
               </label>
               <label class="filter-action">
                 <button type="submit">保存</button>
@@ -873,12 +1242,17 @@
           <button type="button" class="confirm-close" id="confirm-close" aria-label="关闭">×</button>
         </div>
         <p class="confirm-body" id="confirm-message"></p>
+        <div class="confirm-reason-wrap" id="confirm-reason-wrap" hidden>
+          <label class="confirm-reason-label" for="confirm-reason">原因</label>
+          <input id="confirm-reason" type="text" placeholder="必填" autocomplete="off" />
+          <p id="confirm-reason-error" class="field-error" hidden></p>
+        </div>
         <div class="confirm-actions">
           <button type="button" class="confirm-cancel" id="confirm-cancel">取消</button>
           <button type="button" class="confirm-ok" id="confirm-ok">确定</button>
         </div>
       </div>
     </div>
-    <script src="/assets/app.js?v=p3-ui48"></script>
+    <script src="/assets/app.js?v=p3-ui88"></script>
   </body>
 </html>

@@ -156,10 +156,14 @@ def test_p2_etf_momentum_topk_prefers_stronger_etf(tmp_path):
         rows.append(_bar("159915.SZ", day, 2.0 + index * 0.02))
         rows.append(_bar("000001.SZ", day, 10.0 + index))  # stock must be ignored
     weights = signal_etf_momentum_topk(rows, days[-1])
+    top_k = int(STRATEGY_SPECS[ETF_MOMENTUM_TOPK]["params"]["top_k"])
+    max_weight = float(STRATEGY_SPECS[ETF_MOMENTUM_TOPK]["params"]["max_weight"])
     assert set(weights) <= {"510300.SH", "510500.SH", "159915.SZ"}
     assert "000001.SZ" not in weights
-    assert len(weights) == 3
-    assert abs(sum(weights.values()) - 0.60) < 1e-9
+    assert len(weights) == top_k
+    assert abs(sum(weights.values()) - top_k * max_weight) < 1e-9
+    # Stronger trend (510500) should outrank flat-ish peers when selected.
+    assert "510500.SH" in weights
 
 
 def test_p2_signal_cannot_see_future_close(tmp_path):
@@ -368,5 +372,106 @@ def test_p2_backtest_job_returns_run_id_and_rejects_overlap(tmp_path, monkeypatc
         time.sleep(0.05)
     assert row["status"] == "success"
     assert row["progress_pct"] == 100
+    multi = client.post(
+        "/api/research/backtest",
+        json={"strategy_ids": [ETF_MA_ROTATE, STOCK_MOMENTUM_TOPK]},
+    )
+    assert multi.status_code == 200
+    multi_id = multi.json()["run_id"]
+    multi_row = None
+    for _ in range(60):
+        multi_row = client.get(f"/api/research/backtest/{multi_id}").json()
+        if multi_row["status"] not in {"queued", "running"}:
+            break
+        import time
+
+        time.sleep(0.05)
+    assert multi_row["status"] == "success"
+    assert len(multi_row["detail"]["reports"]) == 2
+    empty = client.post("/api/research/backtest", json={"strategy_ids": []})
+    assert empty.status_code == 400
     unknown = client.post("/api/research/backtest", json={"strategy_id": "nope"})
     assert unknown.status_code == 400
+
+
+def test_factor_compute_and_selector_preview_api(tmp_path, monkeypatch):
+    from asqt.factor_jobs import FactorBusy, start_factor_compute_job
+
+    settings = make_settings(tmp_path)
+    (tmp_path / "frontend").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "frontend" / "index.html").write_text("<html></html>", encoding="utf-8")
+    rows, instruments = _trend_book()
+    _seed(settings, rows, instruments)
+
+    finished = start_factor_compute_job(STOCK_MOMENTUM_TOPK, settings=settings, background=False)
+    assert finished["status"] == "success"
+    assert finished["detail"]["factor_rows"] > 0
+    assert (settings.standard_dir / "factor_values.parquet").exists()
+
+    execute(
+        """
+        INSERT INTO factor_run
+            (run_id, strategy_id, status, inflight, progress_pct, started_at, created_at)
+        VALUES ('hold-f1', 'all', 'running', 1, 10, '2026-09-08T00:00:00+00:00', '2026-09-08T00:00:00+00:00')
+        """,
+        settings=settings,
+    )
+    with pytest.raises(FactorBusy):
+        start_factor_compute_job(ETF_MA_ROTATE, settings=settings, background=False)
+    execute(
+        "UPDATE factor_run SET inflight = NULL, status = 'success' WHERE run_id = 'hold-f1'",
+        settings=settings,
+    )
+
+    from asqt import config as config_module
+
+    config_module.get_settings.cache_clear()
+    monkeypatch.setattr("asqt.api.get_settings", lambda: settings)
+    client = TestClient(create_app())
+    asof = sorted({row["trade_date"] for row in rows})[-5]
+    preview = client.post(
+        "/api/selectors/preview",
+        json={"strategy_id": STOCK_MOMENTUM_TOPK, "asof": asof},
+    )
+    assert preview.status_code == 200
+    body = preview.json()
+    assert body["strategy_id"] == STOCK_MOMENTUM_TOPK
+    assert body["asof"] == asof
+    assert isinstance(body["weights"], dict)
+    assert body["gross"] == pytest.approx(sum(body["weights"].values()), rel=0, abs=1e-9)
+
+    filtered = client.get(
+        "/api/factors",
+        params={"factor_name": "stock_momentum", "trade_date": asof, "limit": 50},
+    )
+    assert filtered.status_code == 200
+    body_f = filtered.json()
+    items = body_f["items"] if isinstance(body_f, dict) else body_f
+    assert items
+    assert all(row["factor_name"] == "stock_momentum" for row in items)
+    assert all(row["trade_date"] == asof for row in items)
+
+    fuzzy = client.get(
+        "/api/factors",
+        params={"factor_name": "momentum", "trade_date": asof, "page": 1, "page_size": 10},
+    )
+    assert fuzzy.status_code == 200
+    fuzzy_body = fuzzy.json()
+    assert "items" in fuzzy_body and "total" in fuzzy_body
+    assert fuzzy_body["page_size"] == 10
+    assert all("momentum" in row["factor_name"] for row in fuzzy_body["items"])
+
+    created = client.post("/api/factors/compute", json={"strategy_id": ETF_MA_ROTATE})
+    assert created.status_code == 200
+    run_id = created.json()["run_id"]
+    row = None
+    for _ in range(40):
+        row = client.get(f"/api/factors/compute/{run_id}").json()
+        if row["status"] not in {"queued", "running"}:
+            break
+        import time
+
+        time.sleep(0.05)
+    assert row["status"] == "success"
+    bad = client.post("/api/selectors/preview", json={"strategy_id": "nope", "asof": asof})
+    assert bad.status_code == 400

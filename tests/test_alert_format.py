@@ -35,14 +35,14 @@ def test_drawdown_payload_and_templates():
     summary = format_alert_summary(row)
     full = format_alert_full(row)
     feishu = format_feishu_text(row)
-    assert summary == "回撤 12.06% 触发急停"
+    assert summary == "回撤 12.06% 触发组合急停"
     assert "账户峰值：117,094.25" in full
     assert "当前总资产：102,980.11" in full
     assert "现金：12,345.67" in full
     assert "持仓市值：90,634.44" in full
     assert "较峰值盈亏：-14,114.14" in full
     assert "【ASQT告警】严重 · 回撤" in feishu
-    assert "回撤触发急停" in feishu
+    assert "组合回撤触发急停" in feishu
     assert full in feishu
 
 
@@ -60,8 +60,10 @@ def test_maybe_drawdown_halt_persists_json_detail(tmp_path):
         settings=settings,
     )
     assert result["halt"] is True
-    from asqt.ops import LocalAlertService
+    assert result.get("strategy_halt") is True
+    from asqt.ops import LocalAlertService, kill_engaged
 
+    assert kill_engaged(settings) is False  # single-book alert without portfolio NAV peak yet
     rows = LocalAlertService(settings).list_alerts(status="open")
     drawdown = [row for row in rows if row["category"] == "drawdown"]
     assert drawdown

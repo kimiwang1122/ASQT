@@ -78,6 +78,23 @@ def volume_z(hist: Sequence[dict[str, Any]], window: int) -> float | None:
     return (vols[-1] - mean) / std
 
 
+def momentum_skip_month(
+    hist: Sequence[dict[str, Any]],
+    lookback: int,
+    skip: int = 20,
+) -> float | None:
+    """Return from t-lookback to t-skip (classic 12-1 when lookback=252, skip=21)."""
+    if lookback < 1 or skip < 0 or lookback <= skip:
+        return None
+    if len(hist) < lookback + 1:
+        return None
+    start = adj_close(hist[-(lookback + 1)])
+    end = adj_close(hist[-(skip + 1)])
+    if start <= 0:
+        return None
+    return end / start - 1.0
+
+
 def risk_adjusted_momentum(
     hist: Sequence[dict[str, Any]],
     *,

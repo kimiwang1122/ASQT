@@ -36,7 +36,8 @@ DEFAULT_GRIDS: dict[str, list[dict[str, Any]]] = {
             "max_weight": 0.20,
             "gross_limit": 0.95,
         }
-        for mw, ml, k in itertools.product((20,), (20, 40), (2, 3))
+        # Prefer longer mom / smaller k for lower turnover when reviewing OOS.
+        for mw, ml, k in itertools.product((20, 40), (20, 40, 60), (2, 3))
     ],
     "stock_momentum_topk": [
         {"lookback": lb, "top_k": k, "max_weight": 0.10, "gross_limit": 0.95}
@@ -48,6 +49,73 @@ DEFAULT_GRIDS: dict[str, list[dict[str, Any]]] = {
     ],
     "etf_ma_rotate": [
         {"window": w, "max_weight": 0.20, "gross_limit": 0.95} for w in (10, 20, 40, 60)
+    ],
+    "stock_short_reversal_topk": [
+        {
+            "lookback": lb,
+            "top_k": k,
+            "max_weight": 0.10,
+            "gross_limit": gross,
+            "rebalance_every_n": reb,
+        }
+        # Longer lookback / smaller k / optional N-day rebalance to cut fees.
+        for lb, k, reb, gross in itertools.product(
+            (10, 15, 20),
+            (2, 3),
+            (1, 5),
+            (0.95,),
+        )
+    ]
+    + [
+        {
+            "lookback": lb,
+            "top_k": k,
+            "max_weight": 0.10,
+            "gross_limit": 0.70,
+            "rebalance_every_n": 5,
+        }
+        for lb, k in itertools.product((10, 15), (2, 3))
+    ]
+    + [
+        # Baseline + rebalance variants of the toxic papered set.
+        {
+            "lookback": 5,
+            "top_k": 5,
+            "max_weight": 0.10,
+            "gross_limit": 0.95,
+            "rebalance_every_n": reb,
+        }
+        for reb in (1, 5)
+    ],
+    "stock_momentum_volume_confirm": [
+        {
+            "lookback": lb,
+            "vol_z_window": vz,
+            "min_volume_z": mz,
+            "top_k": k,
+            "max_weight": 0.10,
+            "gross_limit": 0.95,
+        }
+        for lb, vz, mz, k in itertools.product(
+            (20, 40, 60),
+            (20,),
+            (0.0, 0.5),
+            (3, 5),
+        )
+    ],
+    "stock_momentum_skip_month": [
+        {
+            "lookback": lb,
+            "skip": sk,
+            "top_k": k,
+            "max_weight": 0.10,
+            "gross_limit": 0.95,
+        }
+        for lb, sk, k in itertools.product(
+            (126, 189, 252),
+            (10, 21),
+            (3, 5),
+        )
     ],
 }
 
@@ -91,7 +159,34 @@ def suggest_parameter_set_id(strategy_id: str, params: dict[str, Any]) -> str:
         return f"etf_momentum_topk.k{int(params['top_k'])}.l{int(params['lookback'])}"
     if strategy_id == "etf_ma_rotate":
         return f"etf_ma_rotate.w{int(params['window'])}"
-    parts = [strategy_id] + [f"{key}{params[key]}" for key in sorted(params) if key not in {"max_weight", "gross_limit"}]
+    if strategy_id == "stock_short_reversal_topk":
+        parts = [
+            "stock_short_reversal_topk",
+            f"k{int(params['top_k'])}",
+            f"l{int(params['lookback'])}",
+        ]
+        gross = float(params.get("gross_limit", 0.95))
+        if abs(gross - 0.95) > 1e-9:
+            parts.append(f"g{int(round(gross * 100))}")
+        reb = int(params.get("rebalance_every_n") or 1)
+        if reb > 1:
+            parts.append(f"r{reb}")
+        return ".".join(parts)
+    if strategy_id == "stock_momentum_volume_confirm":
+        return (
+            f"stock_momentum_volume_confirm.k{int(params['top_k'])}"
+            f".l{int(params['lookback'])}.vz{int(params['vol_z_window'])}"
+        )
+    if strategy_id == "stock_momentum_skip_month":
+        return (
+            f"stock_momentum_skip_month.k{int(params['top_k'])}"
+            f".l{int(params['lookback'])}.s{int(params['skip'])}"
+        )
+    parts = [strategy_id] + [
+        f"{key}{params[key]}"
+        for key in sorted(params)
+        if key not in {"max_weight", "gross_limit", "rebalance_every_n"}
+    ]
     return ".".join(str(part) for part in parts)
 
 
@@ -114,17 +209,21 @@ def simulate_path(
     last_weights: dict[str, float] = {}
     turnover = 0.0
     prev_weights: dict[str, float] = {}
+    rebalance_every_n = max(1, int(params.get("rebalance_every_n") or 1))
     for index, signal_date in enumerate(dates[:-1]):
         fill_date = dates[index + 1]
-        weights = weights_for(
-            strategy_id,
-            rows,
-            signal_date,
-            limits=limits,
-            params=params,
-            market_by_symbol=grouped,
-            suspended=halted,
-        )
+        if index % rebalance_every_n == 0 or not last_weights:
+            weights = weights_for(
+                strategy_id,
+                rows,
+                signal_date,
+                limits=limits,
+                params=params,
+                market_by_symbol=grouped,
+                suspended=halted,
+            )
+        else:
+            weights = dict(last_weights)
         last_weights = weights
         symbols = set(prev_weights) | set(weights)
         turnover += 0.5 * sum(abs(weights.get(sym, 0.0) - prev_weights.get(sym, 0.0)) for sym in symbols)

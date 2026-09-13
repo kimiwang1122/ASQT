@@ -36,7 +36,15 @@ class ContractQualityChecker:
         if trade_date:
             rows = [row for row in rows if row.get("trade_date") == trade_date]
         issues: list[dict] = []
-        issues.extend(_missing_issues(rows, calendar, expected_symbols, trade_date))
+        issues.extend(
+            _missing_issues(
+                rows,
+                calendar,
+                expected_symbols,
+                trade_date,
+                instruments=instruments or [],
+            )
+        )
         issues.extend(_range_issues(rows))
         issues.extend(_adj_jump_issues(records or [], corporate_actions))
         issues.extend(_point_in_time_issues(rows, instruments or []))
@@ -75,11 +83,29 @@ def _issue(
     }
 
 
+def _listing_window(instruments: list[dict], by_symbol_dates: dict[str, set[str]]) -> dict[str, tuple[str | None, str | None]]:
+    """Effective [list_date, delist_date] per symbol; fall back to first observed bar."""
+    meta = {str(item.get("symbol")): item for item in instruments}
+    out: dict[str, tuple[str | None, str | None]] = {}
+    symbols = set(meta) | set(by_symbol_dates)
+    for symbol in symbols:
+        row = meta.get(symbol) or {}
+        list_date = str(row.get("list_date") or "").strip() or None
+        delist_date = str(row.get("delist_date") or "").strip() or None
+        if not list_date:
+            have = by_symbol_dates.get(symbol) or set()
+            list_date = min(have) if have else None
+        out[symbol] = (list_date, delist_date)
+    return out
+
+
 def _missing_issues(
     rows: list[dict],
     calendar: list[dict] | None,
     expected_symbols: list[str] | None,
     trade_date: str | None,
+    *,
+    instruments: list[dict] | None = None,
 ) -> list[dict]:
     issues: list[dict] = []
     required = ("open", "high", "low", "close", "volume", "amount", "adj_factor")
@@ -116,15 +142,22 @@ def _missing_issues(
         by_symbol: dict[str, set[str]] = {}
         for row in rows:
             by_symbol.setdefault(str(row.get("symbol")), set()).add(str(row.get("trade_date")))
+        windows = _listing_window(instruments or [], by_symbol)
         check_symbols = expected_symbols or list(by_symbol)
         for symbol in check_symbols:
-            have = by_symbol.get(symbol, set())
+            have = by_symbol.get(str(symbol), set())
+            list_date, delist_date = windows.get(str(symbol), (None, None))
             for day in open_dates:
-                if day not in have:
+                day_s = str(day)
+                if list_date and day_s < list_date:
+                    continue
+                if delist_date and day_s > delist_date:
+                    continue
+                if day_s not in have:
                     issues.append(
                         _issue(
                             "missing",
-                            "block",
+                            "warn",
                             symbol=symbol,
                             trade_date=day,
                             diff="trade_date_missing_on_open_calendar",
@@ -185,6 +218,7 @@ def _range_issues(rows: list[dict]) -> list[dict]:
 
 def _adj_jump_issues(all_rows: list[dict], corporate_actions: list[dict] | None = None) -> list[dict]:
     from asqt.corporate_actions import find_explaining_action, load_corporate_actions
+    from asqt.symbols import infer_instrument_type
 
     actions = list(corporate_actions) if corporate_actions is not None else load_corporate_actions()
     issues: list[dict] = []
@@ -207,11 +241,17 @@ def _adj_jump_issues(all_rows: list[dict], corporate_actions: list[dict] | None 
                 continue
             ratio = factor / previous_factor
             trade_date = row.get("trade_date")
+            # ETF/fund adj feeds often park at 1.0 then jump; keep visible but don't halt trading.
+            etf_placeholder = (
+                infer_instrument_type(symbol) == "etf"
+                and float(previous_factor) == 1.0
+                and float(factor) != 1.0
+            )
             if ratio >= ADJ_BLOCK_RATIO or ratio <= 1 / ADJ_BLOCK_RATIO:
                 issues.append(
                     _issue(
                         "adj_conflict",
-                        "block",
+                        "warn" if etf_placeholder else "block",
                         symbol=symbol,
                         trade_date=trade_date,
                         diff=f"adj_factor_ratio={ratio:.4f} prev={previous_factor} curr={factor}",

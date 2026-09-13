@@ -12,8 +12,20 @@ from asqt.db import execute, initialize_database, query_all
 
 KILL_CATEGORY = "kill_switch"
 PAPER_TRADING_CATEGORY = "paper_trading"
+# Defaults kept for backward-compatible imports; runtime reads paper_account_config().
 DRAWDOWN_STOP = -0.12
 DRAWDOWN_WARN = -0.08
+DEFAULT_PORTFOLIO_DRAWDOWN_STOP = 0.12
+DEFAULT_STRATEGY_DRAWDOWN_STOP = 0.12
+DEFAULT_DRAWDOWN_WARN = 0.08
+PAPER_CASH_KEY = "paper.initial_cash"
+PAPER_COMMISSION_KEY = "paper.commission_rate"
+PAPER_PORTFOLIO_PEAK_KEY = "paper.portfolio_peak"
+PAPER_DD_PORTFOLIO_STOP_KEY = "paper.portfolio_drawdown_stop"
+PAPER_DD_STRATEGY_STOP_KEY = "paper.strategy_drawdown_stop"
+PAPER_DD_WARN_KEY = "paper.drawdown_warn"
+DEFAULT_PAPER_CASH = 1_000_000.0
+DEFAULT_PAPER_COMMISSION = 0.00025
 
 
 def _now() -> str:
@@ -384,16 +396,29 @@ def maybe_drawdown_halt(
     account_id: str | None = None,
     strategy_id: str | None = None,
     trade_date: str | None = None,
+    already_halted: bool = False,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
+    """Evaluate strategy-level flatten vs portfolio-level global kill.
+
+    Strategy drawdown only marks that book for liquidation (no global kill).
+    Global kill engages only when combined paper NAV drawdown hits the portfolio line.
+    """
     from asqt.alert_format import build_drawdown_payload, encode_alert_detail
 
+    settings = settings or get_settings()
+    cfg = paper_account_config(settings)
+    strategy_stop = -abs(float(cfg["strategy_drawdown_stop"]))
+    portfolio_stop = -abs(float(cfg["portfolio_drawdown_stop"]))
+    warn_line = -abs(float(cfg["drawdown_warn"]))
+
     if peak <= 0:
-        return {"halt": False, "dd": 0.0}
-    dd = total_asset / peak - 1.0
+        book_dd = 0.0
+    else:
+        book_dd = total_asset / peak - 1.0
     alerts = LocalAlertService(settings)
     common = {
-        "dd": dd,
+        "dd": book_dd,
         "peak": peak,
         "total_asset": total_asset,
         "cash": cash,
@@ -403,33 +428,82 @@ def maybe_drawdown_halt(
         "strategy_id": strategy_id,
         "trade_date": trade_date,
     }
-    if dd <= DRAWDOWN_STOP and not kill_engaged(settings):
-        set_kill_switch(
-            True,
-            f"max drawdown stop {dd:.4f} <= {DRAWDOWN_STOP}",
-            actor="risk",
-            settings=settings,
-        )
+    strategy_halt = bool(already_halted) or book_dd <= strategy_stop
+    if strategy_halt and not already_halted:
         open_stop = query_all(
             """
             SELECT COUNT(*) AS c FROM alert
             WHERE category = 'drawdown' AND status = 'open' AND level = 'critical'
+              AND detail LIKE ?
             """,
+            (f"%{strategy_id or account_id or ''}%",),
             settings=settings,
         )
+        # One critical strategy-halt alert per book (detail carries strategy_id).
         if int(open_stop[0]["c"] if open_stop else 0) == 0:
             alerts.raise_alert(
                 "critical",
                 "drawdown",
-                "max drawdown stop",
-                encode_alert_detail(build_drawdown_payload(**common, kind="stop")),
+                "strategy drawdown halt",
+                encode_alert_detail(
+                    build_drawdown_payload(**common, kind="strategy_stop")
+                ),
             )
-        return {"halt": True, "dd": dd}
-    if dd <= DRAWDOWN_WARN:
-        open_warn = query_all(
-            "SELECT COUNT(*) AS c FROM alert WHERE category = 'drawdown' AND status = 'open' AND level = 'high'",
+
+    portfolio = update_portfolio_drawdown(settings)
+    portfolio_halt = False
+    if portfolio["dd"] <= portfolio_stop and not kill_engaged(settings):
+        set_kill_switch(
+            True,
+            (
+                f"portfolio drawdown stop {portfolio['dd']:.4f} <= {portfolio_stop}"
+                f" (nav={portfolio['total_asset']:.2f}, peak={portfolio['peak']:.2f})"
+            ),
+            actor="risk",
             settings=settings,
         )
+        open_port = query_all(
+            """
+            SELECT COUNT(*) AS c FROM alert
+            WHERE category = 'drawdown' AND status = 'open' AND level = 'critical'
+              AND title = 'max drawdown stop'
+            """,
+            settings=settings,
+        )
+        if int(open_port[0]["c"] if open_port else 0) == 0:
+            port_payload = build_drawdown_payload(
+                dd=portfolio["dd"],
+                peak=portfolio["peak"],
+                total_asset=portfolio["total_asset"],
+                cash=None,
+                market_value=None,
+                initial_cash=None,
+                account_id="paper:portfolio",
+                strategy_id="portfolio",
+                trade_date=trade_date,
+                kind="stop",
+            )
+            alerts.raise_alert(
+                "critical",
+                "drawdown",
+                "max drawdown stop",
+                encode_alert_detail(port_payload),
+            )
+        portfolio_halt = True
+
+    if book_dd <= warn_line and not strategy_halt:
+        open_warn = query_all(
+            """
+            SELECT COUNT(*) AS c FROM alert
+            WHERE category = 'drawdown' AND status = 'open' AND level = 'high'
+              AND title = 'max drawdown warning'
+              AND detail LIKE ?
+            """,
+            (f"%{strategy_id or account_id or ''}%",),
+            settings=settings,
+        )
+        # One warn per book (same scoping as strategy halt), so sibling strategies
+        # still notify Feishu when each crosses the line.
         if int(open_warn[0]["c"] if open_warn else 0) == 0:
             alerts.raise_alert(
                 "high",
@@ -437,13 +511,75 @@ def maybe_drawdown_halt(
                 "max drawdown warning",
                 encode_alert_detail(build_drawdown_payload(**common, kind="warn")),
             )
-    return {"halt": False, "dd": dd}
+
+    return {
+        "halt": portfolio_halt or strategy_halt,
+        "strategy_halt": strategy_halt,
+        "portfolio_halt": portfolio_halt or kill_engaged(settings),
+        "dd": book_dd,
+        "portfolio_dd": portfolio["dd"],
+        "portfolio_nav": portfolio["total_asset"],
+        "portfolio_peak": portfolio["peak"],
+    }
 
 
-PAPER_CASH_KEY = "paper.initial_cash"
-PAPER_COMMISSION_KEY = "paper.commission_rate"
-DEFAULT_PAPER_CASH = 1_000_000.0
-DEFAULT_PAPER_COMMISSION = 0.00025
+def update_portfolio_drawdown(settings: Settings | None = None) -> dict[str, Any]:
+    """Sum latest paper book NAVs and track a portfolio peak for global kill."""
+    settings = settings or get_settings()
+    initialize_database(settings)
+    from asqt.research_engine import LocalStrategyService
+    from asqt.strategies import STRATEGY_SPECS
+
+    versions = LocalStrategyService(settings)
+    total = 0.0
+    for sid in STRATEGY_SPECS:
+        current = versions.current_version(sid)
+        if not current or current.get("status") != "paper":
+            continue
+        rows = query_all(
+            """
+            SELECT total_asset FROM account_snapshot
+            WHERE account_id = ?
+            ORDER BY trade_date DESC
+            LIMIT 1
+            """,
+            (f"paper:{sid}",),
+            settings=settings,
+        )
+        if rows:
+            total += float(rows[0]["total_asset"] or 0)
+    peak_raw = _setting_value(PAPER_PORTFOLIO_PEAK_KEY, "0", settings)
+    try:
+        peak = float(peak_raw)
+    except (TypeError, ValueError):
+        peak = 0.0
+    peak = max(peak, total, 0.0)
+    now = _now()
+    execute(
+        """
+        INSERT INTO runtime_setting (setting_key, setting_value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = excluded.updated_at
+        """,
+        (PAPER_PORTFOLIO_PEAK_KEY, str(peak), now),
+        settings=settings,
+    )
+    dd = total / peak - 1.0 if peak > 0 else 0.0
+    return {"total_asset": round(total, 4), "peak": round(peak, 4), "dd": dd}
+
+
+def reset_portfolio_peak(settings: Settings | None = None) -> None:
+    settings = settings or get_settings()
+    initialize_database(settings)
+    execute(
+        """
+        INSERT INTO runtime_setting (setting_key, setting_value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = excluded.updated_at
+        """,
+        (PAPER_PORTFOLIO_PEAK_KEY, "0", _now()),
+        settings=settings,
+    )
 
 
 def _setting_value(key: str, default: str, settings: Settings | None = None) -> str:
@@ -458,6 +594,18 @@ def _setting_value(key: str, default: str, settings: Settings | None = None) -> 
     return str(rows[0]["setting_value"])
 
 
+def _parse_ratio_setting(raw: str, default: float) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if value < 0:
+        value = abs(value)
+    if value > 1:
+        value = value / 100.0
+    return value
+
+
 def paper_account_config(settings: Settings | None = None) -> dict[str, Any]:
     cash_raw = _setting_value(PAPER_CASH_KEY, str(DEFAULT_PAPER_CASH), settings)
     rate_raw = _setting_value(PAPER_COMMISSION_KEY, str(DEFAULT_PAPER_COMMISSION), settings)
@@ -469,10 +617,28 @@ def paper_account_config(settings: Settings | None = None) -> dict[str, Any]:
         commission_rate = float(rate_raw)
     except (TypeError, ValueError):
         commission_rate = DEFAULT_PAPER_COMMISSION
+    portfolio_stop = _parse_ratio_setting(
+        _setting_value(PAPER_DD_PORTFOLIO_STOP_KEY, str(DEFAULT_PORTFOLIO_DRAWDOWN_STOP), settings),
+        DEFAULT_PORTFOLIO_DRAWDOWN_STOP,
+    )
+    strategy_stop = _parse_ratio_setting(
+        _setting_value(PAPER_DD_STRATEGY_STOP_KEY, str(DEFAULT_STRATEGY_DRAWDOWN_STOP), settings),
+        DEFAULT_STRATEGY_DRAWDOWN_STOP,
+    )
+    warn = _parse_ratio_setting(
+        _setting_value(PAPER_DD_WARN_KEY, str(DEFAULT_DRAWDOWN_WARN), settings),
+        DEFAULT_DRAWDOWN_WARN,
+    )
     return {
         "initial_cash": initial_cash,
         "commission_rate": commission_rate,
         "commission_per_myriad": round(commission_rate * 10_000, 6),
+        "portfolio_drawdown_stop": portfolio_stop,
+        "strategy_drawdown_stop": strategy_stop,
+        "drawdown_warn": warn,
+        "portfolio_drawdown_stop_pct": round(portfolio_stop * 100, 4),
+        "strategy_drawdown_stop_pct": round(strategy_stop * 100, 4),
+        "drawdown_warn_pct": round(warn * 100, 4),
     }
 
 
@@ -480,6 +646,9 @@ def set_paper_account_config(
     *,
     initial_cash: float,
     commission_per_myriad: float,
+    portfolio_drawdown_stop_pct: float | None = None,
+    strategy_drawdown_stop_pct: float | None = None,
+    drawdown_warn_pct: float | None = None,
     actor: str = "operator",
     settings: Settings | None = None,
 ) -> dict[str, Any]:
@@ -492,9 +661,44 @@ def set_paper_account_config(
     if myriad < 0 or myriad > 50:
         raise ValueError("佣金万分之需在 0 到 50 之间")
     rate = round(myriad / 10_000, 10)
+
+    def _pct_to_ratio(name: str, pct: float) -> float:
+        value = float(pct)
+        if value < 0 or value > 80:
+            raise ValueError(f"{name}需在 0 到 80 之间")
+        return round(value / 100.0, 10)
+
     before = paper_account_config(settings)
+    port_pct = (
+        before["portfolio_drawdown_stop_pct"]
+        if portfolio_drawdown_stop_pct is None
+        else portfolio_drawdown_stop_pct
+    )
+    strat_pct = (
+        before["strategy_drawdown_stop_pct"]
+        if strategy_drawdown_stop_pct is None
+        else strategy_drawdown_stop_pct
+    )
+    warn_pct = before["drawdown_warn_pct"] if drawdown_warn_pct is None else drawdown_warn_pct
+    port_ratio = _pct_to_ratio("组合回撤急停", port_pct)
+    strat_ratio = _pct_to_ratio("单策略回撤平仓", strat_pct)
+    warn_ratio = _pct_to_ratio("回撤预警", warn_pct)
+    if warn_ratio > strat_ratio:
+        raise ValueError("回撤预警不能深于单策略回撤平仓线")
+    if strat_ratio > port_ratio:
+        # allow equal; only reject if strategy stop is looser than portfolio? 
+        # Actually strategy can equal portfolio. If strategy > portfolio (e.g. 15% vs 12%),
+        # strategy never halts before portfolio — OK. If strategy < portfolio, strategy flattens first — OK.
+        pass
     now = _now()
-    for key, value in ((PAPER_CASH_KEY, str(cash)), (PAPER_COMMISSION_KEY, str(rate))):
+    pairs = (
+        (PAPER_CASH_KEY, str(cash)),
+        (PAPER_COMMISSION_KEY, str(rate)),
+        (PAPER_DD_PORTFOLIO_STOP_KEY, str(port_ratio)),
+        (PAPER_DD_STRATEGY_STOP_KEY, str(strat_ratio)),
+        (PAPER_DD_WARN_KEY, str(warn_ratio)),
+    )
+    for key, value in pairs:
         execute(
             """
             INSERT INTO runtime_setting (setting_key, setting_value, updated_at)
@@ -524,3 +728,122 @@ def set_paper_account_config(
         settings=settings,
     )
     return after
+
+
+# Keep old constant names resolving via config for call sites that still import them.
+def drawdown_stop_line(settings: Settings | None = None) -> float:
+    return -abs(float(paper_account_config(settings)["portfolio_drawdown_stop"]))
+
+
+def drawdown_warn_line(settings: Settings | None = None) -> float:
+    return -abs(float(paper_account_config(settings)["drawdown_warn"]))
+
+
+FLATTEN_INCOMPLETE_TITLE = "flatten incomplete"
+
+
+def maybe_flatten_incomplete_alert(
+    *,
+    strategy_id: str,
+    account_id: str,
+    trade_date: str,
+    positions: dict[str, Any],
+    settings: Settings | None = None,
+) -> dict[str, Any] | None:
+    """Raise/refresh one open alert while a halted book still holds unsellable lots."""
+    settings = settings or get_settings()
+    open_qty = sum(int((item or {}).get("qty") or 0) for item in (positions or {}).values())
+    if open_qty <= 0:
+        return None
+    symbols = sorted(
+        f"{symbol}:{int(item.get('qty') or 0)}"
+        for symbol, item in (positions or {}).items()
+        if int((item or {}).get("qty") or 0) > 0
+    )
+    detail = json.dumps(
+        {
+            "schema": "asqt.alert.v1",
+            "kind": "flatten_incomplete",
+            "summary": f"{strategy_id} 未完成平仓，仍持有 {open_qty} 股",
+            "strategy_id": strategy_id,
+            "account_id": account_id,
+            "trade_date": trade_date,
+            "open_qty": open_qty,
+            "positions": symbols,
+            "action": "跌停/停牌等导致当日无法卖出；下一交易日继续强平。",
+        },
+        ensure_ascii=False,
+    )
+    existing = query_all(
+        """
+        SELECT alert_id FROM alert
+        WHERE status = 'open' AND category = 'drawdown' AND title = ?
+          AND detail LIKE ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (FLATTEN_INCOMPLETE_TITLE, f"%{strategy_id}%"),
+        settings=settings,
+    )
+    alerts = LocalAlertService(settings)
+    if existing:
+        execute(
+            "UPDATE alert SET detail = ?, updated_at = ? WHERE alert_id = ?",
+            (detail, _now(), existing[0]["alert_id"]),
+            settings=settings,
+        )
+        rows = query_all(
+            "SELECT * FROM alert WHERE alert_id = ?",
+            (existing[0]["alert_id"],),
+            settings=settings,
+        )
+        return rows[0] if rows else None
+    return alerts.raise_alert("high", "drawdown", FLATTEN_INCOMPLETE_TITLE, detail)
+
+
+def close_flatten_incomplete_alerts(
+    *,
+    strategy_id: str,
+    settings: Settings | None = None,
+) -> int:
+    settings = settings or get_settings()
+    rows = query_all(
+        """
+        SELECT alert_id FROM alert
+        WHERE status = 'open' AND category = 'drawdown' AND title = ?
+          AND detail LIKE ?
+        """,
+        (FLATTEN_INCOMPLETE_TITLE, f"%{strategy_id}%"),
+        settings=settings,
+    )
+    alerts = LocalAlertService(settings)
+    for row in rows:
+        alerts.close_alert(row["alert_id"], reason=f"{strategy_id} flatten complete")
+    return len(rows)
+
+
+STRATEGY_HALT_TITLE = "strategy drawdown halt"
+
+
+def close_strategy_halt_alerts(
+    *,
+    strategy_id: str,
+    reason: str,
+    settings: Settings | None = None,
+) -> int:
+    """Close open strategy-halt / flatten-incomplete alerts for one book."""
+    settings = settings or get_settings()
+    rows = query_all(
+        """
+        SELECT alert_id FROM alert
+        WHERE status = 'open' AND category = 'drawdown'
+          AND title IN (?, ?)
+          AND detail LIKE ?
+        """,
+        (STRATEGY_HALT_TITLE, FLATTEN_INCOMPLETE_TITLE, f"%{strategy_id}%"),
+        settings=settings,
+    )
+    alerts = LocalAlertService(settings)
+    for row in rows:
+        alerts.close_alert(row["alert_id"], reason=reason)
+    return len(rows)

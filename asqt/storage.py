@@ -6,6 +6,7 @@ import pandas as pd
 
 from asqt.config import Settings, ensure_runtime_dirs, get_settings
 from asqt.contracts import MARKET_DAILY_COLUMNS
+from asqt.records import query_records, record_parquet_path, upsert_records
 from asqt.symbols import infer_instrument_type, split_symbol
 
 
@@ -20,13 +21,8 @@ def market_daily_span(settings: Settings | None = None) -> tuple[str | None, str
 
 
 def market_daily_path(settings: Settings | None = None) -> Path:
-    settings = ensure_runtime_dirs(settings or get_settings())
     # Keep parquet under standard_data for tech-design layout clarity.
-    path = settings.standard_dir / "market_daily.parquet"
-    legacy = settings.parquet_dir / "market_daily.parquet"
-    if not path.exists() and legacy.exists():
-        return legacy
-    return path
+    return record_parquet_path("market_daily", settings)
 
 
 def write_market_daily(records: list[dict], settings: Settings | None = None) -> Path:
@@ -46,25 +42,15 @@ def read_market_daily(
     limit: int | None = None,
     newest_first: bool = False,
 ) -> list[dict]:
-    path = market_daily_path(settings)
-    if not path.exists():
-        return []
-
-    frame = pd.read_parquet(path)
-    missing = [column for column in MARKET_DAILY_COLUMNS if column not in frame.columns]
-    if missing:
-        raise ValueError(f"market_daily parquet missing columns: {missing}")
-    if symbol:
-        frame = frame[frame["symbol"] == symbol]
-    if start:
-        frame = frame[frame["trade_date"] >= start]
-    if end:
-        frame = frame[frame["trade_date"] <= end]
-    ascending = [not newest_first, True]
-    frame = frame.sort_values(["trade_date", "symbol"], ascending=ascending)
-    if limit is not None:
-        frame = frame.head(int(limit))
-    return frame.to_dict(orient="records")
+    return query_records(
+        "market_daily",
+        symbol=symbol,
+        start=start,
+        end=end,
+        settings=settings,
+        limit=limit,
+        newest_first=newest_first,
+    )
 
 
 def _volume_change(current, previous) -> tuple[float | None, str]:
@@ -242,21 +228,4 @@ def read_market_snapshot(
 
 def upsert_market_daily(records: list[dict], settings: Settings | None = None) -> Path:
     """Merge by (symbol, trade_date); keep other symbols and dates untouched."""
-    settings = ensure_runtime_dirs(settings or get_settings())
-    path = settings.standard_dir / "market_daily.parquet"
-    incoming = pd.DataFrame(records, columns=list(MARKET_DAILY_COLUMNS))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if incoming.empty:
-        return path
-    if path.exists():
-        existing = pd.read_parquet(path)
-        incoming_keys = incoming[["symbol", "trade_date"]].drop_duplicates()
-        existing = existing.merge(incoming_keys, on=["symbol", "trade_date"], how="left", indicator=True)
-        existing = existing[existing["_merge"] == "left_only"].drop(columns=["_merge"])
-        frame = pd.concat([existing, incoming], ignore_index=True)
-    else:
-        frame = incoming
-    frame = frame.drop_duplicates(subset=["symbol", "trade_date"], keep="last")
-    frame = frame.sort_values(["trade_date", "symbol"])
-    frame.to_parquet(path, index=False)
-    return path
+    return upsert_records("market_daily", records, settings=settings)

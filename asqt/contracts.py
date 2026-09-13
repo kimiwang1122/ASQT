@@ -16,6 +16,19 @@ MARKET_DAILY_COLUMNS: tuple[str, ...] = (
     "version",
 )
 
+MARKET_EVENT_COLUMNS: tuple[str, ...] = (
+    "event_id",
+    "event_type",
+    "symbol",
+    "event_date",
+    "asof_date",
+    "actor",
+    "value",
+    "payload_json",
+    "source",
+    "version",
+)
+
 TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
     "data_source": (
         "source_id",
@@ -67,6 +80,7 @@ TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "value",
         "model_version",
         "source_run_id",
+        "params_hash",
     ),
     "quality_issue": (
         "issue_id",
@@ -228,6 +242,63 @@ TABLE_COLUMNS: dict[str, tuple[str, ...]] = {
         "started_at",
         "finished_at",
         "created_at",
+    ),
+    "factor_run": (
+        "run_id",
+        "strategy_id",
+        "status",
+        "inflight",
+        "progress_pct",
+        "progress_done",
+        "progress_total",
+        "progress_label",
+        "fail_reason",
+        "detail",
+        "started_at",
+        "finished_at",
+        "created_at",
+    ),
+    "event_pull_run": (
+        "run_id",
+        "status",
+        "inflight",
+        "progress_pct",
+        "progress_done",
+        "progress_total",
+        "progress_label",
+        "fail_reason",
+        "detail",
+        "started_at",
+        "finished_at",
+        "created_at",
+    ),
+    "symbol_tag": (
+        "tag",
+        "symbol",
+        "source",
+        "note",
+        "updated_at",
+    ),
+    "paper_override": (
+        "strategy_id",
+        "symbol",
+        "action",
+        "weight",
+        "reason",
+        "actor",
+        "updated_at",
+    ),
+    "market_event": (
+        "event_id",
+        "event_type",
+        "symbol",
+        "event_date",
+        "asof_date",
+        "actor",
+        "value",
+        "payload_json",
+        "source",
+        "version",
     ),
 }
 

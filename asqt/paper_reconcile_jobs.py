@@ -24,6 +24,10 @@ STRATEGY_LABEL = {
     "etf_momentum_topk": "ETF 动量 TopK",
     "stock_lowvol_momentum": "股票低波动量",
     "etf_ma_momentum_filter": "ETF 均线动量过滤",
+    "stock_short_reversal_topk": "股票短反转 TopK",
+    "stock_momentum_volume_confirm": "股票动量量能确认",
+    "stock_momentum_skip_month": "股票跳月动量",
+    "stock_holder_increase_follow": "股票股东增持跟随",
 }
 
 
@@ -57,7 +61,7 @@ def cash_reconcile_snapshot(settings: Settings | None = None) -> dict[str, Any]:
         "last": _last_cash_reconcile_task(settings=settings),
         "note": (
             f"每个交易日 {cash_reconcile_window_label()} 自动财务对账（与 19:15 跨源、20:05 cron 错开）；"
-            "结果写入最近任务并推送飞书。"
+            "含现金/持仓回推、组合本金份额与净资产合计校验；结果写入最近任务并推送飞书。"
         ),
     }
 
@@ -82,7 +86,8 @@ def run_cash_reconcile_job(
     notify: bool = True,
     strategy_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    from asqt.paper import paper_board
+    from asqt.ops import paper_account_config
+    from asqt.paper import paper_admitted_ids, paper_board, portfolio_book_cash_map
 
     settings = ensure_runtime_dirs(settings or get_settings())
     initialize_database(settings)
@@ -107,9 +112,21 @@ def run_cash_reconcile_job(
         settings=settings,
     )
     try:
-        books: list[dict[str, Any]] = []
+        portfolio_cash = float(paper_account_config(settings)["initial_cash"])
+        # Expect shares among books that actually have sessions (this-run funding model).
+        active_ids = []
+        boards_by_id: dict[str, dict[str, Any]] = {}
         for sid in ids:
             board = paper_board(sid, settings)
+            boards_by_id[sid] = board
+            summary = board.get("summary") or {}
+            if int(summary.get("sessions") or 0) > 0 and (board.get("reconcile") or {}).get("checks"):
+                active_ids.append(sid)
+        universe = active_ids or paper_admitted_ids(settings) or list(ids)
+        cash_map = portfolio_book_cash_map(settings, universe=universe)
+        books: list[dict[str, Any]] = []
+        for sid in ids:
+            board = boards_by_id.get(sid) or paper_board(sid, settings)
             summary = board.get("summary") or {}
             reconcile = board.get("reconcile") or {}
             sessions = int(summary.get("sessions") or 0)
@@ -125,44 +142,60 @@ def run_cash_reconcile_job(
                     }
                 )
                 continue
-            books.append(
+            book = _validate_paper_book(
+                strategy_id=sid,
+                summary=summary,
+                reconcile=reconcile,
+                expected_share=cash_map.get(sid),
+                portfolio_cash=portfolio_cash,
+                funding_universe_size=len(universe),
+            )
+            books.append(book)
+        checked = [item for item in books if not item.get("skipped")]
+        book_mismatches = [item for item in checked if not item.get("ok")]
+        skipped = [item for item in books if item.get("skipped")]
+        portfolio = _validate_paper_portfolio(
+            books=checked,
+            portfolio_cash=portfolio_cash,
+            universe=universe,
+            cash_map=cash_map,
+        )
+        mismatches = list(book_mismatches)
+        if portfolio.get("ok") is False:
+            mismatches.append(
                 {
-                    "strategy_id": sid,
-                    "strategy_label": STRATEGY_LABEL.get(sid, sid),
+                    "strategy_id": "__portfolio__",
+                    "strategy_label": "组合资金",
                     "skipped": False,
-                    "ok": bool(reconcile.get("ok")),
-                    "asof": reconcile.get("asof") or summary.get("window_end"),
-                    "initial_cash": reconcile.get("initial_cash"),
-                    "peak_asset": reconcile.get("peak_asset"),
-                    "actual_cash": reconcile.get("actual_cash"),
-                    "expected_cash": reconcile.get("expected_cash"),
-                    "cash_diff": reconcile.get("cash_diff"),
-                    "market_value": reconcile.get("market_value"),
-                    "end_asset": reconcile.get("end_asset"),
-                    "qty_mismatches": len(reconcile.get("qty_mismatches") or []),
-                    "failed_checks": [
-                        row.get("name")
-                        for row in (reconcile.get("checks") or [])
-                        if not row.get("ok")
-                    ],
+                    "ok": False,
+                    "failed_checks": list(portfolio.get("failed_checks") or []),
                 }
             )
-        checked = [item for item in books if not item.get("skipped")]
-        mismatches = [item for item in checked if not item.get("ok")]
-        skipped = [item for item in books if item.get("skipped")]
+
         if not checked:
             status = "success"
             summary_text = f"财务对账跳过 · 无可用账本（{len(skipped)}）"
         elif not mismatches:
             status = "success"
-            summary_text = f"财务对账通过 · {len(checked)}/{len(checked)}"
+            nav = portfolio.get("nav")
+            summary_text = (
+                f"财务对账通过 · {len(checked)}/{len(checked)}；组合净资产 {float(nav):.2f}"
+                if nav is not None
+                else f"财务对账通过 · {len(checked)}/{len(checked)}"
+            )
         else:
             status = "partial"
-            bad = "、".join(item["strategy_label"] for item in mismatches[:3])
-            summary_text = f"财务对账不一致 · {len(mismatches)}/{len(checked)}（{bad}）"
+            labels = [item["strategy_label"] for item in book_mismatches[:3]]
+            if portfolio.get("ok") is False:
+                labels = (labels + ["组合资金"])[:3]
+            bad = "、".join(labels) if labels else "组合资金"
+            summary_text = f"财务对账不一致 · {len(mismatches)} 项（{bad}）"
         message = (
-            f"trigger={kind}; checked={len(checked)}; ok={len(checked) - len(mismatches)}; "
-            f"mismatch={len(mismatches)}; skipped={len(skipped)}"
+            f"trigger={kind}; checked={len(checked)}; "
+            f"book_ok={len(checked) - len(book_mismatches)}; "
+            f"book_mismatch={len(book_mismatches)}; skipped={len(skipped)}; "
+            f"portfolio_ok={portfolio.get('ok')}; deployed={portfolio.get('deployed')}; "
+            f"nav={portfolio.get('nav')}"
         )
         execute(
             """
@@ -183,6 +216,7 @@ def run_cash_reconcile_job(
             "mismatch_count": len(mismatches),
             "skipped_count": len(skipped),
             "books": books,
+            "portfolio": portfolio,
         }
         if notify:
             _notify_cash_reconcile(report, settings=settings)
@@ -200,6 +234,127 @@ def run_cash_reconcile_job(
         if notify:
             _notify_cash_reconcile_failure(settings=settings, trigger=kind, error=str(exc))
         raise
+
+
+def _approx(a: float, b: float, *, abs_tol: float = 0.05, rel: float = 1e-6) -> bool:
+    return abs(float(a) - float(b)) <= max(abs_tol, abs(float(b)) * rel)
+
+
+def _validate_paper_book(
+    *,
+    strategy_id: str,
+    summary: dict[str, Any],
+    reconcile: dict[str, Any],
+    expected_share: float | None,
+    portfolio_cash: float,
+    funding_universe_size: int,
+) -> dict[str, Any]:
+    failed: list[str] = []
+    initial = float(summary.get("initial_cash") or 0)
+    end_asset = float(summary.get("end_asset") or 0)
+    cash = float(summary.get("cash") or 0)
+    market_value = float(summary.get("market_value") or 0)
+    peak = float(summary.get("peak_asset") or 0)
+    total_return = float(summary.get("total_return") or 0)
+    peak_return = float(summary.get("peak_return") or 0)
+
+    if not bool(reconcile.get("ok")):
+        failed.extend(
+            [
+                str(row.get("name") or "对账项")
+                for row in (reconcile.get("checks") or [])
+                if not row.get("ok")
+            ]
+            or ["财务回推"]
+        )
+    if reconcile.get("qty_mismatches"):
+        failed.append("持仓数量")
+
+    if expected_share is not None and not _approx(initial, expected_share, abs_tol=0.02):
+        failed.append("本金份额")
+    if not _approx(end_asset, cash + market_value, abs_tol=0.05):
+        failed.append("净资产恒等式")
+    if initial > 0 and not _approx(total_return, end_asset / initial - 1.0, abs_tol=1e-6):
+        failed.append("累计收益")
+    if initial > 0 and not _approx(peak_return, peak / initial - 1.0, abs_tol=1e-6):
+        failed.append("峰值收益")
+    if peak + 1e-9 < end_asset:
+        failed.append("峰值资产")
+    # Guard against legacy full-cash books when portfolio is shared across N>1.
+    if (
+        funding_universe_size > 1
+        and expected_share is not None
+        and expected_share < portfolio_cash * 0.9
+        and initial >= portfolio_cash * 0.95
+    ):
+        failed.append("本金未均分")
+
+    return {
+        "strategy_id": strategy_id,
+        "strategy_label": STRATEGY_LABEL.get(strategy_id, strategy_id),
+        "skipped": False,
+        "ok": not failed,
+        "asof": reconcile.get("asof") or summary.get("window_end"),
+        "initial_cash": initial,
+        "expected_share": expected_share,
+        "peak_asset": peak,
+        "actual_cash": reconcile.get("actual_cash"),
+        "expected_cash": reconcile.get("expected_cash"),
+        "cash_diff": reconcile.get("cash_diff"),
+        "market_value": market_value,
+        "end_asset": end_asset,
+        "total_return": total_return,
+        "qty_mismatches": len(reconcile.get("qty_mismatches") or []),
+        "failed_checks": failed,
+    }
+
+
+def _validate_paper_portfolio(
+    *,
+    books: list[dict[str, Any]],
+    portfolio_cash: float,
+    universe: list[str],
+    cash_map: dict[str, float],
+) -> dict[str, Any]:
+    failed: list[str] = []
+    if not books:
+        return {
+            "ok": True,
+            "portfolio_cash": portfolio_cash,
+            "funding_universe": universe,
+            "deployed": 0.0,
+            "nav": 0.0,
+            "funding_complete": False,
+            "failed_checks": [],
+        }
+    deployed = round(sum(float(item.get("initial_cash") or 0) for item in books), 4)
+    nav = round(sum(float(item.get("end_asset") or 0) for item in books), 4)
+    active_ids = {str(item.get("strategy_id")) for item in books}
+    expected_deployed = round(
+        sum(float(cash_map.get(sid) or 0) for sid in active_ids if sid in cash_map),
+        4,
+    )
+    funding_complete = active_ids >= set(universe) and len(universe) > 0
+    if expected_deployed > 0 and not _approx(deployed, expected_deployed, abs_tol=0.05):
+        failed.append("已部署本金合计")
+    if funding_complete and not _approx(deployed, portfolio_cash, abs_tol=0.05):
+        failed.append("组合本金合计")
+    # Detect old 5× full-cash inflation: NAV near N * portfolio.
+    n = max(1, len(universe))
+    if n > 1 and nav > portfolio_cash * (n * 0.75):
+        failed.append("净资产疑似满额加总")
+    if funding_complete and not (portfolio_cash * 0.4 <= nav <= portfolio_cash * 1.8):
+        failed.append("组合净资产异常")
+    return {
+        "ok": not failed,
+        "portfolio_cash": portfolio_cash,
+        "funding_universe": universe,
+        "deployed": deployed,
+        "expected_deployed": expected_deployed,
+        "nav": nav,
+        "funding_complete": funding_complete,
+        "failed_checks": failed,
+    }
 
 
 def recover_orphaned_cash_reconcile_runs(settings: Settings | None = None) -> int:
@@ -264,20 +419,31 @@ def _notify_cash_reconcile(report: dict[str, Any], *, settings: Settings) -> Non
             lines_preview.append(f"{item.get('strategy_label')}：尚无账本")
             continue
         if item.get("ok"):
+            share = item.get("expected_share")
+            share_txt = f"；份额 {share}" if share is not None else ""
             lines_preview.append(
-                f"{item.get('strategy_label')}：通过（现金差额 {item.get('cash_diff')}）"
+                f"{item.get('strategy_label')}：通过（现金差额 {item.get('cash_diff')}{share_txt}）"
             )
         else:
             fails = "、".join(item.get("failed_checks") or []) or "检查项"
             lines_preview.append(
                 f"{item.get('strategy_label')}：不一致（{fails}；现金差额 {item.get('cash_diff')}）"
             )
+    portfolio = report.get("portfolio") or {}
+    if portfolio:
+        port_status = "通过" if portfolio.get("ok") else "不一致"
+        fails = "、".join(portfolio.get("failed_checks") or [])
+        lines_preview.append(
+            f"组合资金：{port_status} · 本金 {portfolio.get('portfolio_cash')} · "
+            f"已部署 {portfolio.get('deployed')} · 净资产 {portfolio.get('nav')}"
+            + (f"（{fails}）" if fails else "")
+        )
     if all_skipped:
         action = "尚无模拟账本，未做现金/持仓核对；请先跑模拟后再对账。"
     elif clean:
-        action = "成交回推现金/持仓与账本一致，无需处理。"
+        action = "成交回推与组合本金份额校验通过，无需处理。"
     else:
-        action = "请到交易页「财务对账」核对不一致账本；不一致不自动急停。"
+        action = "请到交易页「财务对账」核对；本金未均分请重置后重跑模拟；不一致不自动急停。"
     payload = {
         "schema": "asqt.alert.v1",
         "kind": "cash_reconcile",
@@ -288,6 +454,7 @@ def _notify_cash_reconcile(report: dict[str, Any], *, settings: Settings) -> Non
         "skipped_count": report.get("skipped_count"),
         "books": books,
         "book_lines": lines_preview,
+        "portfolio": portfolio,
         "action": action,
     }
     alerts = LocalAlertService(settings)

@@ -21,6 +21,13 @@ from asqt.research_jobs import (
     recover_orphaned_research_runs,
     start_backtest_job,
 )
+from asqt.factor_jobs import (
+    FactorBusy,
+    active_factor_run,
+    get_factor_run,
+    recover_orphaned_factor_runs,
+    start_factor_compute_job,
+)
 from asqt.sync import (
     Busy,
     abort_inflight_sync_runs,
@@ -42,6 +49,7 @@ GATE_DENY_MESSAGES = {
     "missing_version_pins": "回测报告缺少参数组或数据版本钉扎，不能准入或恢复模拟。",
     "lifecycle change requires a reason": "改生命周期必须填写原因。",
     "kill switch change requires a reason": "请填写急停原因（不能全是空格）。",
+    "clear strategy halt requires a reason": "请填写解除单策略平仓的原因（不能全是空格）。",
     "paper_busy": "模拟盘运行中，请勿重复提交",
 }
 
@@ -94,6 +102,20 @@ class SyncBody(BaseModel):
     overlap_days: int = Field(default=1, ge=1, le=10)
 
 
+class RecordsUpsertBody(BaseModel):
+    rows: list[dict] = Field(default_factory=list)
+
+
+class RecordsPullBody(BaseModel):
+    source: str = "baostock"
+    symbols: list[str] | None = None
+    overlap_days: int = Field(default=1, ge=1, le=10)
+    start: str | None = None
+    end: str | None = None
+    run_check: bool = True
+    today: str | None = None
+
+
 class LifecycleBody(BaseModel):
     action: str
     reason: str
@@ -112,17 +134,61 @@ class PaperTradingBody(BaseModel):
 class PaperConfigBody(BaseModel):
     initial_cash: float = Field(default=1_000_000, ge=10_000, le=100_000_000)
     commission_per_myriad: float = Field(default=2.5, ge=0, le=50)
+    portfolio_drawdown_stop_pct: float = Field(default=12.0, ge=0, le=80)
+    strategy_drawdown_stop_pct: float = Field(default=12.0, ge=0, le=80)
+    drawdown_warn_pct: float = Field(default=8.0, ge=0, le=80)
 
 
 class PaperRunBody(BaseModel):
     strategy_id: str = "all"
-    days: int = Field(default=20, ge=2, le=240)
+    strategy_ids: list[str] | None = None
+    # Hard ceiling for request validation; runtime still caps to available sessions - 1.
+    days: int = Field(default=20, ge=2, le=2000)
     background: bool = True
+    mode: str = "sequential"
+
+
+class PaperHaltClearBody(BaseModel):
+    strategy_id: str
+    reason: str
 
 
 class AlertCloseBatchBody(BaseModel):
     alert_ids: list[str] = Field(default_factory=list)
     reason: str | None = None
+
+
+class TagUpsertBody(BaseModel):
+    rows: list[dict] = Field(default_factory=list)
+    actor: str = "operator"
+
+
+class PaperOverrideBody(BaseModel):
+    strategy_id: str
+    symbol: str
+    action: str
+    weight: float | None = None
+    reason: str | None = None
+    actor: str = "operator"
+
+
+class PaperOverrideDeleteBody(BaseModel):
+    strategy_id: str
+    symbol: str
+    actor: str = "operator"
+    reason: str | None = None
+
+
+class EventsImportBody(BaseModel):
+    rows: list[dict] | None = None
+    path: str | None = None
+
+
+class EventsPullBody(BaseModel):
+    source: str = "tushare"
+    symbols: list[str] | None = None
+    start: str | None = None
+    end: str | None = None
 
 
 def create_app() -> FastAPI:
@@ -135,6 +201,10 @@ def create_app() -> FastAPI:
         _app.state.sync_stop = stop
         recover_orphaned_sync_runs(settings)
         recover_orphaned_research_runs(settings)
+        recover_orphaned_factor_runs(settings)
+        from asqt.event_jobs import recover_orphaned_event_pull_runs
+
+        recover_orphaned_event_pull_runs(settings)
         from asqt.paper_jobs import recover_orphaned_paper_runs
         from asqt.paper_reconcile_jobs import recover_orphaned_cash_reconcile_runs
         from asqt.reconcile_jobs import recover_orphaned_reconcile_runs
@@ -225,6 +295,7 @@ def create_app() -> FastAPI:
         limit_count = query_all("SELECT COUNT(*) AS c FROM limit_suspension", settings=settings)[0]["c"]
         factor_count = query_all("SELECT COUNT(*) AS c FROM factor_signal", settings=settings)[0]["c"]
         from asqt.ops import kill_engaged, paper_trading_enabled
+        from asqt.paper import max_paper_run_days
 
         return {
             "data_sources": data_sources,
@@ -240,6 +311,7 @@ def create_app() -> FastAPI:
             "factor_signal_rows": factor_count,
             "kill_switch": kill_engaged(settings),
             "paper_trading": paper_trading_enabled(settings),
+            "max_paper_days": max_paper_run_days(settings),
             "ports": port_entries(),
             "layout": settings.layout(),
         }
@@ -287,12 +359,130 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/api/factors")
-    def factors(limit: int = Query(default=200, ge=1, le=5000)) -> list[dict]:
-        return query_all(
-            "SELECT * FROM factor_signal ORDER BY trade_date DESC, symbol, factor_name LIMIT ?",
-            (limit,),
+    def factors(
+        trade_date: str | None = Query(default=None),
+        factor_name: str | None = Query(default=None),
+        symbol: str | None = Query(default=None),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=10, ge=1, le=200),
+        limit: int | None = Query(default=None, ge=1, le=5000),
+    ) -> dict:
+        """List factor_signal rows with fuzzy name/symbol match and pagination.
+
+        ``limit`` is accepted for backward compatibility: when set without an
+        explicit page flow, it caps the page size (legacy clients used limit only).
+        """
+        clauses: list[str] = []
+        params: list[object] = []
+        if trade_date:
+            clauses.append("trade_date = ?")
+            params.append(trade_date)
+        if factor_name:
+            clauses.append("factor_name LIKE ?")
+            params.append(f"%{factor_name.strip()}%")
+        if symbol:
+            clauses.append("symbol LIKE ?")
+            params.append(f"%{symbol.strip()}%")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        total_row = query_all(
+            f"SELECT COUNT(*) AS c FROM factor_signal {where}",
+            tuple(params),
             settings=settings,
         )
+        total = int(total_row[0]["c"]) if total_row else 0
+        size = int(limit) if limit is not None else int(page_size)
+        size = max(1, min(size, 200 if limit is None else 5000))
+        pages = max(1, (total + size - 1) // size) if total else 1
+        page_n = min(max(1, int(page)), pages)
+        offset = (page_n - 1) * size
+        items = query_all(
+            f"""
+            SELECT * FROM factor_signal {where}
+            ORDER BY trade_date DESC, symbol, factor_name
+            LIMIT ? OFFSET ?
+            """,
+            tuple(params) + (size, offset),
+            settings=settings,
+        )
+        return {
+            "items": items,
+            "total": total,
+            "page": page_n,
+            "pages": pages,
+            "page_size": size,
+        }
+
+    @app.get("/api/factors/compute/active")
+    def factors_compute_active() -> dict:
+        return {"active": active_factor_run(settings)}
+
+    @app.get("/api/factors/compute/{run_id}")
+    def factors_compute_detail(run_id: str) -> dict:
+        row = get_factor_run(run_id, settings=settings)
+        if not row:
+            raise HTTPException(status_code=404, detail="因子计算任务不存在")
+        return row
+
+    @app.post("/api/factors/compute")
+    def factors_compute(payload: dict | None = None) -> dict:
+        body = payload or {}
+        strategy_ids = body.get("strategy_ids")
+        strategy_id = body.get("strategy_id") or "all"
+        persist_parquet = bool(body.get("persist_parquet", True))
+        write_sqlite = bool(body.get("write_sqlite", True))
+        try:
+            if strategy_ids is not None:
+                if not isinstance(strategy_ids, list):
+                    raise ValueError("strategy_ids must be a list")
+                return start_factor_compute_job(
+                    strategy_ids=strategy_ids,
+                    persist_parquet=persist_parquet,
+                    write_sqlite=write_sqlite,
+                    settings=settings,
+                    background=True,
+                )
+            return start_factor_compute_job(
+                strategy_id,
+                persist_parquet=persist_parquet,
+                write_sqlite=write_sqlite,
+                settings=settings,
+                background=True,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except FactorBusy as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/selectors/preview")
+    def selectors_preview(payload: dict | None = None) -> dict:
+        """Preview select_targets weights without writing paper/target_position."""
+        from asqt.storage import read_market_daily
+        from asqt.strategies import STRATEGY_SPECS, weights_for
+
+        body = payload or {}
+        strategy_id = str(body.get("strategy_id") or "").strip()
+        asof = str(body.get("asof") or "").strip()
+        if not strategy_id or strategy_id not in STRATEGY_SPECS:
+            raise HTTPException(status_code=400, detail="unknown strategy_id")
+        if not asof:
+            raise HTTPException(status_code=400, detail="asof required")
+        params = body.get("params")
+        if params is not None and not isinstance(params, dict):
+            raise HTTPException(status_code=400, detail="params must be an object")
+        rows = read_market_daily(end=asof, settings=settings)
+        limits = query_all(
+            "SELECT * FROM limit_suspension WHERE trade_date = ?",
+            (asof,),
+            settings=settings,
+        )
+        weights = weights_for(strategy_id, rows, asof, limits=limits, params=params)
+        return {
+            "strategy_id": strategy_id,
+            "asof": asof,
+            "weights": weights,
+            "gross": round(sum(weights.values()), 10),
+            "n": len(weights),
+        }
 
     @app.get("/api/market/daily")
     def market_daily(
@@ -310,6 +500,107 @@ def create_app() -> FastAPI:
             limit=limit,
             newest_first=newest,
         )
+
+    @app.get("/api/records/{schema}")
+    def records_query(
+        schema: str,
+        symbol: str | None = Query(default=None),
+        start: str | None = Query(default=None),
+        end: str | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=5000),
+        newest: bool = Query(default=True),
+    ) -> list[dict]:
+        from asqt.records import UnknownRecordSchema, query_records
+
+        try:
+            return query_records(
+                schema,
+                symbol=symbol,
+                start=start,
+                end=end,
+                settings=settings,
+                limit=limit,
+                newest_first=newest,
+            )
+        except UnknownRecordSchema as exc:
+            raise HTTPException(status_code=404, detail={"code": "unknown_schema", "message": str(exc)}) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": "bad_filter", "message": str(exc)}) from exc
+
+    @app.post("/api/records/{schema}/upsert")
+    def records_upsert(schema: str, body: RecordsUpsertBody) -> dict:
+        from asqt.records import UnknownRecordSchema, record_parquet_path, upsert_records
+
+        try:
+            path = upsert_records(schema, body.rows, settings=settings)
+        except UnknownRecordSchema as exc:
+            raise HTTPException(status_code=404, detail={"code": "unknown_schema", "message": str(exc)}) from exc
+        return {
+            "schema": schema,
+            "upserted": len(body.rows),
+            "parquet": str(path),
+            "path": str(record_parquet_path(schema, settings)),
+        }
+
+    @app.post("/api/records/{schema}/pull")
+    def records_pull(schema: str, body: RecordsPullBody | None = None) -> dict:
+        from asqt.pipeline import build_adapter, pull_daily, pull_daily_append
+        from asqt.provider_registry import provider_provides, providers_for
+        from asqt.records import UnknownRecordSchema, get_record_schema
+        from asqt.universe import poc_symbols
+
+        payload = body or RecordsPullBody()
+        try:
+            get_record_schema(schema)
+        except UnknownRecordSchema as exc:
+            raise HTTPException(status_code=404, detail={"code": "unknown_schema", "message": str(exc)}) from exc
+        if schema != "market_daily":
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "pull_unsupported",
+                    "message": f"pull not implemented for schema={schema}",
+                    "providers": providers_for(schema),
+                },
+            )
+        source = (payload.source or "baostock").strip()
+        if not provider_provides(source, schema):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "provider_mismatch",
+                    "message": f"source={source} does not provide {schema}",
+                    "providers": providers_for(schema),
+                },
+            )
+        symbols = [str(item).strip() for item in (payload.symbols or []) if str(item).strip()]
+        if not symbols:
+            symbols = poc_symbols(settings)
+        try:
+            adapter = build_adapter(source)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": "unknown_source", "message": str(exc)}) from exc
+        if payload.start and payload.end:
+            result = pull_daily(
+                symbols,
+                payload.start,
+                payload.end,
+                settings=settings,
+                adapter=adapter,
+                source=source,
+                run_check=payload.run_check,
+            )
+        else:
+            result = pull_daily_append(
+                symbols,
+                settings=settings,
+                adapter=adapter,
+                source=source,
+                today=payload.today,
+                overlap_days=payload.overlap_days,
+                run_check=payload.run_check,
+            )
+        return {"schema": schema, "source": source, "symbols": len(symbols), **result}
 
     @app.get("/api/market/snapshot")
     def market_snapshot(
@@ -489,8 +780,17 @@ def create_app() -> FastAPI:
     @app.post("/api/research/backtest")
     def research_backtest(payload: dict | None = None) -> dict:
         body = payload or {}
+        strategy_ids = body.get("strategy_ids")
         strategy_id = body.get("strategy_id") or "all"
         try:
+            if strategy_ids is not None:
+                if not isinstance(strategy_ids, list):
+                    raise ValueError("strategy_ids must be a list")
+                return start_backtest_job(
+                    strategy_ids=strategy_ids,
+                    settings=settings,
+                    background=True,
+                )
             return start_backtest_job(strategy_id, settings=settings, background=True)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -570,6 +870,9 @@ def create_app() -> FastAPI:
             return set_paper_account_config(
                 initial_cash=body.initial_cash,
                 commission_per_myriad=body.commission_per_myriad,
+                portfolio_drawdown_stop_pct=body.portfolio_drawdown_stop_pct,
+                strategy_drawdown_stop_pct=body.strategy_drawdown_stop_pct,
+                drawdown_warn_pct=body.drawdown_warn_pct,
                 settings=settings,
             )
         except ValueError as exc:
@@ -625,7 +928,9 @@ def create_app() -> FastAPI:
         try:
             return start_paper_job(
                 strategy_id=payload.strategy_id,
+                strategy_ids=payload.strategy_ids,
                 days=payload.days,
+                mode=payload.mode,
                 settings=settings,
                 background=payload.background,
             )
@@ -658,7 +963,11 @@ def create_app() -> FastAPI:
 
         payload = body or PaperRunBody()
         try:
-            return reset_paper_account(strategy_id=payload.strategy_id, settings=settings)
+            return reset_paper_account(
+                strategy_id=payload.strategy_id,
+                strategy_ids=payload.strategy_ids,
+                settings=settings,
+            )
         except PaperBusy as exc:
             raise HTTPException(
                 status_code=409,
@@ -666,6 +975,33 @@ def create_app() -> FastAPI:
             ) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/paper/halt/clear")
+    def paper_halt_clear(body: PaperHaltClearBody) -> dict:
+        from asqt.paper import PaperBusy, clear_strategy_halt
+
+        try:
+            return clear_strategy_halt(
+                body.strategy_id,
+                body.reason,
+                settings=settings,
+            )
+        except PaperBusy as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "paper_busy", "message": str(exc)},
+            ) from exc
+        except ValueError as exc:
+            code = str(exc).strip()
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": code,
+                    "message": GATE_DENY_MESSAGES.get(
+                        code, "请填写解除单策略平仓的原因（不能全是空格）。"
+                    ),
+                },
+            ) from exc
 
     @app.post("/api/paper/daily")
     def paper_daily() -> dict:
@@ -702,6 +1038,201 @@ def create_app() -> FastAPI:
         from asqt.paper import PaperOrderService
 
         return PaperOrderService(settings).list_orders(limit=limit, strategy_id=strategy_id)
+
+    @app.get("/api/tags")
+    def get_tags(
+        tag: str | None = Query(default=None),
+        symbol: str | None = Query(default=None),
+        source: str | None = Query(default=None),
+        limit: int = Query(default=5000, ge=1, le=50_000),
+    ) -> list[dict]:
+        from asqt.tags import list_tags
+
+        return list_tags(tag=tag, symbol=symbol, source=source, limit=limit, settings=settings)
+
+    @app.post("/api/tags")
+    def post_tags(body: TagUpsertBody) -> list[dict]:
+        from asqt.tags import upsert_tags
+
+        try:
+            return upsert_tags(body.rows, actor=body.actor, settings=settings)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": "bad_tag", "message": str(exc)}) from exc
+
+    @app.get("/api/pools/{tag}")
+    def get_pool(tag: str) -> list[dict]:
+        from asqt.tags import list_pool
+
+        try:
+            return list_pool(tag, settings=settings)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": "bad_tag", "message": str(exc)}) from exc
+
+    @app.get("/api/paper/overrides")
+    def get_paper_overrides(strategy_id: str | None = Query(default=None)) -> list[dict]:
+        from asqt.overrides import list_overrides
+
+        return list_overrides(strategy_id=strategy_id, settings=settings)
+
+    @app.put("/api/paper/overrides")
+    def put_paper_override(body: PaperOverrideBody) -> dict:
+        from asqt.overrides import upsert_override
+
+        try:
+            return upsert_override(
+                strategy_id=body.strategy_id,
+                symbol=body.symbol,
+                action=body.action,
+                weight=body.weight,
+                reason=body.reason,
+                actor=body.actor,
+                settings=settings,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": "bad_override", "message": str(exc)}) from exc
+
+    @app.delete("/api/paper/overrides")
+    def delete_paper_override(
+        strategy_id: str = Query(...),
+        symbol: str = Query(...),
+        actor: str = Query(default="operator"),
+        reason: str | None = Query(default=None),
+    ) -> dict:
+        from asqt.overrides import delete_override
+
+        try:
+            return delete_override(
+                strategy_id=strategy_id,
+                symbol=symbol,
+                actor=actor,
+                reason=reason,
+                settings=settings,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail={"code": "not_found", "message": str(exc)}) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": "bad_override", "message": str(exc)}) from exc
+
+    @app.get("/api/events")
+    def get_events(
+        symbol: str | None = Query(default=None),
+        event_type: str | None = Query(default=None),
+        source: str | None = Query(default=None),
+        start: str | None = Query(default=None),
+        end: str | None = Query(default=None),
+        asof: str | None = Query(default=None),
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=10, ge=1, le=200),
+        limit: int | None = Query(default=None, ge=1, le=50_000),
+        newest: bool = Query(default=True),
+    ) -> dict:
+        from asqt.events import count_events, query_events
+
+        size = int(limit) if limit is not None else int(page_size)
+        size = max(1, min(size, 200 if limit is None else 50_000))
+        total = count_events(
+            settings=settings,
+            symbol=symbol,
+            event_type=event_type,
+            source=source,
+            start=start,
+            end=end,
+            asof=asof,
+            fuzzy_symbol=True,
+        )
+        pages = max(1, (total + size - 1) // size) if total else 1
+        page_n = min(max(1, int(page)), pages)
+        offset = (page_n - 1) * size
+        items = query_events(
+            settings=settings,
+            symbol=symbol,
+            event_type=event_type,
+            source=source,
+            start=start,
+            end=end,
+            asof=asof,
+            limit=size,
+            offset=offset,
+            newest_first=newest,
+            fuzzy_symbol=True,
+        )
+        return {
+            "items": items,
+            "total": total,
+            "page": page_n,
+            "pages": pages,
+            "page_size": size,
+        }
+
+    @app.get("/api/events/types")
+    def get_event_types() -> list[str]:
+        from asqt.events import list_event_types
+
+        return list_event_types(settings=settings)
+
+    @app.post("/api/events/import")
+    def post_events_import(body: EventsImportBody | None = None) -> dict:
+        from asqt.events import import_events_from_json
+
+        payload = body or EventsImportBody()
+        try:
+            return import_events_from_json(path=payload.path, rows=payload.rows, settings=settings)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail={"code": "fixture_missing", "message": str(exc)}) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": "bad_events", "message": str(exc)}) from exc
+
+    @app.post("/api/events/pull")
+    def post_events_pull(body: EventsPullBody | None = None) -> dict:
+        from asqt.event_jobs import EventsBusy, start_events_pull_job
+        from asqt.provider_registry import provider_provides, providers_for
+
+        payload = body or EventsPullBody()
+        source = (payload.source or "tushare").strip()
+        if not provider_provides(source, "market_event"):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "provider_mismatch",
+                    "message": f"source={source} does not provide market_event",
+                    "providers": providers_for("market_event"),
+                },
+            )
+        if source != "tushare":
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "pull_unsupported", "message": f"events pull not implemented for source={source}"},
+            )
+        try:
+            return start_events_pull_job(
+                symbols=payload.symbols,
+                start=payload.start,
+                end=payload.end,
+                source=source,
+                settings=settings,
+                background=True,
+            )
+        except EventsBusy as exc:
+            raise HTTPException(status_code=409, detail={"code": "events_busy", "message": str(exc)}) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail={"code": "tushare_token", "message": str(exc)}) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"code": "bad_pull", "message": str(exc)}) from exc
+
+    @app.get("/api/events/pull/active")
+    def events_pull_active() -> dict:
+        from asqt.event_jobs import active_event_pull_run
+
+        return {"active": active_event_pull_run(settings)}
+
+    @app.get("/api/events/pull/{run_id}")
+    def events_pull_detail(run_id: str) -> dict:
+        from asqt.event_jobs import get_event_pull_run
+
+        row = get_event_pull_run(run_id, settings=settings)
+        if not row:
+            raise HTTPException(status_code=404, detail="事件拉取任务不存在")
+        return row
 
     return app
 

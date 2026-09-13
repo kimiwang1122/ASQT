@@ -90,11 +90,41 @@ def run_alert_demo(
         warn = maybe_drawdown_halt(peak=100_000, total_asset=91_500, settings=settings)
         steps.append(_step("4/8 回撤预警 −8%", {"drawdown": warn, "alerts": _last_alert(settings)}))
         _pause(pause_s)
-        halt = maybe_drawdown_halt(peak=100_000, total_asset=87_800, settings=settings)
+        halt = maybe_drawdown_halt(
+            peak=100_000,
+            total_asset=87_800,
+            cash=10_000,
+            market_value=77_800,
+            initial_cash=100_000,
+            account_id="paper:etf_ma_rotate",
+            strategy_id="etf_ma_rotate",
+            trade_date="2024-01-02",
+            settings=settings,
+        )
         steps.append(
             _step(
-                "5/8 回撤停机 −12%（自动急停 + 回撤 critical）",
-                {"drawdown": halt, "kill_engaged": kill_engaged(settings), "alerts": _open_alerts(settings)},
+                "5/8 单策略回撤平仓 −12%（不清全局急停）",
+                {
+                    "drawdown": halt,
+                    "strategy_halt": halt.get("strategy_halt"),
+                    "kill_engaged": kill_engaged(settings),
+                    "alerts": _open_alerts(settings),
+                },
+            )
+        )
+        _pause(pause_s)
+        # Demo the portfolio-level kill path separately (total-fund stop).
+        set_kill_switch(True, "演练组合回撤急停", actor="demo", settings=settings)
+        alerts.raise_alert(
+            "critical",
+            "drawdown",
+            "max drawdown stop",
+            "演练：组合资金回撤达线，全局急停。",
+        )
+        steps.append(
+            _step(
+                "5b/8 组合回撤急停（全局）",
+                {"kill_engaged": kill_engaged(settings), "alerts": _open_alerts(settings)},
             )
         )
         _pause(pause_s)

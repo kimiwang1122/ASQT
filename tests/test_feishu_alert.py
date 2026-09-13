@@ -168,6 +168,7 @@ def test_alert_demo_dry_run_isolated(tmp_path):
     assert "质量闸门" in remote
     assert "日终模拟失败" in remote
     assert "max drawdown warning" in remote
+    assert "strategy drawdown halt" in remote
     assert "kill switch on" in remote
     assert "max drawdown stop" in remote
     assert "演练结束" in remote

@@ -136,10 +136,10 @@ def seed_demo(settings: Settings | None = None) -> dict:
         conn.execute(
             """
             INSERT OR REPLACE INTO factor_signal
-                (trade_date, symbol, factor_name, value, model_version, source_run_id)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (trade_date, symbol, factor_name, value, model_version, source_run_id, params_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            ("2026-08-21", "000001.SZ", "momentum_20d", 0.12, "demo-factor-v0", "seed-demo"),
+            ("2026-08-21", "000001.SZ", "momentum_20d", 0.12, "demo-factor-v0", "seed-demo", ""),
         )
         if not skip_market:
             conn.execute(

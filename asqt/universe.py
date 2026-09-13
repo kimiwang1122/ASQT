@@ -8,6 +8,7 @@ from pathlib import Path
 from asqt.config import Settings, get_settings
 from asqt.db import execute, executemany, initialize_database
 from asqt.symbols import infer_board, infer_instrument_type
+from asqt.tags import sync_universe_tags
 
 COLUMNS = (
     "symbol",
@@ -155,4 +156,5 @@ def apply_universe(settings: Settings | None = None) -> dict[str, int]:
         ],
         settings=settings,
     )
-    return {"stocks": len(payload["stocks"]), "etfs": len(payload["etfs"])}
+    tag_count = sync_universe_tags(rows, settings=settings)
+    return {"stocks": len(payload["stocks"]), "etfs": len(payload["etfs"]), "tags": tag_count}

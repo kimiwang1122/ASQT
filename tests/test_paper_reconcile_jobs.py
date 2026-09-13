@@ -39,6 +39,8 @@ def test_run_cash_reconcile_job_pass(tmp_path, monkeypatch):
     assert report["ok"] is True
     assert report["checked"] == 1
     assert report["mismatch_count"] == 0
+    assert report["portfolio"]["ok"] is True
+    assert report["books"][0]["expected_share"] is not None
     tasks = query_all(
         "SELECT * FROM task_run WHERE task_name = 'cash-reconcile' ORDER BY created_at DESC",
         settings=settings,
@@ -52,6 +54,7 @@ def test_run_cash_reconcile_job_pass(tmp_path, monkeypatch):
     detail = json.loads(alerts[0]["detail"])
     assert detail["kind"] == "cash_reconcile"
     assert "财务对账通过" in detail["summary"]
+    assert "portfolio" in detail
     assert captured.get("row", {}).get("level") == "high"
 
 
@@ -169,6 +172,57 @@ def test_should_auto_cash_reconcile_respects_window(tmp_path, monkeypatch):
     assert should_auto_cash_reconcile(settings) is True
 
 
+def test_run_cash_reconcile_detects_full_cash_not_shared(tmp_path, monkeypatch):
+    """Legacy full-cash books among multi-admitted strategies should fail funding checks."""
+    from asqt.ops import set_paper_account_config
+    from asqt.paper import account_id_for
+    from asqt.strategies import ETF_MA_ROTATE
+
+    settings, _engine, _service = _prepare(tmp_path)
+    set_paper_account_config(initial_cash=100_000, commission_per_myriad=2.5, settings=settings)
+    # Multi-run first so each book is a fair share; then inflate one to full cash.
+    run_paper_days(
+        strategy_ids=[STOCK_MOMENTUM_TOPK, ETF_MA_ROTATE],
+        days=5,
+        settings=settings,
+        mode="sequential",
+    )
+    account_id = account_id_for(STOCK_MOMENTUM_TOPK)
+    rows = query_all(
+        "SELECT trade_date, position_detail FROM account_snapshot WHERE account_id = ?",
+        (account_id,),
+        settings=settings,
+    )
+    for row in rows:
+        detail = json.loads(row["position_detail"] or "{}")
+        detail["initial_cash"] = 100_000.0
+        detail["peak_asset"] = max(float(detail.get("peak_asset") or 0), 100_000.0)
+        execute(
+            "UPDATE account_snapshot SET position_detail = ? WHERE account_id = ? AND trade_date = ?",
+            (json.dumps(detail, ensure_ascii=False), account_id, row["trade_date"]),
+            settings=settings,
+        )
+    monkeypatch.setattr("asqt.adapters.feishu_alert.post_feishu_alert", lambda *_a, **_k: {"ok": True})
+    report = run_cash_reconcile_job(
+        trigger="manual",
+        settings=settings,
+        notify=True,
+        strategy_ids=[STOCK_MOMENTUM_TOPK, ETF_MA_ROTATE],
+    )
+    assert report["task_status"] == "partial"
+    assert report["ok"] is False
+    book = next(item for item in report["books"] if item["strategy_id"] == STOCK_MOMENTUM_TOPK)
+    assert book["ok"] is False
+    assert "本金份额" in (book.get("failed_checks") or []) or "本金未均分" in (book.get("failed_checks") or [])
+    detail = json.loads(
+        query_all(
+            "SELECT detail FROM alert WHERE category='cash_reconcile' AND status='open'",
+            settings=settings,
+        )[0]["detail"]
+    )
+    assert detail["portfolio"]["portfolio_cash"] == 100_000
+
+
 def test_cash_reconcile_alert_format_lines():
     from asqt.alert_format import encode_alert_detail, format_alert_full, format_feishu_text
 
@@ -199,6 +253,13 @@ def test_cash_reconcile_alert_format_lines():
             }
         ],
         "action": "请到交易页「财务对账」核对不一致账本；不一致不自动急停。",
+        "portfolio": {
+            "ok": False,
+            "portfolio_cash": 100_000,
+            "deployed": 1_000_000,
+            "nav": 1_000_000,
+            "failed_checks": ["组合本金合计"],
+        },
     }
     row = {
         "level": "high",
@@ -210,6 +271,7 @@ def test_cash_reconcile_alert_format_lines():
     feishu = format_feishu_text(row)
     assert "类别：财务对账" in full
     assert "现金差额" in full or "差额" in full
+    assert "组合资金" in full
     assert "处置：" in full
     assert "【ASQT告警】重要 · 财务对账" in feishu
     assert "/Users/" not in feishu

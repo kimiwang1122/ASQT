@@ -1,0 +1,52 @@
+{
+  "events": [
+    {
+      "event_id": "fixture-holder-inc-000001-2024-01-05",
+      "event_type": "holder_increase",
+      "symbol": "000001.SZ",
+      "event_date": "2024-01-05",
+      "asof_date": "2024-01-05",
+      "actor": "Demo Holder A",
+      "value": 1000000.0,
+      "payload_json": "{\"in_de\":\"IN\",\"change_vol\":1000000,\"note\":\"fixture\"}",
+      "source": "fixture",
+      "version": "fixture-v1"
+    },
+    {
+      "event_id": "fixture-holder-inc-000002-2024-01-10",
+      "event_type": "holder_increase",
+      "symbol": "000002.SZ",
+      "event_date": "2024-01-10",
+      "asof_date": "2024-01-10",
+      "actor": "Demo Holder B",
+      "value": 500000.0,
+      "payload_json": "{\"in_de\":\"IN\",\"change_vol\":500000,\"note\":\"fixture\"}",
+      "source": "fixture",
+      "version": "fixture-v1"
+    },
+    {
+      "event_id": "fixture-holder-dec-000001-2024-01-15",
+      "event_type": "holder_decrease",
+      "symbol": "000001.SZ",
+      "event_date": "2024-01-15",
+      "asof_date": "2024-01-15",
+      "actor": "Demo Holder A",
+      "value": -200000.0,
+      "payload_json": "{\"in_de\":\"DE\",\"change_vol\":200000,\"note\":\"fixture\"}",
+      "source": "fixture",
+      "version": "fixture-v1"
+    },
+    {
+      "event_id": "fixture-holder-inc-600000-2024-02-01",
+      "event_type": "holder_increase",
+      "symbol": "600000.SH",
+      "event_date": "2024-02-01",
+      "asof_date": "2024-02-01",
+      "actor": "Demo Holder C",
+      "value": 800000.0,
+      "payload_json": "{\"in_de\":\"IN\",\"change_vol\":800000,\"note\":\"future relative to Jan asof\"}",
+      "source": "fixture",
+      "version": "fixture-v1"
+    }
+  ]
+}

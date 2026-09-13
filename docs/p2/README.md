@@ -4,21 +4,21 @@
 修订：2026-09-11  
 整体进度：[../progress.md](../progress.md)（本文件只覆盖 P2 回测口径）。
 
-Q3 组合：**规则择时（ETF 均线轮动）+ A 股动量 TopK + ETF 动量 TopK**；P2.3 另增 **股票低波动量**、**ETF 均线动量过滤**。引擎是 `LocalResearchEngine`（实现 `ResearchEngine`），不在业务层 import `qlib`。
+Q3 组合：**规则择时（ETF 均线轮动）+ A 股动量 TopK + ETF 动量 TopK**；P2.3 另增 **股票低波动量**、**ETF 均线动量过滤**、**股票短反转 TopK**；P2.4 另增 **股票动量量能确认**、**股票跳月动量**。引擎是 `LocalResearchEngine`（实现 `ResearchEngine`），不在业务层 import `qlib`。
 
 ## 验收
 
 ```bash
 .venv/bin/pytest tests/test_p2_research.py tests/test_factors_tune.py
 .venv/bin/asqt research-backtest --strategy all
-.venv/bin/asqt tune --strategy stock_lowvol_momentum
+.venv/bin/asqt tune --strategy stock_short_reversal_topk
 ```
 
 控制台：`#strategy` 看版本与实验，`#review` 看按标的贡献。接口：`GET /api/strategies`、`GET /api/research/experiments`、`GET /api/research/attribution`。控制台重跑回测是异步：`POST /api/research/backtest` 立刻返回 `run_id`，再 `GET /api/research/backtest/{run_id}` 看进度。CLI `research-backtest` 仍同步跑完。调参仅 CLI：`asqt tune`（IS 网格 → 固定 OOS 报告），**不自动改**已 paper 的 `parameter_set_id`。
 
 必须同时成立：
 
-1. 五个策略都产出报告：`etf_ma_rotate`、`stock_momentum_topk`、`etf_momentum_topk`、`stock_lowvol_momentum`、`etf_ma_momentum_filter`
+1. 八个策略都产出报告：`etf_ma_rotate`、`stock_momentum_topk`、`etf_momentum_topk`、`stock_lowvol_momentum`、`etf_ma_momentum_filter`、`stock_short_reversal_topk`、`stock_momentum_volume_confirm`、`stock_momentum_skip_month`
 2. 同一 `data_version` + 参数组再跑，指标与期末权重一致
 3. 样本内 / 样本外按时间切开，OOS 日数 ≥ 1；信号日只看 `trade_date <= asof`
 4. 质量闸门 `block` 时策略进入 `failed`，不得标 `candidate`

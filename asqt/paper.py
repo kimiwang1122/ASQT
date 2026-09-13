@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -11,7 +14,17 @@ from uuid import uuid4
 
 from asqt.config import Settings, ensure_runtime_dirs, get_settings
 from asqt.db import connect, execute, initialize_database, query_all
-from asqt.ops import kill_engaged, maybe_drawdown_halt, paper_account_config, quality_gate
+from asqt.ops import (
+    close_flatten_incomplete_alerts,
+    close_strategy_halt_alerts,
+    kill_engaged,
+    maybe_drawdown_halt,
+    maybe_flatten_incomplete_alert,
+    paper_account_config,
+    quality_gate,
+    reset_portfolio_peak,
+    set_kill_switch,
+)
 from asqt.research_engine import LocalStrategyService
 from asqt.storage import read_market_daily
 from asqt.strategies import STRATEGY_SPECS
@@ -32,6 +45,101 @@ MAX_WEIGHT = {"stock": 0.10, "etf": 0.20}
 PAPER_LOCK_ID = "paper-run"
 PAPER_LOCK_MINUTES = 120
 PAPER_BUSY_MESSAGE = "模拟盘运行中，请勿重复提交"
+
+_paper_cash_overrides: dict[str, float] = {}
+_paper_cash_override_lock = threading.Lock()
+
+
+def _cash_override_key(settings: Settings, strategy_id: str) -> str:
+    return f"{settings.database_path}::{strategy_id}"
+
+
+def _set_cash_override(settings: Settings, strategy_id: str, cash: float) -> None:
+    with _paper_cash_override_lock:
+        _paper_cash_overrides[_cash_override_key(settings, strategy_id)] = float(cash)
+
+
+def _clear_cash_overrides(settings: Settings, strategy_ids: list[str]) -> None:
+    with _paper_cash_override_lock:
+        for sid in strategy_ids:
+            _paper_cash_overrides.pop(_cash_override_key(settings, sid), None)
+
+
+def _get_cash_override(settings: Settings | None, strategy_id: str | None) -> float | None:
+    if settings is None or not strategy_id:
+        return None
+    with _paper_cash_override_lock:
+        value = _paper_cash_overrides.get(_cash_override_key(settings, strategy_id))
+    return None if value is None else float(value)
+
+
+def split_parallel_cash(total: float, n: int) -> list[float]:
+    """Split total into n parts: floor(total/n) each, remainder to the first book."""
+    if n <= 0:
+        raise ValueError("n must be positive")
+    total = float(total)
+    base = math.floor(total / n)
+    amounts = [float(base)] * n
+    amounts[0] = float(total - base * (n - 1))
+    return amounts
+
+
+def paper_admitted_ids(settings: Settings | None = None) -> list[str]:
+    """Paper-status strategies in stable STRATEGY_SPECS order."""
+    settings = ensure_runtime_dirs(settings or get_settings())
+    initialize_database(settings)
+    versions = LocalStrategyService(settings)
+    ids: list[str] = []
+    for sid in STRATEGY_SPECS:
+        current = versions.current_version(sid)
+        if current and current.get("status") == "paper":
+            ids.append(sid)
+    return ids
+
+
+def portfolio_book_cash_map(
+    settings: Settings | None = None,
+    *,
+    universe: list[str] | None = None,
+) -> dict[str, float]:
+    """Map each portfolio book to its share of configured initial_cash."""
+    settings = ensure_runtime_dirs(settings or get_settings())
+    ids = list(universe) if universe is not None else paper_admitted_ids(settings)
+    if not ids:
+        return {}
+    total = float(paper_account_config(settings)["initial_cash"])
+    return dict(zip(ids, split_parallel_cash(total, len(ids))))
+
+
+def _prepare_shared_book_cash(
+    *,
+    ids: list[str],
+    job_key: str,
+    settings: Settings,
+    reason: str,
+) -> list[float]:
+    """Reset run targets and fund each book as a share of portfolio capital.
+
+    Settings「初始资金」is portfolio capital. Split across strategies in *this* run
+    (selected runners), so a solo run of one strategy gets the full amount.
+    """
+    del job_key  # callers still pass job_key for lock/audit context
+    universe = list(ids)
+    if not universe:
+        raise ValueError("paper run requires at least one strategy")
+    cash_map = portfolio_book_cash_map(settings, universe=universe)
+    for sid in ids:
+        _reset_paper_account_locked(
+            strategy_id=sid,
+            actor="system",
+            reason=reason,
+            settings=settings,
+            clear_kill=False,
+        )
+    reset_portfolio_peak(settings)
+    for sid in ids:
+        _set_cash_override(settings, sid, cash_map[sid])
+    return [float(cash_map[sid]) for sid in ids]
 
 
 class PaperBusy(Exception):
@@ -139,15 +247,54 @@ def _fill_price(open_px: float, side: str) -> float:
     return round(open_px * (1.0 - SLIPPAGE), 6)
 
 
-def _empty_state(settings: Settings | None = None) -> dict[str, Any]:
-    cash = float(paper_account_config(settings)["initial_cash"])
+def _empty_state(
+    settings: Settings | None = None,
+    *,
+    strategy_id: str | None = None,
+) -> dict[str, Any]:
+    # Unfunded / reset books stay at 0 until a run sets per-book overrides via
+    # _prepare_shared_book_cash. Do not default to full portfolio initial_cash.
+    override = _get_cash_override(settings, strategy_id)
+    cash = float(override) if override is not None else 0.0
     return {
         "cash": cash,
         "initial_cash": cash,
         "peak_asset": cash,
         "positions": {},
         "tradable": {},
+        "halted": False,
+        "flatten_pending": False,
+        "halt_reason": None,
+        # Durable halt before this session's mutations (build_orders may set halted
+        # in-memory before save; that must not suppress the first Feishu alert).
+        "_prior_halted": False,
     }
+
+
+def _open_position_qty(state: dict[str, Any]) -> int:
+    return sum(int(item.get("qty") or 0) for item in (state.get("positions") or {}).values())
+
+
+def sync_halt_lifecycle(state: dict[str, Any]) -> str:
+    """Normalize halt flags and return UI status: active | flatten_pending | halted."""
+    open_qty = _open_position_qty(state)
+    if state.get("halted") or state.get("flatten_pending"):
+        state["halted"] = True
+        state["flatten_pending"] = open_qty > 0
+        return "flatten_pending" if state["flatten_pending"] else "halted"
+    return "active"
+
+
+def halt_status_of(state: dict[str, Any] | None) -> str:
+    if not state:
+        return "active"
+    if state.get("flatten_pending") or (
+        state.get("halted") and _open_position_qty(state) > 0
+    ):
+        return "flatten_pending"
+    if state.get("halted"):
+        return "halted"
+    return "active"
 
 
 class PaperBroker:
@@ -160,7 +307,8 @@ class PaperBroker:
     def channel_status(self) -> dict[str, Any]:
         return {
             "channel_id": self.channel_id,
-            "available": not kill_engaged(self.settings),
+            # Channel stays available under kill so liquidation sells can still fill.
+            "available": True,
             "kill_switch": kill_engaged(self.settings),
         }
 
@@ -271,11 +419,14 @@ class PaperLedger:
                 settings=self.settings,
             )
         if not rows:
-            return _empty_state(self.settings)
+            return _empty_state(self.settings, strategy_id=self.strategy_id)
         detail = json.loads(rows[0]["position_detail"] or "{}")
-        state = _empty_state(self.settings)
+        state = _empty_state(self.settings, strategy_id=self.strategy_id)
         state["cash"] = float(rows[0]["cash"])
-        fallback = float(paper_account_config(self.settings)["initial_cash"])
+        override = _get_cash_override(self.settings, self.strategy_id)
+        fallback = float(
+            override if override is not None else paper_account_config(self.settings)["initial_cash"]
+        )
         state["initial_cash"] = float(detail.get("initial_cash", fallback))
         state["peak_asset"] = float(detail.get("peak_asset", rows[0]["total_asset"]))
         state["positions"] = {
@@ -289,6 +440,11 @@ class PaperLedger:
         state["tradable"] = {symbol: int(qty) for symbol, qty in (detail.get("tradable") or {}).items()}
         if not state["tradable"]:
             state["tradable"] = {symbol: item["qty"] for symbol, item in state["positions"].items()}
+        state["halted"] = bool(detail.get("halted"))
+        state["flatten_pending"] = bool(detail.get("flatten_pending"))
+        state["halt_reason"] = detail.get("halt_reason")
+        sync_halt_lifecycle(state)
+        state["_prior_halted"] = bool(state.get("halted") or state.get("flatten_pending"))
         return state
 
     def save(self, trade_date: str, state: dict[str, Any], marks: dict[str, float]) -> dict[str, Any]:
@@ -304,11 +460,30 @@ class PaperLedger:
         cash = round(float(state["cash"]), 4)
         total = round(cash + market_value, 4)
         peak = max(float(state.get("peak_asset", state.get("initial_cash", 0))), total)
+        # Prefer durable prior-halt from load(); fall back for callers that skip load.
+        if "_prior_halted" in state:
+            already_halted = bool(state.get("_prior_halted"))
+        else:
+            already_halted = bool(state.get("halted") or state.get("flatten_pending"))
+        was_halted = bool(state.get("halted") or state.get("flatten_pending"))
+        cfg = paper_account_config(self.settings)
+        strategy_stop = -abs(float(cfg["strategy_drawdown_stop"]))
+        book_dd = total / peak - 1.0 if peak > 0 else 0.0
+        if was_halted or book_dd <= strategy_stop:
+            state["halted"] = True
+            state["halt_reason"] = state.get("halt_reason") or "strategy_drawdown"
+            if _open_position_qty(state) > 0:
+                state["flatten_pending"] = True
+        status = sync_halt_lifecycle(state)
         detail = {
             "initial_cash": state.get("initial_cash", paper_account_config(self.settings)["initial_cash"]),
             "peak_asset": peak,
             "positions": positions_out,
             "tradable": {symbol: int(qty) for symbol, qty in state.get("tradable", {}).items() if int(qty) > 0},
+            "halted": bool(state.get("halted")),
+            "flatten_pending": bool(state.get("flatten_pending")),
+            "halt_reason": state.get("halt_reason"),
+            "halt_status": status,
         }
         execute(
             "DELETE FROM account_snapshot WHERE account_id = ? AND trade_date = ?",
@@ -336,13 +511,17 @@ class PaperLedger:
                         "total_asset": total,
                         "peak_asset": peak,
                         "initial_cash": float(detail.get("initial_cash") or 0),
+                        "halted": bool(detail.get("halted")),
+                        "flatten_pending": bool(detail.get("flatten_pending")),
+                        "halt_status": status,
+                        "halt_reason": detail.get("halt_reason"),
                     },
                     ensure_ascii=False,
                 ),
             ),
             settings=self.settings,
         )
-        maybe_drawdown_halt(
+        halt_info = maybe_drawdown_halt(
             peak=peak,
             total_asset=total,
             cash=cash,
@@ -351,9 +530,34 @@ class PaperLedger:
             account_id=self.account_id,
             strategy_id=self.strategy_id,
             trade_date=trade_date,
+            already_halted=already_halted,
             settings=self.settings,
         )
-        return {"cash": cash, "market_value": round(market_value, 4), "total_asset": total, "peak_asset": peak}
+        if status == "flatten_pending":
+            maybe_flatten_incomplete_alert(
+                strategy_id=self.strategy_id,
+                account_id=self.account_id,
+                trade_date=trade_date,
+                positions=positions_out,
+                settings=self.settings,
+            )
+        elif status == "halted":
+            close_flatten_incomplete_alerts(
+                strategy_id=self.strategy_id,
+                settings=self.settings,
+            )
+        # Subsequent saves in this process should treat halt as already notified.
+        state["_prior_halted"] = bool(state.get("halted") or state.get("flatten_pending"))
+        return {
+            "cash": cash,
+            "market_value": round(market_value, 4),
+            "total_asset": total,
+            "peak_asset": peak,
+            "halted": bool(state.get("halted")),
+            "flatten_pending": bool(state.get("flatten_pending")),
+            "halt_status": status,
+            "halt_info": halt_info,
+        }
 
 
 class PaperOrderService:
@@ -389,10 +593,6 @@ class PaperOrderService:
         gate = quality_gate(self.settings)
         if not gate["trade_allowed"]:
             return self._reject_stub(trade_date, strategy_id, "quality_block")
-        if kill_engaged(self.settings):
-            return self._reject_stub(trade_date, strategy_id, "kill_switch")
-        if not self.broker.channel_status()["available"]:
-            return self._reject_stub(trade_date, strategy_id, "channel_unavailable")
 
         dates = self._dates()
         if signal_date is None:
@@ -401,6 +601,46 @@ class PaperOrderService:
             raise ValueError("no prior session for T+1 fill")
         if not self._calendar_open(trade_date):
             return self._reject_stub(trade_date, strategy_id, "calendar_closed")
+
+        ledger = PaperLedger(strategy_id, self.settings)
+        state = ledger.load(before=trade_date)
+        # T+1: yesterday's buys become tradable at next session open.
+        state["tradable"] = {symbol: int(item["qty"]) for symbol, item in state["positions"].items()}
+        global_kill = kill_engaged(self.settings)
+        sync_halt_lifecycle(state)
+        book_halted = bool(state.get("halted") or state.get("flatten_pending"))
+        flatten_only = global_kill or book_halted
+        halt_tag = "kill_switch" if global_kill else ("strategy_halt" if book_halted else "paper")
+
+        rows = read_market_daily(end=trade_date, settings=self.settings)
+        by_key = {(str(row["trade_date"]), str(row["symbol"])): row for row in rows}
+        created: list[dict[str, Any]] = []
+
+        if flatten_only:
+            if global_kill:
+                state["halted"] = True
+                state["halt_reason"] = state.get("halt_reason") or "kill_switch"
+                if _open_position_qty(state) > 0:
+                    state["flatten_pending"] = True
+            created.extend(
+                self._flatten_all(
+                    state=state,
+                    trade_date=trade_date,
+                    strategy_id=strategy_id,
+                    by_key=by_key,
+                    risk_tag=halt_tag,
+                    apply_fills=apply_fills,
+                )
+            )
+            if apply_fills:
+                sync_halt_lifecycle(state)
+                marks = {
+                    symbol: float(by_key[(trade_date, symbol)]["close"])
+                    for symbol in state["positions"]
+                    if (trade_date, symbol) in by_key
+                }
+                ledger.save(trade_date, state, marks)
+            return created
 
         try:
             self.strategies.generate_target_positions(strategy_id, signal_date)
@@ -411,17 +651,10 @@ class PaperOrderService:
             (strategy_id, signal_date),
             settings=self.settings,
         )
-        rows = read_market_daily(end=trade_date, settings=self.settings)
-        by_key = {(str(row["trade_date"]), str(row["symbol"])): row for row in rows}
-        ledger = PaperLedger(strategy_id, self.settings)
-        state = ledger.load(before=trade_date)
-        # T+1: yesterday's buys become tradable at next session open.
-        state["tradable"] = {symbol: int(item["qty"]) for symbol, item in state["positions"].items()}
         nav = _nav(state, by_key, signal_date)
         intended = {row["symbol"]: float(row["target_weight"]) for row in targets}
         intended = self._apply_stops(intended, state, by_key, signal_date)
 
-        created: list[dict[str, Any]] = []
         for symbol, weight in intended.items():
             bar_signal = by_key.get((signal_date, symbol))
             bar_fill = by_key.get((trade_date, symbol))
@@ -463,12 +696,92 @@ class PaperOrderService:
                 bar_fill = by_key.get((trade_date, order["symbol"]))
                 if bar_fill:
                     self._match(order, state, bar_fill, trade_date)
+
+            # Same-day flatten if this session's MTM already breaches strategy stop.
+            cfg = paper_account_config(self.settings)
+            strategy_stop = -abs(float(cfg["strategy_drawdown_stop"]))
             marks = {
                 symbol: float(by_key[(trade_date, symbol)]["close"])
                 for symbol in state["positions"]
                 if (trade_date, symbol) in by_key
             }
+            market_value = sum(
+                int(item["qty"]) * float(marks.get(symbol, item["cost"]))
+                for symbol, item in state["positions"].items()
+                if int(item["qty"]) > 0
+            )
+            total = float(state["cash"]) + market_value
+            peak = max(float(state.get("peak_asset", state.get("initial_cash", 0))), total)
+            if peak > 0 and total / peak - 1.0 <= strategy_stop:
+                state["halted"] = True
+                state["flatten_pending"] = True
+                state["halt_reason"] = "strategy_drawdown"
+                if state["positions"]:
+                    extra = self._flatten_all(
+                        state=state,
+                        trade_date=trade_date,
+                        strategy_id=strategy_id,
+                        by_key=by_key,
+                        risk_tag="strategy_halt",
+                        apply_fills=True,
+                    )
+                    created.extend(extra)
+                sync_halt_lifecycle(state)
+                marks = {
+                    symbol: float(by_key[(trade_date, symbol)]["close"])
+                    for symbol in state["positions"]
+                    if (trade_date, symbol) in by_key
+                }
             ledger.save(trade_date, state, marks)
+        return created
+
+    def _flatten_all(
+        self,
+        *,
+        state: dict[str, Any],
+        trade_date: str,
+        strategy_id: str,
+        by_key: dict[tuple[str, str], dict[str, Any]],
+        risk_tag: str,
+        apply_fills: bool,
+    ) -> list[dict[str, Any]]:
+        """Sell every tradable lot; never buy. Fees apply through normal fill path.
+
+        Uses a dedicated idempotency key so halt retries are not blocked by earlier
+        rejected rebalance sells on the same day (e.g. limit-down).
+        """
+        created: list[dict[str, Any]] = []
+        for symbol, item in list(state["positions"].items()):
+            qty = _lot(min(int(item["qty"]), int(state["tradable"].get(symbol, 0))))
+            bar_fill = by_key.get((trade_date, symbol))
+            if qty <= 0 or not bar_fill:
+                continue
+            order = self._place(
+                trade_date=trade_date,
+                strategy_id=strategy_id,
+                symbol=symbol,
+                side="SELL",
+                quantity=qty,
+                bar_fill=bar_fill,
+                weight=0.0,
+                nav=_nav(state, by_key, trade_date),
+                state=state,
+                risk_tag=risk_tag,
+                idem_suffix="flatten",
+            )
+            created.append(order)
+            if apply_fills:
+                self._match(order, state, bar_fill, trade_date)
+                refreshed = query_all(
+                    "SELECT * FROM standard_order WHERE order_id = ?",
+                    (order["order_id"],),
+                    settings=self.settings,
+                )
+                if refreshed:
+                    created[-1] = refreshed[0]
+        sync_halt_lifecycle(state)
+        if not created:
+            created.extend(self._reject_stub(trade_date, strategy_id, risk_tag))
         return created
 
     def _flatten_missing(
@@ -514,8 +827,12 @@ class PaperOrderService:
         weight: float,
         nav: float,
         state: dict[str, Any],
+        risk_tag: str | None = None,
+        idem_suffix: str | None = None,
     ) -> dict[str, Any]:
         idem_key = f"{strategy_id}|{trade_date}|{symbol}|{side}"
+        if idem_suffix:
+            idem_key = f"{idem_key}|{idem_suffix}"
         existing = query_all(
             "SELECT * FROM standard_order WHERE idem_key = ?",
             (idem_key,),
@@ -525,6 +842,8 @@ class PaperOrderService:
             return existing[0]
 
         tags: list[str] = []
+        if risk_tag and risk_tag not in {"paper", ""}:
+            tags.append(risk_tag)
         status = "risk_pending"
         limit_row = self._limit(symbol, trade_date)
         open_px = float(bar_fill["open"])
@@ -556,6 +875,7 @@ class PaperOrderService:
 
         now = _now()
         order_id = str(uuid4())
+        tag_text = ",".join(tags) if tags else "paper"
         execute(
             """
             INSERT INTO standard_order
@@ -573,7 +893,7 @@ class PaperOrderService:
                 quantity,
                 open_px,
                 trade_date,
-                ",".join(tags) if tags else "paper",
+                tag_text,
                 status,
                 now,
                 now,
@@ -700,24 +1020,45 @@ class PaperOrderService:
         return sorted({str(row["trade_date"]) for row in rows})
 
 
+def max_paper_run_days(settings: Settings | None = None) -> int:
+    """Largest N for paper-run: need N+1 calendar sessions (signal day + fill days)."""
+    settings = ensure_runtime_dirs(settings or get_settings())
+    dates = sorted({str(row["trade_date"]) for row in read_market_daily(settings=settings)})
+    return max(0, len(dates) - 1)
+
+
 def run_paper_days(
     *,
-    strategy_id: str,
+    strategy_id: str = "all",
+    strategy_ids: list[str] | None = None,
     days: int = 20,
     settings: Settings | None = None,
     progress: Any | None = None,
     record_task: bool = True,
+    mode: str = "sequential",
 ) -> dict[str, Any]:
     settings = ensure_runtime_dirs(settings or get_settings())
     initialize_database(settings)
-    with paper_exclusive(settings, holder=f"paper-run:{strategy_id}"):
+    job_key, _ids = normalize_paper_targets(strategy_id, strategy_ids)
+    run_mode = normalize_paper_mode(mode)
+    with paper_exclusive(settings, holder=f"paper-run:{job_key}"):
         return _run_paper_days_locked(
-            strategy_id=strategy_id,
+            strategy_id=job_key,
             days=days,
             settings=settings,
             progress=progress,
             record_task=record_task,
+            mode=run_mode,
         )
+
+
+def normalize_paper_mode(mode: str | None) -> str:
+    value = str(mode or "sequential").strip().lower()
+    if value in {"", "sequential", "normal", "serial"}:
+        return "sequential"
+    if value == "parallel":
+        return "parallel"
+    raise ValueError(f"unknown paper run mode: {mode}")
 
 
 def _run_paper_days_locked(
@@ -727,10 +1068,16 @@ def _run_paper_days_locked(
     settings: Settings,
     progress: Any | None = None,
     record_task: bool = True,
+    mode: str = "sequential",
 ) -> dict[str, Any]:
-    ids = list(STRATEGY_SPECS) if strategy_id == "all" else [strategy_id]
+    job_key, requested = normalize_paper_targets(strategy_id)
     rows = read_market_daily(settings=settings)
     dates = sorted({str(row["trade_date"]) for row in rows})
+    max_days = max(0, len(dates) - 1)
+    if days > max_days:
+        raise ValueError(
+            f"模拟天数不能超过当前可用交易日上限 {max_days}（行情共 {len(dates)} 个交易日）。"
+        )
     if len(dates) < days + 1:
         raise ValueError(f"need {days + 1} sessions, have {len(dates)}")
     from asqt.ops import paper_trading_enabled
@@ -738,7 +1085,7 @@ def _run_paper_days_locked(
     if not paper_trading_enabled(settings):
         raise ValueError("模拟交易开关为关。请先到设置页打开「模拟交易」。")
     versions = LocalStrategyService(settings)
-    if strategy_id == "all":
+    if job_key == "all":
         ids = []
         for sid in STRATEGY_SPECS:
             current = versions.current_version(sid)
@@ -747,112 +1094,74 @@ def _run_paper_days_locked(
         if not ids:
             raise ValueError("没有已准入模拟的策略。请先到策略页提交「准入模拟」。")
     else:
-        ids = [strategy_id]
-        current = versions.current_version(strategy_id)
-        status = current["status"] if current else "missing"
-        if status != "paper":
-            raise ValueError(
-                f"策略尚未准入模拟（{strategy_id}={status}）。请先到策略页提交「准入模拟」。"
-            )
+        ids = list(requested)
+        for sid in ids:
+            current = versions.current_version(sid)
+            status = current["status"] if current else "missing"
+            if status != "paper":
+                raise ValueError(
+                    f"策略尚未准入模拟（{sid}={status}）。请先到策略页提交「准入模拟」。"
+                )
     window = dates[-(days + 1) :]
-    service = PaperOrderService(settings)
-    reports = []
     started = _now()
-    wanted = len(window) - 1
-    grand = wanted * len(ids)
-    done = 0
-    for sid in ids:
-        orders = 0
-        fills = 0
-        halt_reason: str | None = None
-        if kill_engaged(settings):
-            halt_reason = "kill_switch"
-            done += wanted
-            if progress:
-                progress(done, grand, f"{sid} skipped_kill")
-            ledger = PaperLedger(sid, settings)
-            last = query_all(
-                "SELECT * FROM account_snapshot WHERE account_id = ? ORDER BY trade_date",
-                (account_id_for(sid),),
-                settings=settings,
-            )
-            reports.append(
-                {
-                    "strategy_id": sid,
-                    "sessions": wanted,
-                    "orders": 0,
-                    "fills": 0,
-                    "snapshots": 0,
-                    "snapshots_total": len(last),
-                    "last": last[-1] if last else None,
-                    "state": ledger.load(),
-                    "incomplete_reason": "kill_switch",
-                    "skipped": True,
-                }
-            )
-            continue
-        for index, signal_date in enumerate(window[:-1]):
-            fill_date = window[index + 1]
-            created = service.build_orders(fill_date, sid, signal_date=signal_date, apply_fills=True)
-            if kill_engaged(settings) or any(
-                "kill_switch" in str(item.get("risk_tags") or "") for item in created
-            ):
-                halt_reason = "kill_switch"
-            orders += len(created)
-            fills += sum(1 for item in created if item.get("status") == "filled")
-            done += 1
-            if progress and (done == 1 or done == grand or done % 5 == 0):
-                progress(done, grand, f"{sid} {fill_date}")
-            if halt_reason == "kill_switch":
-                remaining = wanted - (index + 1)
-                done += remaining
-                if progress and remaining:
-                    progress(done, grand, f"{sid} halt_kill")
-                break
-        ledger = PaperLedger(sid, settings)
-        last = query_all(
-            "SELECT * FROM account_snapshot WHERE account_id = ? ORDER BY trade_date",
-            (account_id_for(sid),),
+    run_mode = normalize_paper_mode(mode)
+    if run_mode == "parallel":
+        reports = _run_paper_days_parallel(
+            ids=ids,
+            window=window,
             settings=settings,
+            progress=progress,
+            job_key=job_key,
         )
-        in_window = [row for row in last if window[0] < str(row["trade_date"]) <= window[-1]]
-        incomplete = None
-        if len(in_window) < wanted:
-            if halt_reason == "kill_switch" or kill_engaged(settings):
-                incomplete = "kill_switch"
-            else:
-                incomplete = "short_snapshots"
-        reports.append(
-            {
-                "strategy_id": sid,
-                "sessions": wanted,
-                "orders": orders,
-                "fills": query_all(
-                    """
-                    SELECT COUNT(*) AS c FROM execution_fill f
-                    JOIN standard_order o ON o.order_id = f.order_id
-                    WHERE o.strategy_id = ?
-                    """,
-                    (sid,),
-                    settings=settings,
-                )[0]["c"],
-                "snapshots": len(in_window),
-                "snapshots_total": len(last),
-                "last": last[-1] if last else None,
-                "state": ledger.load(),
-                "incomplete_reason": incomplete,
-            }
+    else:
+        reports = _run_paper_days_sequential(
+            ids=ids,
+            window=window,
+            settings=settings,
+            progress=progress,
+            job_key=job_key,
         )
+    portfolio_cash = float(paper_account_config(settings)["initial_cash"])
+    # Funding universe = strategies in this run (not all admitted).
+    universe = list(ids)
+    cash_map = portfolio_book_cash_map(settings, universe=universe)
+    book_cash = [float(cash_map[sid]) for sid in ids]
+    funded: list[float] = []
+    for item in reports:
+        last = item.get("last")
+        if last and last.get("position_detail"):
+            try:
+                detail = json.loads(last["position_detail"] or "{}")
+                funded.append(float(detail.get("initial_cash") or 0))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+        elif int(item.get("snapshots") or 0) > 0:
+            funded.append(float((item.get("state") or {}).get("initial_cash") or 0))
+    detail_extra = ""
+    if funded:
+        expected_funded = book_cash[: len(funded)]
+        if len(funded) == len(ids) and any(
+            abs(got - want) > 0.02 for got, want in zip(funded, expected_funded)
+        ):
+            detail_extra = (
+                f"；本金校验异常：账本 {[round(x, 2) for x in funded]}"
+                f" ≠ 份额 {[round(x, 2) for x in expected_funded]}"
+                f"（组合 {portfolio_cash:.2f} / {len(universe)}）"
+            )
     ok = all(item.get("incomplete_reason") is None for item in reports)
     reasons = sorted({item["incomplete_reason"] for item in reports if item.get("incomplete_reason")})
-    detail = _paper_run_detail(ok=ok, reasons=reasons, reports=reports, days=days)
+    detail = _paper_run_detail(ok=ok, reasons=reasons, reports=reports, days=days) + detail_extra
     summary = {
         "ok": ok,
         "days": days,
+        "mode": run_mode,
         "window": {"start": window[0], "end": window[-1]},
         "reports": reports,
         "incomplete_reasons": reasons,
         "detail": detail,
+        "portfolio_cash": portfolio_cash,
+        "book_cash": book_cash,
+        "funding_universe": universe,
     }
     if record_task:
         execute(
@@ -868,6 +1177,7 @@ def _run_paper_days_locked(
                 json.dumps(
                     {
                         "days": days,
+                        "mode": run_mode,
                         "window": summary["window"],
                         "incomplete_reasons": reasons,
                         "detail": detail,
@@ -878,6 +1188,241 @@ def _run_paper_days_locked(
             settings=settings,
         )
     return summary
+
+
+def _skipped_kill_report(
+    *,
+    sid: str,
+    wanted: int,
+    window: list[str],
+    settings: Settings,
+) -> dict[str, Any]:
+    ledger = PaperLedger(sid, settings)
+    last = query_all(
+        "SELECT * FROM account_snapshot WHERE account_id = ? ORDER BY trade_date",
+        (account_id_for(sid),),
+        settings=settings,
+    )
+    return {
+        "strategy_id": sid,
+        "sessions": wanted,
+        "orders": 0,
+        "fills": 0,
+        "snapshots": 0,
+        "snapshots_total": len(last),
+        "last": last[-1] if last else None,
+        "state": ledger.load(),
+        "incomplete_reason": "kill_switch",
+        "skipped": True,
+    }
+
+
+def _orders_triggered_kill(created: list[dict[str, Any]], settings: Settings) -> bool:
+    del created  # liquidation tags must not stop sibling books
+    return kill_engaged(settings)
+
+
+def _strategy_window_report(
+    *,
+    sid: str,
+    window: list[str],
+    settings: Settings,
+    orders: int,
+    halt_reason: str | None,
+) -> dict[str, Any]:
+    wanted = len(window) - 1
+    ledger = PaperLedger(sid, settings)
+    last = query_all(
+        "SELECT * FROM account_snapshot WHERE account_id = ? ORDER BY trade_date",
+        (account_id_for(sid),),
+        settings=settings,
+    )
+    in_window = [row for row in last if window[0] < str(row["trade_date"]) <= window[-1]]
+    incomplete = None
+    if halt_reason == "kill_switch" or kill_engaged(settings):
+        incomplete = "kill_switch"
+    elif len(in_window) < wanted:
+        incomplete = "short_snapshots"
+    return {
+        "strategy_id": sid,
+        "sessions": wanted,
+        "orders": orders,
+        "fills": query_all(
+            """
+            SELECT COUNT(*) AS c FROM execution_fill f
+            JOIN standard_order o ON o.order_id = f.order_id
+            WHERE o.strategy_id = ?
+            """,
+            (sid,),
+            settings=settings,
+        )[0]["c"],
+        "snapshots": len(in_window),
+        "snapshots_total": len(last),
+        "last": last[-1] if last else None,
+        "state": ledger.load(),
+        "incomplete_reason": incomplete,
+    }
+
+
+def _run_one_strategy_window(
+    *,
+    sid: str,
+    window: list[str],
+    settings: Settings,
+    on_step: Any | None = None,
+) -> dict[str, Any]:
+    """Run one strategy across the window. Caller must already hold paper_exclusive."""
+    wanted = len(window) - 1
+    if kill_engaged(settings) and not query_all(
+        "SELECT 1 AS ok FROM account_snapshot WHERE account_id = ? LIMIT 1",
+        (account_id_for(sid),),
+        settings=settings,
+    ):
+        # Fresh book + pre-engaged global kill: skip empty run.
+        return _skipped_kill_report(sid=sid, wanted=wanted, window=window, settings=settings)
+    service = PaperOrderService(settings)
+    orders = 0
+    saw_kill = kill_engaged(settings)
+    for index, signal_date in enumerate(window[:-1]):
+        fill_date = window[index + 1]
+        if kill_engaged(settings):
+            saw_kill = True
+        created = service.build_orders(fill_date, sid, signal_date=signal_date, apply_fills=True)
+        if kill_engaged(settings):
+            saw_kill = True
+        orders += len(created)
+        if on_step:
+            on_step(1, f"{sid} {fill_date}")
+    return _strategy_window_report(
+        sid=sid,
+        window=window,
+        settings=settings,
+        orders=orders,
+        halt_reason="kill_switch" if saw_kill or kill_engaged(settings) else None,
+    )
+
+
+def _run_paper_days_sequential(
+    *,
+    ids: list[str],
+    window: list[str],
+    settings: Settings,
+    progress: Any | None = None,
+    job_key: str,
+) -> list[dict[str, Any]]:
+    wanted = len(window) - 1
+    grand = wanted * len(ids)
+    done = 0
+    reports: list[dict[str, Any]] = []
+    _prepare_shared_book_cash(
+        ids=ids,
+        job_key=job_key,
+        settings=settings,
+        reason="multi-strategy sequential paper run reset",
+    )
+    try:
+        for sid in ids:
+            if kill_engaged(settings):
+                done += wanted
+                if progress:
+                    progress(done, grand, f"{sid} skipped_kill")
+                reports.append(_skipped_kill_report(sid=sid, wanted=wanted, window=window, settings=settings))
+                continue
+
+            def on_step(delta: int, label: str, *, _sid: str = sid) -> None:
+                nonlocal done
+                done += delta
+                if progress and (done == 1 or done == grand or done % 5 == 0 or "halt" in label):
+                    progress(done, grand, label)
+
+            reports.append(
+                _run_one_strategy_window(sid=sid, window=window, settings=settings, on_step=on_step)
+            )
+    finally:
+        _clear_cash_overrides(settings, ids)
+    return reports
+
+
+def _run_paper_days_parallel(
+    *,
+    ids: list[str],
+    window: list[str],
+    settings: Settings,
+    progress: Any | None = None,
+    job_key: str,
+) -> list[dict[str, Any]]:
+    """Reset selected books, split cash, run strategies day-aligned in parallel.
+
+    Outer loop is the shared trading calendar; each session fans out to workers.
+    Portfolio kill liquidates every book but keeps day alignment (cash-only days).
+    Strategy-level halt only flattens that book; siblings keep trading.
+
+    Caller must already hold paper_exclusive; workers must not nest exclusive.
+    """
+    _prepare_shared_book_cash(
+        ids=ids,
+        job_key=job_key,
+        settings=settings,
+        reason="parallel paper run reset",
+    )
+    wanted = len(window) - 1
+    grand = wanted * len(ids)
+    done = 0
+    order_counts = {sid: 0 for sid in ids}
+    saw_kill = kill_engaged(settings)
+
+    def bump(delta: int, label: str) -> None:
+        nonlocal done
+        done += delta
+        if progress and (done == 1 or done == grand or done % 5 == 0 or "halt" in label):
+            progress(done, grand, label)
+
+    def run_day(sid: str, fill_date: str, signal_date: str) -> tuple[str, list[dict[str, Any]]]:
+        created = PaperOrderService(settings).build_orders(
+            fill_date,
+            sid,
+            signal_date=signal_date,
+            apply_fills=True,
+        )
+        return sid, created
+
+    try:
+        if saw_kill:
+            bump(grand, "parallel skipped_kill")
+            return [
+                _skipped_kill_report(sid=sid, wanted=wanted, window=window, settings=settings)
+                for sid in ids
+            ]
+
+        workers = max(1, len(ids))
+        for index, signal_date in enumerate(window[:-1]):
+            fill_date = window[index + 1]
+            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="asqt-paper-par") as pool:
+                day_results = list(
+                    pool.map(
+                        lambda sid, _fd=fill_date, _sd=signal_date: run_day(sid, _fd, _sd),
+                        ids,
+                    )
+                )
+            for sid, created in day_results:
+                order_counts[sid] += len(created)
+            if kill_engaged(settings):
+                saw_kill = True
+            bump(len(ids), f"parallel {fill_date}")
+    finally:
+        _clear_cash_overrides(settings, ids)
+
+    halt_reason = "kill_switch" if saw_kill or kill_engaged(settings) else None
+    return [
+        _strategy_window_report(
+            sid=sid,
+            window=window,
+            settings=settings,
+            orders=order_counts[sid],
+            halt_reason=halt_reason,
+        )
+        for sid in ids
+    ]
 
 
 def _paper_run_detail(
@@ -1110,32 +1655,70 @@ def paper_curve(strategy_id: str, settings: Settings | None = None) -> list[dict
 def resolve_paper_strategy(strategy_id: str | None) -> str:
     if not strategy_id or strategy_id == "all":
         return "stock_momentum_topk"
+    if "," in str(strategy_id):
+        return str(strategy_id).split(",")[0].strip() or "stock_momentum_topk"
     return strategy_id
 
 
 def paper_strategy_ids(strategy_id: str | None) -> list[str]:
-    if not strategy_id or strategy_id == "all":
+    key, ids = normalize_paper_targets(strategy_id or "all")
+    if key == "all":
         return list(STRATEGY_SPECS)
-    if strategy_id not in STRATEGY_SPECS:
-        raise ValueError(f"unknown strategy: {strategy_id}")
-    return [strategy_id]
+    return ids
+
+
+def normalize_paper_targets(
+    strategy_id: str = "all",
+    strategy_ids: list[str] | None = None,
+) -> tuple[str, list[str]]:
+    """Return (job_key, ordered ids). job_key is stored on paper-run tasks."""
+    if strategy_ids is not None:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for raw in strategy_ids:
+            sid = str(raw or "").strip()
+            if not sid or sid in seen:
+                continue
+            if sid == "all":
+                return "all", list(STRATEGY_SPECS)
+            if sid not in STRATEGY_SPECS:
+                raise ValueError(f"unknown strategy: {sid}")
+            seen.add(sid)
+            ordered.append(sid)
+        if not ordered:
+            raise ValueError("strategy_ids must not be empty")
+        if set(ordered) == set(STRATEGY_SPECS):
+            return "all", list(STRATEGY_SPECS)
+        return ",".join(ordered), ordered
+    key = str(strategy_id or "all").strip() or "all"
+    if key == "all":
+        return "all", list(STRATEGY_SPECS)
+    if "," in key:
+        return normalize_paper_targets(strategy_ids=key.split(","))
+    if key not in STRATEGY_SPECS:
+        raise ValueError(f"unknown strategy: {key}")
+    return key, [key]
 
 
 def reset_paper_account(
     *,
     strategy_id: str = "all",
+    strategy_ids: list[str] | None = None,
     actor: str = "operator",
     reason: str = "reset paper account",
     settings: Settings | None = None,
+    clear_kill: bool = True,
 ) -> dict[str, Any]:
     settings = ensure_runtime_dirs(settings or get_settings())
     initialize_database(settings)
-    with paper_exclusive(settings, holder=f"paper-reset:{strategy_id}"):
+    job_key, _ids = normalize_paper_targets(strategy_id, strategy_ids)
+    with paper_exclusive(settings, holder=f"paper-reset:{job_key}"):
         return _reset_paper_account_locked(
-            strategy_id=strategy_id,
+            strategy_id=job_key,
             actor=actor,
             reason=reason,
             settings=settings,
+            clear_kill=clear_kill,
         )
 
 
@@ -1145,8 +1728,9 @@ def _reset_paper_account_locked(
     actor: str,
     reason: str,
     settings: Settings,
+    clear_kill: bool = True,
 ) -> dict[str, Any]:
-    ids = paper_strategy_ids(strategy_id)
+    _key, ids = normalize_paper_targets(strategy_id)
     from asqt.db import connect
 
     reports: list[dict[str, Any]] = []
@@ -1211,10 +1795,173 @@ def _reset_paper_account_locked(
             ),
         )
         conn.commit()
+    reset_portfolio_peak(settings)
+    kill_before = kill_engaged(settings)
+    kill_info: dict[str, Any] = {"engaged": kill_before, "cleared": False}
+    if clear_kill and kill_before:
+        kill_info = set_kill_switch(
+            False,
+            reason or "paper reset clears kill switch",
+            actor=actor,
+            settings=settings,
+        )
+        kill_info = {
+            "engaged": bool(kill_info.get("engaged")),
+            "cleared": True,
+            "before": kill_info.get("before"),
+            "after": kill_info.get("after"),
+        }
     return {
         "ok": True,
         "strategy_id": "all" if len(ids) > 1 else ids[0],
         "reports": reports,
+        "kill_switch": kill_info,
+    }
+
+
+def clear_strategy_halt(
+    strategy_id: str,
+    reason: str,
+    *,
+    actor: str = "operator",
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Clear single-strategy flatten/halt so later sessions can trade again.
+
+    Resets the book peak to current NAV so the same drawdown does not
+    immediately re-trigger halt on the next save.
+    """
+    if not (reason or "").strip():
+        raise ValueError("clear strategy halt requires a reason")
+    settings = ensure_runtime_dirs(settings or get_settings())
+    initialize_database(settings)
+    sid = resolve_paper_strategy(strategy_id)
+    with paper_exclusive(settings, holder=f"paper-clear-halt:{sid}"):
+        return _clear_strategy_halt_locked(
+            strategy_id=sid,
+            reason=reason.strip(),
+            actor=actor,
+            settings=settings,
+        )
+
+
+def _clear_strategy_halt_locked(
+    *,
+    strategy_id: str,
+    reason: str,
+    actor: str,
+    settings: Settings,
+) -> dict[str, Any]:
+    ledger = PaperLedger(strategy_id, settings)
+    state = ledger.load()
+    before_status = halt_status_of(state)
+    rows = query_all(
+        """
+        SELECT trade_date, cash, market_value, total_asset, position_detail, reconcile_diff
+        FROM account_snapshot
+        WHERE account_id = ?
+        ORDER BY trade_date DESC
+        LIMIT 1
+        """,
+        (ledger.account_id,),
+        settings=settings,
+    )
+    if not rows or before_status == "active":
+        return {
+            "ok": True,
+            "strategy_id": strategy_id,
+            "changed": False,
+            "halt_status": "active",
+            "before_status": before_status,
+            "reason": reason,
+        }
+    row = rows[0]
+    detail = json.loads(row["position_detail"] or "{}")
+    total = float(row["total_asset"])
+    peak_before = float(detail.get("peak_asset") or total)
+    detail["halted"] = False
+    detail["flatten_pending"] = False
+    detail["halt_reason"] = None
+    detail["halt_status"] = "active"
+    detail["peak_asset"] = total
+    detail["halt_cleared_reason"] = reason
+    try:
+        reconcile = json.loads(row["reconcile_diff"] or "{}")
+        if not isinstance(reconcile, dict):
+            reconcile = {}
+    except (TypeError, json.JSONDecodeError):
+        reconcile = {}
+    reconcile.update(
+        {
+            "halted": False,
+            "flatten_pending": False,
+            "halt_status": "active",
+            "halt_reason": None,
+            "peak_asset": total,
+        }
+    )
+    execute(
+        """
+        UPDATE account_snapshot
+        SET position_detail = ?, reconcile_diff = ?
+        WHERE account_id = ? AND trade_date = ?
+        """,
+        (
+            json.dumps(detail, ensure_ascii=False),
+            json.dumps(reconcile, ensure_ascii=False),
+            ledger.account_id,
+            row["trade_date"],
+        ),
+        settings=settings,
+    )
+    closed_alerts = close_strategy_halt_alerts(
+        strategy_id=strategy_id,
+        reason=reason,
+        settings=settings,
+    )
+    execute(
+        """
+        INSERT INTO operation_audit
+            (audit_id, actor, action, target_type, target_id, reason, before_state, after_state)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(uuid4()),
+            actor,
+            "paper_clear_halt",
+            "account",
+            ledger.account_id,
+            reason,
+            json.dumps(
+                {
+                    "halt_status": before_status,
+                    "peak_asset": peak_before,
+                    "trade_date": row["trade_date"],
+                },
+                ensure_ascii=False,
+            ),
+            json.dumps(
+                {
+                    "halt_status": "active",
+                    "peak_asset": total,
+                    "closed_alerts": closed_alerts,
+                },
+                ensure_ascii=False,
+            ),
+        ),
+        settings=settings,
+    )
+    return {
+        "ok": True,
+        "strategy_id": strategy_id,
+        "changed": True,
+        "halt_status": "active",
+        "before_status": before_status,
+        "peak_asset": total,
+        "peak_before": peak_before,
+        "trade_date": row["trade_date"],
+        "closed_alerts": closed_alerts,
+        "reason": reason,
     }
 
 
@@ -1284,7 +2031,8 @@ def paper_board(strategy_id: str, settings: Settings | None = None) -> dict[str,
             bucket["buys"] += 1
             bucket["buy_notional"] += notional
         bucket["fees"] += fee
-    initial = float(state.get("initial_cash") or INITIAL_CASH)
+    raw_initial = state.get("initial_cash")
+    initial = float(INITIAL_CASH if raw_initial is None else raw_initial)
     prev = initial
     peak = initial
     max_dd = 0.0
@@ -1338,6 +2086,7 @@ def paper_board(strategy_id: str, settings: Settings | None = None) -> dict[str,
         )
     positions.sort(key=lambda item: item["market_value"], reverse=True)
     end_asset = float(last["total_asset"]) if last else initial
+    peak_return = round(peak / initial - 1.0, 10) if initial else 0.0
     summary = {
         "window_start": timeline[0]["trade_date"] if timeline else None,
         "window_end": timeline[-1]["trade_date"] if timeline else None,
@@ -1349,6 +2098,7 @@ def paper_board(strategy_id: str, settings: Settings | None = None) -> dict[str,
         "total_return": round(end_asset / initial - 1.0, 10) if initial else 0.0,
         "max_drawdown": round(max_dd, 10),
         "peak_asset": peak,
+        "peak_return": peak_return,
         "position_count": len(positions),
         "orders_filled": filled_orders,
         "orders_rejected": rejected_orders,
@@ -1356,6 +2106,10 @@ def paper_board(strategy_id: str, settings: Settings | None = None) -> dict[str,
         "buy_notional": round(buy_notional, 4),
         "sell_notional": round(sell_notional, 4),
         "fees": round(fees, 4),
+        "halted": bool(state.get("halted")),
+        "flatten_pending": bool(state.get("flatten_pending")),
+        "halt_status": halt_status_of(state),
+        "halt_reason": state.get("halt_reason"),
     }
     return {
         "account_id": account_id_for(sid),
@@ -1454,6 +2208,18 @@ def paper_cash_reconcile(
         "market_value": actual_mv,
         "end_asset": actual_asset,
         "peak_asset": round(float(summary.get("peak_asset") or state.get("peak_asset") or initial), 4),
+        "peak_return": round(
+            float(
+                summary["peak_return"]
+                if summary.get("peak_return") is not None
+                else (
+                    (float(summary.get("peak_asset") or state.get("peak_asset") or initial) / initial - 1.0)
+                    if initial
+                    else 0.0
+                )
+            ),
+            10,
+        ),
         "checks": checks,
         "qty_mismatches": qty_mismatches,
         "formula": "期末现金 = 本金 − 买入额 + 卖出额 − 费用；持仓数量 = 买入数量 − 卖出数量；总资产 = 现金 + 持仓市值",

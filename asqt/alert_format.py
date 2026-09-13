@@ -13,10 +13,16 @@ STRATEGY_LABEL = {
     "etf_momentum_topk": "ETF 动量 TopK",
     "stock_lowvol_momentum": "股票低波动量",
     "etf_ma_momentum_filter": "ETF 均线动量过滤",
+    "stock_short_reversal_topk": "股票短反转 TopK",
+    "stock_momentum_volume_confirm": "股票动量量能确认",
+    "stock_momentum_skip_month": "股票跳月动量",
+    "stock_holder_increase_follow": "股票股东增持跟随",
 }
 
 TITLE_LABEL = {
-    "max drawdown stop": "回撤触发急停",
+    "max drawdown stop": "组合回撤触发急停",
+    "strategy drawdown halt": "单策略回撤平仓",
+    "flatten incomplete": "未完成平仓",
     "max drawdown warning": "回撤预警",
     "kill switch on": "急停已打开",
     "paper trading on": "模拟交易已开启",
@@ -48,10 +54,15 @@ LEVEL_LABEL = {
 }
 
 
-def _drawdown_thresholds() -> tuple[float, float]:
-    from asqt.ops import DRAWDOWN_STOP, DRAWDOWN_WARN
+def _drawdown_thresholds() -> tuple[float, float, float]:
+    from asqt.ops import paper_account_config
 
-    return float(DRAWDOWN_STOP), float(DRAWDOWN_WARN)
+    cfg = paper_account_config()
+    return (
+        -abs(float(cfg["portfolio_drawdown_stop"])),
+        -abs(float(cfg["strategy_drawdown_stop"])),
+        -abs(float(cfg["drawdown_warn"])),
+    )
 
 
 def public_report_ref(value: Any) -> str | None:
@@ -95,22 +106,25 @@ def build_drawdown_payload(
     trade_date: str | None = None,
     kind: str = "stop",
 ) -> dict[str, Any]:
-    stop = kind == "stop"
-    drawdown_stop, drawdown_warn = _drawdown_thresholds()
-    threshold = drawdown_stop if stop else drawdown_warn
-    action = (
-        "已触发急停，停止新开仓与继续模拟成交。"
-        if stop
-        else f"未达急停线 {pct(drawdown_stop)}，请关注回撤与仓位。"
-    )
-    summary = (
-        f"回撤 {pct(dd)} 触发急停"
-        if stop
-        else f"回撤 {pct(dd)} 触及预警"
-    )
+    portfolio_stop, strategy_stop, drawdown_warn = _drawdown_thresholds()
+    if kind == "strategy_stop":
+        threshold = strategy_stop
+        action = "已触发单策略平仓：清空持仓、禁止买入；未达组合急停线时其他账本继续。"
+        summary = f"回撤 {pct(dd)} 触发单策略平仓"
+        kind_key = "drawdown_strategy_stop"
+    elif kind == "stop":
+        threshold = portfolio_stop
+        action = "已触发组合急停：全部子账户停止新开仓并清仓。"
+        summary = f"回撤 {pct(dd)} 触发组合急停"
+        kind_key = "drawdown_stop"
+    else:
+        threshold = drawdown_warn
+        action = f"未达组合急停线 {pct(portfolio_stop)}，请关注回撤与仓位。"
+        summary = f"回撤 {pct(dd)} 触及预警"
+        kind_key = "drawdown_warn"
     return {
         "schema": "asqt.alert.v1",
-        "kind": "drawdown_stop" if stop else "drawdown_warn",
+        "kind": kind_key,
         "summary": summary,
         "dd": round(float(dd), 8),
         "dd_pct": round(abs(float(dd)) * 100, 4),
@@ -309,6 +323,17 @@ def _cash_reconcile_lines(payload: dict[str, Any]) -> list[str]:
             f"已核对：{payload['checked']} · 不一致 {payload.get('mismatch_count', 0)}"
             f" · 跳过 {payload.get('skipped_count', 0)}"
         )
+    portfolio = payload.get("portfolio") or {}
+    if portfolio:
+        status = "通过" if portfolio.get("ok") else "不一致"
+        lines.append(
+            f"组合资金：{status} · 本金 {money(portfolio.get('portfolio_cash'))}"
+            f" · 已部署 {money(portfolio.get('deployed'))}"
+            f" · 净资产 {money(portfolio.get('nav'))}"
+        )
+        fails = portfolio.get("failed_checks") or []
+        if fails:
+            lines.append(f"  组合失败项：{'、'.join(str(x) for x in fails)}")
     for item in payload.get("books") or []:
         label = item.get("strategy_label") or strategy_label(item.get("strategy_id"))
         if item.get("skipped"):
@@ -316,8 +341,11 @@ def _cash_reconcile_lines(payload: dict[str, Any]) -> list[str]:
             continue
         status = "通过" if item.get("ok") else "不一致"
         asof = item.get("asof") or "-"
+        share = item.get("expected_share")
+        share_txt = f" · 应占份额 {money(share)}" if share is not None else ""
         lines.append(
             f"{label}（{asof}）：{status} · 本金 {money(item.get('initial_cash'))}"
+            f"{share_txt}"
             f" · 峰值 {money(item.get('peak_asset'))}"
             f" · 现金 {money(item.get('actual_cash'))}"
             f"（差额 {money(item.get('cash_diff'))}）"
@@ -378,8 +406,8 @@ def hydrate_alert_row(row: dict[str, Any], *, settings: Any = None) -> dict[str,
         if payload.get("dd") is None:
             return row
         kind = "stop" if row.get("level") == "critical" or "stop" in str(row.get("title") or "") else "warn"
-        drawdown_stop, drawdown_warn = _drawdown_thresholds()
-        threshold = drawdown_stop if kind == "stop" else drawdown_warn
+        portfolio_stop, _strategy_stop, drawdown_warn = _drawdown_thresholds()
+        threshold = portfolio_stop if kind == "stop" else drawdown_warn
         minimal = {
             "schema": "asqt.alert.v1",
             "kind": "drawdown_stop" if kind == "stop" else "drawdown_warn",
@@ -395,7 +423,7 @@ def hydrate_alert_row(row: dict[str, Any], *, settings: Any = None) -> dict[str,
             "action": (
                 "已触发急停，停止新开仓与继续模拟成交。"
                 if kind == "stop"
-                else f"未达急停线 {pct(drawdown_stop)}，请关注回撤与仓位。"
+                else f"未达急停线 {pct(portfolio_stop)}，请关注回撤与仓位。"
             ),
         }
         row = dict(row)
@@ -478,14 +506,24 @@ def _drawdown_lines(payload: dict[str, Any], row: dict[str, Any]) -> list[str]:
     if trade_date:
         lines.append(f"成交日：{trade_date}")
     if payload.get("dd") is not None:
-        drawdown_stop, drawdown_warn = _drawdown_thresholds()
+        portfolio_stop, strategy_stop, drawdown_warn = _drawdown_thresholds()
         threshold = payload.get("threshold")
-        threshold_text = pct(threshold) if threshold is not None else (
-            pct(drawdown_stop)
-            if str(payload.get("kind") or "").endswith("stop") or row.get("level") == "critical"
-            else pct(drawdown_warn)
+        kind = str(payload.get("kind") or "")
+        if threshold is not None:
+            threshold_text = pct(threshold)
+        elif kind.endswith("strategy_stop"):
+            threshold_text = pct(strategy_stop)
+        elif kind.endswith("stop") or row.get("level") == "critical":
+            threshold_text = pct(portfolio_stop)
+        else:
+            threshold_text = pct(drawdown_warn)
+        label = (
+            "平仓线"
+            if kind.endswith("strategy_stop")
+            else "急停线"
+            if row.get("level") == "critical" or kind.endswith("stop")
+            else "预警线"
         )
-        label = "急停线" if row.get("level") == "critical" or str(payload.get("kind") or "").endswith("stop") else "预警线"
         lines.append(f"回撤：{pct(payload['dd'])}（相对账户峰值；{label} {threshold_text}）")
     if payload.get("peak_asset") is not None:
         lines.append(f"账户峰值：{money(payload['peak_asset'])}")

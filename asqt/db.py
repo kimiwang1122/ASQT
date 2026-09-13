@@ -71,7 +71,8 @@ SCHEMA_SQL: tuple[str, ...] = (
         value REAL NOT NULL,
         model_version TEXT,
         source_run_id TEXT,
-        PRIMARY KEY (trade_date, symbol, factor_name)
+        params_hash TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (trade_date, symbol, factor_name, params_hash)
     )
     """,
     """
@@ -139,6 +140,23 @@ SCHEMA_SQL: tuple[str, ...] = (
     """,
     """
     CREATE TABLE IF NOT EXISTS research_run (
+        run_id TEXT PRIMARY KEY,
+        strategy_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        inflight INTEGER,
+        progress_pct INTEGER,
+        progress_done INTEGER,
+        progress_total INTEGER,
+        progress_label TEXT,
+        fail_reason TEXT,
+        detail TEXT,
+        started_at TEXT,
+        finished_at TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS factor_run (
         run_id TEXT PRIMARY KEY,
         strategy_id TEXT NOT NULL,
         status TEXT NOT NULL,
@@ -271,6 +289,58 @@ SCHEMA_SQL: tuple[str, ...] = (
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS symbol_tag (
+        tag TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        source TEXT NOT NULL,
+        note TEXT,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (tag, symbol)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS paper_override (
+        strategy_id TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        action TEXT NOT NULL,
+        weight REAL,
+        reason TEXT,
+        actor TEXT,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (strategy_id, symbol)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS market_event (
+        event_id TEXT PRIMARY KEY,
+        event_type TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        event_date TEXT NOT NULL,
+        asof_date TEXT NOT NULL,
+        actor TEXT,
+        value REAL,
+        payload_json TEXT,
+        source TEXT NOT NULL,
+        version TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS event_pull_run (
+        run_id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        inflight INTEGER,
+        progress_pct INTEGER,
+        progress_done INTEGER,
+        progress_total INTEGER,
+        progress_label TEXT,
+        fail_reason TEXT,
+        detail TEXT,
+        started_at TEXT,
+        finished_at TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
 )
 
 # Columns that may be missing on databases created before the baseline hardening pass.
@@ -303,6 +373,59 @@ def _existing_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row["name"] for row in rows}
 
 
+def _migrate_factor_signal(conn: sqlite3.Connection) -> None:
+    tables = {row["name"] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "factor_signal" not in tables:
+        return
+    cols = _existing_columns(conn, "factor_signal")
+    # Rebuild when params_hash missing or legacy 3-col PK still in place.
+    info = conn.execute("PRAGMA table_info(factor_signal)").fetchall()
+    pk_cols = [row["name"] for row in sorted(info, key=lambda item: item["pk"]) if row["pk"]]
+    needs_rebuild = "params_hash" not in cols or pk_cols != [
+        "trade_date",
+        "symbol",
+        "factor_name",
+        "params_hash",
+    ]
+    if not needs_rebuild:
+        return
+    conn.execute(
+        """
+        CREATE TABLE factor_signal__new (
+            trade_date TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            factor_name TEXT NOT NULL,
+            value REAL NOT NULL,
+            model_version TEXT,
+            source_run_id TEXT,
+            params_hash TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (trade_date, symbol, factor_name, params_hash)
+        )
+        """
+    )
+    if "params_hash" in cols:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO factor_signal__new
+                (trade_date, symbol, factor_name, value, model_version, source_run_id, params_hash)
+            SELECT trade_date, symbol, factor_name, value, model_version, source_run_id,
+                   COALESCE(params_hash, '')
+            FROM factor_signal
+            """
+        )
+    else:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO factor_signal__new
+                (trade_date, symbol, factor_name, value, model_version, source_run_id, params_hash)
+            SELECT trade_date, symbol, factor_name, value, model_version, source_run_id, ''
+            FROM factor_signal
+            """
+        )
+    conn.execute("DROP TABLE factor_signal")
+    conn.execute("ALTER TABLE factor_signal__new RENAME TO factor_signal")
+
+
 def _migrate_schema(conn: sqlite3.Connection) -> None:
     existing = _existing_columns(conn, "data_source")
     for column, col_type in _DATA_SOURCE_EXTRA_COLUMNS:
@@ -315,6 +438,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         for column, col_type in _DATA_SYNC_RUN_EXTRA_COLUMNS:
             if column not in sync_cols:
                 conn.execute(f"ALTER TABLE data_sync_run ADD COLUMN {column} {col_type}")
+    _migrate_factor_signal(conn)
     conn.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS data_sync_run_one_inflight
@@ -326,6 +450,25 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         CREATE UNIQUE INDEX IF NOT EXISTS research_run_one_inflight
         ON research_run(inflight) WHERE inflight = 1
         """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS factor_run_one_inflight
+        ON factor_run(inflight) WHERE inflight = 1
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS event_pull_run_one_inflight
+        ON event_pull_run(inflight) WHERE inflight = 1
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS market_event_event_date ON market_event(event_date DESC)"
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS market_event_symbol ON market_event(symbol)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS market_event_type_date ON market_event(event_type, event_date DESC)"
     )
 
 

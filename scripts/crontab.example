@@ -10,5 +10,6 @@
 15 19 * * 1-5 /Users/kimi/Documents/ChatGPT/ASQT/.venv/bin/asqt reconcile --universe --lookback-days 14 --peer auto >> /Users/kimi/Documents/ChatGPT/ASQT/data/logs/reconcile.cron.log 2>&1
 
 # Weekdays 19:45 — paper cash reconcile (after cross-source, before 20:05 fallback).
+# Checks fill→cash/qty, portfolio share funding, and combined NAV (not N× full cash).
 # In-process API also runs this when ASQT_CASH_RECONCILE_AUTO=1; cron is the out-of-process backup.
 45 19 * * 1-5 /Users/kimi/Documents/ChatGPT/ASQT/.venv/bin/asqt cash-reconcile >> /Users/kimi/Documents/ChatGPT/ASQT/data/logs/cash-reconcile.cron.log 2>&1
