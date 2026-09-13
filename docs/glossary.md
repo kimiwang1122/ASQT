@@ -30,13 +30,14 @@
 | 词 | 亦称 | 本仓库含义 |
 |---|---|---|
 | 日 K | `market_daily` | 每个交易日一根 OHLC、量额、复权因子。主源 BaoStock。 |
-| 未复权 / 复权 | OHLC vs 可比价 | 表里 OHLC 是成交价；研究用 `close * adj_factor` 做相邻日收益。下单仍用未复权价和股数。 |
-| `adj_factor` | 后复权因子 | 当日有效。缺失则该行不得进可交易版本。 |
+| 未复权 / 复权 | OHLC vs 可比价 | **口径勿混**：表里 OHLC 是成交价（未复权）；研究收益/因子用 `close * adj_factor`（后复权可比价）。**Paper 撮合与下单股数只用未复权价。** 禁止用复权价算仓位股数。 |
+| `adj_factor` | 后复权因子 | 当日有效。缺失则该行不得进可交易版本。研究场景默认依赖该因子；展示 K 线若需前复权须另算，不得回写 OHLC。 |
 | `adj_conflict` | 复权冲突 | 质检：因子跳变且无已核实送转分红解释。 |
 | `estimated_from_preclose` | 前收估算 | 涨跌停价来源：前收 × 板块幅度（主板约 10%，创业/科创约 20%），不是交易所公布价。 |
 | 官方日历 / 官方涨跌停 | D7 未做的重口径 | 上交所/深交所全表日更；现在用主源开市日 + 估算限价。 |
 | 时点池 | 历史成分 | 回测某日只用**当时**指数成分。现在是筛选日固定名单，有前视偏差风险。 |
 | `point_in_time` | 时点错误 | 质检：上市前或退市后仍有行情。 |
+| PIT / `asqt.pit` | 时点窗口 | 统一 `asof`：只见 `date <= asof`；backtest 丢无日期字段；见 [adoption_priority_plan.md](adoption_priority_plan.md) GATE-A1。 |
 | `missing` / `range` / `cross_source` | 质检类型 | 缺数；OHLC/量额非法；主备源对不上（`warn`，不单独停交易）。 |
 | `block` / `warn` | 严重级别 | `block` 开放则 `trade_allowed=false`，禁新订单；`warn` 不翻转闸门。 |
 | 闸门 | `trade_allowed` | 质量门禁：有开放 block 就不能下新单（mock 与 Paper 一致）。 |

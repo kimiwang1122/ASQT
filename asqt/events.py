@@ -6,7 +6,6 @@ Pilot strategy ``stock_holder_increase_follow`` lives in ``strategies.py``
 
 from __future__ import annotations
 
-from datetime import date, timedelta
 import hashlib
 import json
 from pathlib import Path
@@ -15,6 +14,8 @@ from typing import Any, Sequence
 from asqt.config import Settings, ensure_runtime_dirs, get_settings
 from asqt.contracts import MARKET_EVENT_COLUMNS
 from asqt.db import executemany, initialize_database, query_all
+from asqt.pit import in_closed_window, lookback_start, on_or_before, parse_asof
+from asqt.pit import filter_rows_on_or_before
 from asqt.records import query_records, record_parquet_path, upsert_records
 
 EVENT_TYPE_HOLDER_INCREASE = "holder_increase"
@@ -38,11 +39,11 @@ def holder_net_in_window(
     """
     if lookback_days < 0:
         return None
-    asof_text = str(asof or "").strip()[:10]
-    if len(asof_text) < 10:
+    try:
+        asof_text = parse_asof(asof)
+        start_text = lookback_start(asof_text, int(lookback_days))
+    except Exception:
         return None
-    asof_d = date.fromisoformat(asof_text)
-    start_text = (asof_d - timedelta(days=int(lookback_days))).isoformat()
     want = str(symbol or "").strip()
     total = 0.0
     hit = False
@@ -52,7 +53,7 @@ def holder_net_in_window(
         if str(row.get("event_type") or "").strip() not in HOLDER_TRADE_TYPES:
             continue
         event_date = str(row.get("event_date") or "")[:10]
-        if not event_date or event_date > asof_text or event_date < start_text:
+        if not in_closed_window(event_date, start=start_text, end=asof_text):
             continue
         value = row.get("value")
         if value is None:
@@ -198,10 +199,26 @@ def normalize_holder_trade_row(raw: dict[str, Any], *, source_id: str = "tushare
     )
 
 
-def events_asof(rows: list[dict[str, Any]], asof: str) -> list[dict[str, Any]]:
-    """Keep events known by ``asof`` (event_date <= asof). No lookahead."""
-    cutoff = str(asof or "").strip()[:10]
-    return [row for row in rows if str(row.get("event_date") or "")[:10] <= cutoff]
+def events_asof(
+    rows: list[dict[str, Any]],
+    asof: str,
+    *,
+    mode: str = "backtest",
+) -> list[dict[str, Any]]:
+    """Keep events known by ``asof`` (prefer ``asof_date``, else ``event_date``). No lookahead."""
+    cutoff = parse_asof(asof)
+    out: list[dict[str, Any]] = []
+    for row in rows or []:
+        known = row.get("asof_date") or row.get("event_date")
+        if known is None or str(known).strip() == "":
+            # Undated: only live mode may keep (via filter helper policy).
+            kept = filter_rows_on_or_before([row], cutoff, date_key="event_date", mode=mode)  # type: ignore[arg-type]
+            if kept:
+                out.append(row)
+            continue
+        if on_or_before(known, cutoff):
+            out.append(row)
+    return out
 
 
 def _sync_sqlite(rows: list[dict[str, Any]], settings: Settings) -> None:

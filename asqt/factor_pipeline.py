@@ -12,6 +12,7 @@ import pandas as pd
 from asqt import factors as F
 from asqt.config import Settings, ensure_runtime_dirs, get_settings
 from asqt.db import executemany
+from asqt.pit import series_asof as _pit_series_asof
 from asqt.symbols import infer_instrument_type
 
 FACTOR_VALUE_COLUMNS = (
@@ -58,21 +59,8 @@ def build_data_frame(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
 
 
 def series_asof(series: list[dict[str, Any]], asof: str) -> list[dict[str, Any]]:
-    """Return bars with trade_date <= asof (binary search on sorted series)."""
-    if not series:
-        return []
-    if str(series[-1]["trade_date"]) <= asof:
-        return series
-    if str(series[0]["trade_date"]) > asof:
-        return []
-    lo, hi = 0, len(series)
-    while lo < hi:
-        mid = (lo + hi) // 2
-        if str(series[mid]["trade_date"]) <= asof:
-            lo = mid + 1
-        else:
-            hi = mid
-    return series[:lo]
+    """Return bars with trade_date <= asof (PIT; binary search on sorted series)."""
+    return _pit_series_asof(series, asof, date_key="trade_date")
 
 
 def _eval_spec(hist: list[dict[str, Any]], spec: dict[str, Any]) -> float | None:

@@ -29,8 +29,9 @@
 | P2 | 研究回测 + 策略版本 | 完成 | 两策略引擎、策略页、回测归因已验收；模拟偏差随 P3 成交 |
 | P3 | 模拟交易 + 运营 | 完成 | PaperBroker、账本、20 日模拟、急停、本地+文件告警、生命周期准入 |
 | P4 | 实接券商通道 | 暂缓 | Q2 未具备；预留 `QmtExecutionAdapter` 恒为不可用，见 [p4/README.md](p4/README.md) |
+| 吸收轨 | TradingAgents/CN 工程纪律 | 进行中 | 唯一方案 [adoption_priority_plan.md](adoption_priority_plan.md)；阶段 A：GATE-A1/A3/A4 已绿，A2 待做 |
 
-当前可对外说的进度：**P1 完成，P2 回测可复现，P3 本地模拟盘可连续运行（未接券商）。**
+当前可对外说的进度：**P1 完成，P2 回测可复现，P3 本地模拟盘可连续运行（未接券商）。** 吸收轨从 PIT/符号边界开工。
 
 ---
 
@@ -174,9 +175,9 @@
 
 ## 下次开工建议
 
-1. **P4 实接**：等 Q2（MiniQMT 权限）再按 [p4/README.md](p4/README.md)「Q2 具备后才开的验收」接线；禁止把预留适配器标成完成。Qlib bin（R9）同理：目录预留，业务层零 `import qlib`。  
-2. **日终闭环**：交易日同步成功后会自动 `paper-daily`；空账本不会自动回放长窗口，需先手工「跑模拟」。进程外兜底见 `scripts/crontab.example`（跨源 19:15、财务对账 19:45、同步兜底 20:05）。  
-3. **财务对账**：`asqt cash-reconcile` / 进程内 `ASQT_CASH_RECONCILE_AUTO`；无账本记「跳过」；有账本验现金/持仓回推，并校验组合本金份额与净资产合计（防满额加总）。  
+1. **吸收轨阶段 A2**：`stale_asof` + `NoMarketData`/`StaleData` + paper 拒用过旧价；门禁见 [adoption_priority_plan.md](adoption_priority_plan.md) GATE-A2。A1/A3/A4 已绿。  
+2. **P4 实接**：等 Q2（MiniQMT 权限）再按 [p4/README.md](p4/README.md)「Q2 具备后才开的验收」接线；禁止把预留适配器标成完成。Qlib bin（R9）同理：目录预留，业务层零 `import qlib`。  
+3. **日终闭环**：交易日同步成功后会自动 `paper-daily`；空账本不会自动回放长窗口，需先手工「跑模拟」。进程外兜底见 `scripts/crontab.example`（跨源 19:15、财务对账 19:45、同步兜底 20:05）。  
 4. **跨源对账**：因子恒定基准差已对齐后再比；真残差仍 warn。方案 2（入库统一权威因子）暂不做。  
 5. **研究扩展**：新策略先 `research-backtest` → 生命周期 paper → 跑模拟；改参用 `asqt tune` 出报告后**手写**新 `parameter_set_id`，勿改已 paper 组。已增 `stock_momentum_volume_confirm`、`stock_momentum_skip_month`（`CODE_VERSION=p2.4`）；股东增持试点 `stock_holder_increase_follow` 保持 draft。walk-forward / 基本面因子暂缓。  
 6. **Record/Event**：新事件类型先扩 `RECORD_SCHEMAS` + normalizer + fixture；财务/两融全量仍属 X3。  

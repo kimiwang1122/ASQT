@@ -56,14 +56,32 @@
 
 **目标**：回测/事件/因子/模拟不再偷看未来，也不静默用过期行情。
 
-| 交付 | 验收 |
-|---|---|
-| `asqt/pit.py`：半开窗口；live vs backtest 对无日期字段策略 | 未来 `event_date`/因子日/行情日单测必失败 |
-| 适配器 `NoMarketData` / `StaleData`；质检 `stale_asof`（N 个**交易日**，可配，建议 5–10） | 过旧 bar → warn/block；paper 不静默撮合 |
-| 符号矩阵：6 位、`.SH/.SZ/.BJ`、非法后缀 | 单测覆盖；错码拒收 |
-| glossary/契约写清复权场景 | 研究用复权收益、下单用未复权价 |
+#### 严格验收门禁（必须全绿才能合入下一阶段）
 
-**切入文件**：`events.py`、`factor_pipeline.py`、`quality.py`、`symbols.py`、`adapters/*`
+**GATE-A1 PIT（本步开工项）**
+- [x] 存在 `asqt/pit.py`，对外至少：`parse_asof`、`on_or_before`、`in_closed_window`、`filter_rows_on_or_before`、`series_asof`、`undated_allowed`
+- [x] `tests/test_pit.py`：`asof` 当日可见；`asof+1` 不可见；空/非法 asof 抛错或返回空（行为写死在测试）
+- [x] `events.events_asof` / `holder_net_in_window` 经 `pit`：未来 `event_date` 不入窗
+- [x] `factor_pipeline.series_asof` 经 `pit`：未来 `trade_date` 不入窗
+- [x] backtest 模式：无日期字段 **剔除**；live 模式：无日期字段 **可保留**（单测锁定）
+- [x] 命令：`arch -arm64 .venv/bin/python -m pytest tests/test_pit.py tests/test_events.py -q` 全绿
+
+**GATE-A2 陈旧守卫（A1 之后）**
+- [ ] 统一异常：`NoMarketDataError` / `StaleDataError`（或等价）可被 API/质检识别
+- [ ] 质检 `stale_asof`：最新 bar 早于 asof 超过 N 个**交易日** → 可配 warn/block
+- [ ] paper 路径：stale=block 时不得用过旧价撮合（单测）
+- [ ] 默认 N∈[5,10]，配置可覆盖；按交易日历计数（非自然日）
+
+**GATE-A3 符号边界（可与 A1 同 PR）**
+- [x] `normalize_symbol`：`000001.SZ` / 大小写 / BaoStock `sz.000001` / 可推断的 6 位 → 标准形
+- [x] 支持 `.BJ`；非法后缀/空串/`None` → `ValueError`
+- [x] `tests/test_symbols.py` 矩阵全绿
+
+**GATE-A4 复权口径（文档门禁）**
+- [x] [glossary.md](glossary.md) 明确：研究收益用 `close*adj_factor`；下单/撮合用未复权 OHLC
+- [x] 禁止混用场景写进词汇表「勿」条
+
+**切入文件**：`pit.py`、`events.py`、`factor_pipeline.py`、`quality.py`、`symbols.py`、`adapters/*`
 
 ---
 
@@ -71,11 +89,21 @@
 
 **目标**：admit/下单唯一闸门；失败可审计，不伪装成 Hold。
 
-| 交付 | 验收 |
-|---|---|
-| 五档/三档枚举 + `REVIEW` | 解析失败 → `REVIEW`，**不下单** |
-| `risk_gate.evaluate(...)` 汇聚：质检 block、kill、回撤、lifecycle、override 冲突 | 稳定 `reason_code`；控制台/飞书可读 |
-| Paper checklist 回归 | T+1 可卖、涨跌停拒单、手数、停牌有断言 |
+#### 严格验收门禁
+
+**GATE-B1 决策枚举**
+- [ ] `contracts`（或专用模块）定义三档/五档 + `REVIEW`
+- [ ] 解析失败 / 证据不足 → `REVIEW`，**不得**映射为 Hold
+- [ ] 规则策略可映射到同一枚举（无 LLM）
+
+**GATE-B2 risk_gate**
+- [ ] `asqt/risk_gate.py`：`evaluate(...) -> {decision: approve|reject|review, reason_code, message}`
+- [ ] 汇聚：质检 block、kill switch、回撤 halt、lifecycle、override 冲突
+- [ ] `build_orders` / admit 前必经 gate；reject 有稳定 `reason_code`
+- [ ] 单测：每类拒绝至少一条；approve 路径一条
+
+**GATE-B3 paper checklist**
+- [ ] T+1 当日买不可卖、涨跌停拒单、手数、停牌：既有或新增断言全绿
 
 **切入文件**：`contracts.py`、新建 `risk_gate.py`、`paper.py`、`ops.py`、`overrides.py`、前端交易/复盘提示
 
@@ -85,11 +113,14 @@
 
 **目标**：「为何选 → 持有后怎样」可查。
 
-| 交付 | 验收 |
-|---|---|
-| 表 `decision_log`（pending → resolved） | paper-run 后可查决策日→结果日收益/急停 |
-| 日终写结构化 outcome（模板反思，无 LLM） | 历史 asof 看不到未结算 lesson |
-| 订单/目标仓可挂 `decision_id` | 与 `#review` 对齐 |
+#### 严格验收门禁
+
+**GATE-C1 decision_log**
+- [ ] SQLite 表 `decision_log`：pending → resolved；禁 markdown 主存
+- [ ] paper 日终可写结构化 outcome（收益/是否急停）
+- [ ] 按 asof 查询：**看不到**未 resolved 的未来 lesson
+- [ ] 目标仓或订单可关联 `decision_id`
+- [ ] 复盘页或 API 能列出最近决策
 
 **切入文件**：`db.py`、`paper_jobs.py`、复盘前端
 
@@ -99,12 +130,18 @@
 
 **目标**：预览与交易同真相；扩源/选股不改核心。
 
-| 交付 | 验收 |
-|---|---|
-| `/api/market/snapshot?asof=` | 同 asof + data_version 两次一致 |
-| `provider_registry` priority/optional | 新 schema 扩源只改声明表 |
-| `selectors` DSL（自研） | 控制台预览可用；**零** CN `app/` 代码 |
-| （可选）报告目录树、job signature | 产物可找；改配置不能瞎续跑 |
+#### 严格验收门禁
+
+**GATE-D1 snapshot**
+- [ ] `GET /api/market/snapshot?asof=` 同 asof+data_version 两次结果一致
+
+**GATE-D2 registry**
+- [ ] `provider_registry` 含 priority/optional；扩 schema 只改声明
+
+**GATE-D3 selectors DSL（自研）**
+- [ ] AND/OR 或等价规则；**零** CN `app/` 代码拷贝
+
+**GATE-D4/D5（可选）** 报告目录树；job signature 防配置漂移续跑
 
 ---
 
