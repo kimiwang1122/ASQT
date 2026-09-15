@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ASQT 控制台</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=p3-ui89" />
+    <link rel="stylesheet" href="/assets/styles.css?v=p3-ui93" />
   </head>
   <body>
     <div class="shell">
@@ -569,7 +569,7 @@
               </label>
               <label class="filter-inline">
                 代码
-                <input id="factor-view-symbol" type="search" placeholder="模糊，如 600" autocomplete="off" />
+                <input id="factor-view-symbol" type="search" placeholder="代码或名称" autocomplete="off" />
               </label>
               <label class="filter-action">
                 <button type="submit">查看</button>
@@ -585,7 +585,7 @@
                 <thead>
                   <tr>
                     <th>日期</th>
-                    <th>代码</th>
+                    <th>代码 / 名称</th>
                     <th>因子</th>
                     <th class="num">值</th>
                     <th title="参数指纹：窗口/阈值等参数的短哈希，避免同名因子不同参数互相覆盖">参数指纹</th>
@@ -1133,9 +1133,9 @@
             </div>
             <div class="panel-title" style="margin-top:16px">
               <h2>决策日志</h2>
-              <span>pending → resolved · 结构化 outcome</span>
+              <span>待结算 → 已结算 · 结构化结果</span>
             </div>
-            <p class="hint" id="review-decisions-hint">最近 paper 目标仓决策；按信号日与结算日可审计。</p>
+            <p class="hint" id="review-decisions-hint">最近模拟目标仓决策；按信号日与结算日可审计。</p>
             <div class="table-wrap">
               <table>
                 <thead>
@@ -1145,7 +1145,7 @@
                     <th>评级</th>
                     <th>成交日</th>
                     <th>会话收益</th>
-                    <th>lesson</th>
+                    <th>复盘要点</th>
                   </tr>
                 </thead>
                 <tbody id="review-decisions-body"></tbody>
@@ -1273,6 +1273,6 @@
         </div>
       </div>
     </div>
-    <script src="/assets/app.js?v=p3-ui89"></script>
+    <script src="/assets/app.js?v=p3-ui93"></script>
   </body>
 </html>

@@ -6,6 +6,7 @@ Pilot strategy ``stock_holder_increase_follow`` lives in ``strategies.py``
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 import hashlib
 import json
 from pathlib import Path
@@ -25,8 +26,63 @@ HOLDER_TRADE_TYPES = frozenset({EVENT_TYPE_HOLDER_INCREASE, EVENT_TYPE_HOLDER_DE
 DEFAULT_FIXTURE_PATH = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "market_events.json"
 
 
+class HolderEventIndex:
+    """Per-symbol sorted (event_date, value) for O(log n + k) window sums."""
+
+    __slots__ = ("_by_symbol",)
+
+    def __init__(self, events: Sequence[dict[str, Any]] | None = None) -> None:
+        buckets: dict[str, list[tuple[str, float]]] = {}
+        for row in events or []:
+            if str(row.get("event_type") or "").strip() not in HOLDER_TRADE_TYPES:
+                continue
+            symbol = str(row.get("symbol") or "").strip()
+            if not symbol:
+                continue
+            value = row.get("value")
+            if value is None:
+                continue
+            event_date = str(row.get("event_date") or "")[:10]
+            if not event_date:
+                continue
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            buckets.setdefault(symbol, []).append((event_date, number))
+        for items in buckets.values():
+            items.sort(key=lambda item: item[0])
+        self._by_symbol = buckets
+
+    def net_in_window(self, symbol: str, asof: str, lookback_days: int) -> float | None:
+        if lookback_days < 0:
+            return None
+        try:
+            asof_text = parse_asof(asof)
+            start_text = lookback_start(asof_text, int(lookback_days))
+        except Exception:
+            return None
+        rows = self._by_symbol.get(str(symbol or "").strip())
+        if not rows:
+            return None
+        dates = [item[0] for item in rows]
+        lo = bisect_left(dates, start_text)
+        hi = bisect_right(dates, asof_text)
+        if lo >= hi:
+            return None
+        total = 0.0
+        for _date, value in rows[lo:hi]:
+            total += value
+        return total
+
+
+def build_holder_event_index(events: Sequence[dict[str, Any]] | None) -> HolderEventIndex:
+    """Index holder increase/decrease events once for repeated window queries."""
+    return HolderEventIndex(events)
+
+
 def holder_net_in_window(
-    events: Sequence[dict[str, Any]],
+    events: Sequence[dict[str, Any]] | HolderEventIndex,
     symbol: str,
     asof: str,
     lookback_days: int,
@@ -36,7 +92,12 @@ def holder_net_in_window(
     ``start = asof - lookback_days`` (calendar days). Uses only
     ``holder_increase`` / ``holder_decrease``; no lookahead past ``asof``.
     Returns None when no matching events fall in the window.
+
+    Pass a :class:`HolderEventIndex` (or build via :func:`build_holder_event_index`)
+    when calling repeatedly across symbols/dates — raw lists stay for small fixtures.
     """
+    if isinstance(events, HolderEventIndex):
+        return events.net_in_window(symbol, asof, lookback_days)
     if lookback_days < 0:
         return None
     try:

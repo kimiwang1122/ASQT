@@ -290,13 +290,14 @@ def factor_specs_for(
             }
         ]
     if strategy_id == STOCK_HOLDER_INCREASE_FOLLOW:
-        from asqt.events import holder_net_in_window
+        from asqt.events import build_holder_event_index, holder_net_in_window
 
         event_lookback = int(spec["event_lookback"])
         lookback = int(spec["lookback"])
-        event_rows = _resolve_events(events, settings=settings)
+        # Index once: raw 17万行线性扫在全窗因子任务里会卡数十分钟。
+        event_index = build_holder_event_index(_resolve_events(events, settings=settings))
 
-        def _holder_net(hist: list[dict[str, Any]], *, _events=event_rows, _n=event_lookback) -> float | None:
+        def _holder_net(hist: list[dict[str, Any]], *, _events=event_index, _n=event_lookback) -> float | None:
             if not hist:
                 return None
             return holder_net_in_window(

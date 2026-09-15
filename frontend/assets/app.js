@@ -140,6 +140,32 @@ const SYNC_STATUS_LABEL = {
   blocked: "质检未通过",
 };
 
+const DECISION_STATUS_LABEL = {
+  pending: "待结算",
+  resolved: "已结算",
+};
+
+const DECISION_RATING_LABEL = {
+  Buy: "买入",
+  Overweight: "超配",
+  Hold: "持有",
+  Underweight: "低配",
+  Sell: "卖出",
+  REVIEW: "待复核",
+};
+
+const FACTOR_NAME_LABEL = {
+  etf_ma_gap: "ETF 均线偏离",
+  etf_momentum: "ETF 动量",
+  stock_momentum: "股票动量",
+  stock_volatility: "股票波动率",
+  stock_mom_over_vol: "动量/波动",
+  stock_reversal: "股票短反转",
+  stock_volume_z: "成交量 Z 值",
+  stock_momentum_skip_month: "跳月动量",
+  stock_holder_net: "股东净增持",
+};
+
 const TASK_NAME_LABEL = {
   "paper-run-job": "跑模拟",
   "paper-run": "跑模拟",
@@ -3421,8 +3447,8 @@ function renderDecisions(payload) {
   setText(
     "review-decisions-hint",
     items.length
-      ? `最近 ${items.length} 条决策（pending / resolved）。`
-      : "尚无决策日志。跑一轮 paper 日终后会出现 pending→resolved。",
+      ? `最近 ${items.length} 条决策（待结算 / 已结算）。`
+      : "尚无决策日志。跑一轮模拟日终后会出现「待结算 → 已结算」。",
   );
   if (!items.length) {
     const tr = document.createElement("tr");
@@ -3437,9 +3463,22 @@ function renderDecisions(payload) {
   for (const row of items) {
     const tr = document.createElement("tr");
     const ret = row.outcome?.session_return;
+    const status = row.status || "";
+    const rating = row.rating || "";
     appendCell(tr, row.signal_date || "-");
-    appendCell(tr, row.status || "-");
-    appendCell(tr, row.rating || "-");
+    appendCell(tr, DECISION_STATUS_LABEL[status] || status || "-", {
+      tone: status === "pending" ? "warn" : status === "resolved" ? "ok" : "muted",
+    });
+    appendCell(tr, DECISION_RATING_LABEL[rating] || rating || "-", {
+      tone:
+        rating === "Buy" || rating === "Overweight"
+          ? "ok"
+          : rating === "Sell" || rating === "Underweight"
+            ? "block"
+            : rating === "REVIEW"
+              ? "warn"
+              : "muted",
+    });
     appendCell(tr, row.fill_date || "-");
     appendCell(tr, ret == null ? "-" : formatPct(ret), {
       className: ret == null ? "num" : pnlClass(ret),
@@ -5859,10 +5898,20 @@ function finishFactorCompute(row) {
       }
     }
     const n = detail?.factor_rows ?? detail?.sqlite_rows ?? row.factor_rows;
-    setHint(
-      "factor-compute-result",
-      `计算完成${n != null ? ` · ${n} 行` : ""} · run ${row.run_id || ""}`.trim(),
-    );
+    const strategies = Array.isArray(detail?.strategies) ? detail.strategies.length : 0;
+    const parts = ["计算完成"];
+    if (n != null) {
+      parts.push(`${Number(n).toLocaleString("zh-CN")} 行信号`);
+    }
+    if (strategies > 0) {
+      parts.push(`${strategies} 个策略`);
+    }
+    parts.push("可按下方条件查看");
+    const resultEl = document.getElementById("factor-compute-result");
+    setHint("factor-compute-result", parts.join(" · "));
+    if (resultEl && row.run_id) {
+      resultEl.title = `任务编号：${row.run_id}`;
+    }
     setText("factor-compute-meta", "计算完成");
     showToast("因子计算完成", "ok");
     loadFactorSignals().catch(() => {});
@@ -5949,8 +5998,16 @@ function renderFactorSignals(payload) {
     for (const row of list) {
       const tr = document.createElement("tr");
       appendCell(tr, row.trade_date || "-");
-      appendCell(tr, row.symbol || "-");
-      appendCell(tr, row.factor_name || "-");
+      const symbol = row.symbol || "-";
+      const instName = row.instrument_name || row.name || "";
+      appendCell(tr, instName ? `${instName} · ${symbol}` : symbol, {
+        title: instName ? `代码 ${symbol}` : symbol,
+      });
+      const factorId = row.factor_name || "";
+      const factorLabel = FACTOR_NAME_LABEL[factorId] || factorId || "-";
+      appendCell(tr, factorId && FACTOR_NAME_LABEL[factorId] ? `${factorLabel} · ${factorId}` : factorLabel, {
+        title: factorId || undefined,
+      });
       const value = row.value;
       appendCell(tr, value == null || value === "" ? "-" : Number(value).toFixed(6), { className: "num" });
       const hash = row.params_hash ? String(row.params_hash).slice(0, 8) : "-";
@@ -5982,15 +6039,16 @@ function factorViewQuery(page = factorViewState.page) {
   const params = new URLSearchParams();
   const date = document.getElementById("factor-view-date")?.value;
   const name = document.getElementById("factor-view-name")?.value?.trim();
-  const symbol = document.getElementById("factor-view-symbol")?.value?.trim();
+  const code = document.getElementById("factor-view-symbol")?.value?.trim();
   if (date) {
     params.set("trade_date", date);
   }
   if (name) {
     params.set("factor_name", name);
   }
-  if (symbol) {
-    params.set("symbol", symbol);
+  if (code) {
+    // Align with overview market Top50: code or instrument name.
+    params.set("code", code);
   }
   params.set("page", String(Math.max(1, Number(page) || 1)));
   params.set("page_size", String(FACTOR_PAGE_SIZE));
@@ -6114,6 +6172,15 @@ document.getElementById("factor-view-form")?.addEventListener("submit", (event) 
   event.preventDefault();
   factorViewState.page = 1;
   loadFactorSignals(1).catch((error) => showToast(error.message, "block"));
+});
+
+let factorCodeTimer = 0;
+document.getElementById("factor-view-symbol")?.addEventListener("input", () => {
+  window.clearTimeout(factorCodeTimer);
+  factorCodeTimer = window.setTimeout(() => {
+    factorViewState.page = 1;
+    loadFactorSignals(1).catch((error) => showToast(error.message, "block"));
+  }, 280);
 });
 
 document.getElementById("factor-prev")?.addEventListener("click", () => {

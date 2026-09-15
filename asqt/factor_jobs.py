@@ -110,8 +110,33 @@ def recover_orphaned_factor_runs(settings: Settings | None = None) -> int:
             status="failed",
             fail_reason="服务重启或代码热加载中断了因子任务，任务并未真正跑完",
             settings=settings,
+            progress_label="已中断",
         )
     return len(rows)
+
+
+def cancel_factor_run(
+    run_id: str,
+    *,
+    reason: str = "用户取消因子计算任务",
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Mark an inflight factor job failed and clear the lock. Daemon thread may still wind down."""
+    settings = settings or get_settings()
+    initialize_database(settings)
+    row = get_factor_run(run_id, settings=settings)
+    if not row:
+        raise ValueError(f"unknown factor run: {run_id}")
+    if row.get("status") not in {"queued", "running"} and not row.get("inflight"):
+        return row
+    _finish(
+        run_id,
+        status="failed",
+        fail_reason=str(reason or "用户取消因子计算任务")[:500],
+        settings=settings,
+        progress_label="已取消",
+    )
+    return get_factor_run(run_id, settings=settings) or row
 
 
 def start_factor_compute_job(
@@ -246,7 +271,8 @@ def _execute(
         per_strategy: list[dict[str, Any]] = []
         for index, sid in enumerate(ids):
             label = STRATEGY_LABEL.get(sid, sid)
-            _set_progress(run_id, settings, index, grand, f"{label} · 计算")
+            # Reserve 0–90% for per-strategy compute; 90–100% for persist.
+            _set_progress(run_id, settings, index, grand, f"{label} · 计算", scale=90)
             factors = compute_factor_frame(
                 grouped,
                 factor_specs_for(sid, settings=settings),
@@ -256,13 +282,31 @@ def _execute(
             )
             all_factors.extend(factors)
             per_strategy.append({"strategy_id": sid, "factor_rows": len(factors)})
-            _set_progress(run_id, settings, index + 1, grand, f"{label} · 完成")
+            _set_progress(run_id, settings, index + 1, grand, f"{label} · 计算完成", scale=90)
         sqlite_n = 0
         parquet_path = None
         if write_sqlite:
+            _patch(
+                run_id,
+                settings,
+                progress_pct=92,
+                progress_label="写入 SQLite 因子表",
+            )
             sqlite_n = write_factor_signals(all_factors, settings=settings)
         if persist_parquet:
+            _patch(
+                run_id,
+                settings,
+                progress_pct=96,
+                progress_label="写入 parquet 因子文件",
+            )
             parquet_path = str(persist_factor_values(all_factors, settings=settings))
+        _patch(
+            run_id,
+            settings,
+            progress_pct=99,
+            progress_label="整理运行报告",
+        )
         detail = {
             "ok": True,
             "factor_rows": len(all_factors),
@@ -294,10 +338,23 @@ def _execute(
         _finish(run_id, status="failed", fail_reason=str(exc)[:500], settings=settings)
 
 
-def _set_progress(run_id: str, settings: Settings, done: int, total: int, label: str) -> None:
+def _set_progress(
+    run_id: str,
+    settings: Settings,
+    done: int,
+    total: int,
+    label: str,
+    *,
+    scale: int = 100,
+) -> None:
+    """Update job progress.
+
+    ``scale`` caps the mapped percent (e.g. 90) so later persist steps can own 90–100.
+    """
     total = max(1, int(total))
     done = max(0, min(int(done), total))
-    pct = int(done * 100 / total)
+    scale = max(1, min(100, int(scale)))
+    pct = int(done * scale / total)
     _patch(
         run_id,
         settings,

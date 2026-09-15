@@ -24,6 +24,7 @@ from asqt.research_jobs import (
 from asqt.factor_jobs import (
     FactorBusy,
     active_factor_run,
+    cancel_factor_run,
     get_factor_run,
     recover_orphaned_factor_runs,
     start_factor_compute_job,
@@ -363,29 +364,37 @@ def create_app() -> FastAPI:
         trade_date: str | None = Query(default=None),
         factor_name: str | None = Query(default=None),
         symbol: str | None = Query(default=None),
+        code: str | None = Query(default=None),
         page: int = Query(default=1, ge=1),
         page_size: int = Query(default=10, ge=1, le=200),
         limit: int | None = Query(default=None, ge=1, le=5000),
     ) -> dict:
         """List factor_signal rows with fuzzy name/symbol match and pagination.
 
+        ``code`` mirrors overview market Top50 search (code or instrument name).
+        ``symbol`` is kept as an alias of ``code`` for older clients.
         ``limit`` is accepted for backward compatibility: when set without an
         explicit page flow, it caps the page size (legacy clients used limit only).
         """
         clauses: list[str] = []
         params: list[object] = []
         if trade_date:
-            clauses.append("trade_date = ?")
+            clauses.append("f.trade_date = ?")
             params.append(trade_date)
         if factor_name:
-            clauses.append("factor_name LIKE ?")
+            clauses.append("f.factor_name LIKE ?")
             params.append(f"%{factor_name.strip()}%")
-        if symbol:
-            clauses.append("symbol LIKE ?")
-            params.append(f"%{symbol.strip()}%")
+        code_key = (code or symbol or "").strip()
+        if code_key:
+            # Same spirit as /api/market/snapshot + quality list: code/name substring.
+            clauses.append(
+                "instr(lower(ifnull(f.symbol, '') || ' ' || ifnull(i.name, '')), lower(?)) > 0"
+            )
+            params.append(code_key)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        from_sql = "FROM factor_signal f LEFT JOIN instrument_master i ON i.symbol = f.symbol"
         total_row = query_all(
-            f"SELECT COUNT(*) AS c FROM factor_signal {where}",
+            f"SELECT COUNT(*) AS c {from_sql} {where}",
             tuple(params),
             settings=settings,
         )
@@ -397,8 +406,11 @@ def create_app() -> FastAPI:
         offset = (page_n - 1) * size
         items = query_all(
             f"""
-            SELECT * FROM factor_signal {where}
-            ORDER BY trade_date DESC, symbol, factor_name
+            SELECT f.trade_date, f.symbol, f.factor_name, f.value, f.model_version,
+                   f.source_run_id, f.params_hash, i.name AS instrument_name
+            {from_sql}
+            {where}
+            ORDER BY f.trade_date DESC, f.symbol, f.factor_name
             LIMIT ? OFFSET ?
             """,
             tuple(params) + (size, offset),
@@ -452,6 +464,15 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except FactorBusy as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/factors/compute/{run_id}/cancel")
+    def factors_compute_cancel(run_id: str, payload: dict | None = None) -> dict:
+        body = payload or {}
+        reason = str(body.get("reason") or "用户取消因子计算任务")
+        try:
+            return cancel_factor_run(run_id, reason=reason, settings=settings)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.post("/api/selectors/preview")
     def selectors_preview(payload: dict | None = None) -> dict:

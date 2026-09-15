@@ -321,6 +321,29 @@ def test_holder_net_in_window_no_lookahead():
     assert holder_net_in_window(events, "000001.SZ", "2024-01-04", 20) is None
 
 
+def test_holder_event_index_matches_linear_scan():
+    from asqt.events import build_holder_event_index
+
+    events = [
+        {"event_type": "holder_increase", "symbol": "000001.SZ", "event_date": "2024-01-05", "value": 100.0},
+        {"event_type": "holder_decrease", "symbol": "000001.SZ", "event_date": "2024-01-10", "value": -40.0},
+        {"event_type": "holder_increase", "symbol": "000002.SZ", "event_date": "2024-01-08", "value": 50.0},
+        {"event_type": "holder_increase", "symbol": "000001.SZ", "event_date": "2024-02-01", "value": 999.0},
+    ]
+    index = build_holder_event_index(events)
+    cases = [
+        ("000001.SZ", "2024-01-12", 20),
+        ("000001.SZ", "2024-01-04", 20),
+        ("000001.SZ", "2024-02-01", 30),
+        ("000002.SZ", "2024-01-12", 20),
+        ("999999.SZ", "2024-01-12", 20),
+    ]
+    for symbol, asof, lookback in cases:
+        assert holder_net_in_window(index, symbol, asof, lookback) == holder_net_in_window(
+            events, symbol, asof, lookback
+        )
+
+
 def test_stock_holder_increase_follow_registered_as_draft():
     assert STOCK_HOLDER_INCREASE_FOLLOW in STRATEGY_SPECS
     spec = STRATEGY_SPECS[STOCK_HOLDER_INCREASE_FOLLOW]
