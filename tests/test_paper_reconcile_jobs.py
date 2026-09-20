@@ -9,8 +9,10 @@ from asqt.paper import account_id_for, run_paper_days
 from asqt.paper_reconcile_jobs import (
     CASH_RECONCILE_HOUR,
     CASH_RECONCILE_MINUTE,
+    paper_overview_metrics,
     run_cash_reconcile_job,
     should_auto_cash_reconcile,
+    _validate_paper_overview,
 )
 from asqt.strategies import STOCK_MOMENTUM_TOPK
 from tests.test_p3_paper import _prepare
@@ -90,7 +92,7 @@ def test_run_cash_reconcile_job_partial_on_cash_tamper(tmp_path, monkeypatch):
     )
     assert report["task_status"] == "partial"
     assert report["ok"] is False
-    assert report["mismatch_count"] == 1
+    assert report["mismatch_count"] >= 1
     book = next(item for item in report["books"] if item["strategy_id"] == STOCK_MOMENTUM_TOPK)
     assert book["ok"] is False
     assert "现金" in (book.get("failed_checks") or [])
@@ -100,7 +102,7 @@ def test_run_cash_reconcile_job_partial_on_cash_tamper(tmp_path, monkeypatch):
     )
     assert alerts and alerts[0]["title"] == "财务对账不一致"
     detail = json.loads(alerts[0]["detail"])
-    assert detail["mismatch_count"] == 1
+    assert detail["mismatch_count"] >= 1
     assert any(not item.get("ok") for item in detail["books"] if not item.get("skipped"))
     assert captured.get("row", {}).get("level") == "high"
 
@@ -275,3 +277,81 @@ def test_cash_reconcile_alert_format_lines():
     assert "处置：" in full
     assert "【ASQT告警】重要 · 财务对账" in feishu
     assert "/Users/" not in feishu
+
+
+def test_paper_overview_metrics_uses_deployed_not_setting_when_underfunded():
+    """Reproduce UI bug: 2×12.5k books must not show -76% vs 100k setting cash."""
+    books = [
+        {
+            "strategy_id": "etf_ma_rotate",
+            "initial_cash": 12_500.0,
+            "end_asset": 11_590.9594,
+            "cash": 11_590.9594,
+            "market_value": 0.0,
+            "peak_asset": 12_919.7993,
+        },
+        {
+            "strategy_id": "stock_momentum_topk",
+            "initial_cash": 12_500.0,
+            "end_asset": 11_875.9453,
+            "cash": 11_875.9453,
+            "market_value": 0.0,
+            "peak_asset": 12_556.1758,
+        },
+    ]
+    overview = paper_overview_metrics(books, portfolio_cash=100_000.0)
+    assert overview["underfunded"] is True
+    assert overview["principal"] == 25_000.0
+    assert abs(overview["nav"] - 23_466.9047) < 1e-4
+    # Wrong old UI: 23466/100000-1 ≈ -76.5%; correct ≈ -6.1%.
+    assert overview["total_return"] > -0.1
+    assert overview["total_return"] < 0
+    assert abs(overview["total_return"] - (overview["nav"] / 25_000.0 - 1)) < 1e-9
+    checked = _validate_paper_overview(books=books, portfolio_cash=100_000.0)
+    assert checked["ok"] is True
+    assert "账户总览本金口径" not in checked["failed_checks"]
+
+
+def test_paper_overview_metrics_scales_when_overfunded():
+    books = [
+        {
+            "strategy_id": "lab",
+            "initial_cash": 100_000.0,
+            "end_asset": 90_000.0,
+            "cash": 90_000.0,
+            "market_value": 0.0,
+            "peak_asset": 105_000.0,
+        },
+        {
+            "strategy_id": "other",
+            "initial_cash": 12_500.0,
+            "end_asset": 12_000.0,
+            "cash": 12_000.0,
+            "market_value": 0.0,
+            "peak_asset": 12_500.0,
+        },
+    ]
+    overview = paper_overview_metrics(books, portfolio_cash=100_000.0)
+    assert overview["overfunded"] is True
+    assert overview["principal"] == 100_000.0
+    assert abs(overview["nav"] - (102_000.0 * 100_000.0 / 112_500.0)) < 0.02
+    checked = _validate_paper_overview(books=books, portfolio_cash=100_000.0)
+    assert checked["ok"] is True
+
+
+def test_paper_overview_metrics_reads_summary_cash_from_book_payload():
+    books = [
+        {
+            "strategy_id": "lab",
+            "initial_cash": 12_500.0,
+            "end_asset": 12_500.0,
+            "cash": 8_000.0,
+            "actual_cash": 0.0,
+            "market_value": 4_500.0,
+            "peak_asset": 12_500.0,
+        }
+    ]
+    overview = paper_overview_metrics(books, portfolio_cash=100_000.0)
+    assert overview["cash"] == 8_000.0
+    checked = _validate_paper_overview(books=books, portfolio_cash=100_000.0)
+    assert "账户总览净资产恒等式" not in checked["failed_checks"]

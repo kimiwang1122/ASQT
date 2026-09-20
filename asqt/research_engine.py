@@ -16,6 +16,7 @@ from asqt.selectors import select_targets
 from asqt.storage import read_market_daily
 from asqt.strategies import (
     CODE_VERSION,
+    STOCK_2560,
     STOCK_HOLDER_INCREASE_FOLLOW,
     STRATEGY_SPECS,
     adj_close,
@@ -85,6 +86,32 @@ class LocalStrategyService:
             )
         return query_all("SELECT * FROM strategy_version ORDER BY strategy_id, created_at", settings=self.settings)
 
+    def list_catalog(self) -> list[dict[str, Any]]:
+        """STRATEGY_SPECS order, including code-only strategies not yet in DB."""
+        latest: dict[str, dict[str, Any]] = {}
+        for row in self.list_versions():
+            latest[str(row["strategy_id"])] = dict(row)
+        out: list[dict[str, Any]] = []
+        for sid, spec in STRATEGY_SPECS.items():
+            if sid in latest:
+                out.append(latest[sid])
+                continue
+            out.append(
+                {
+                    "strategy_id": sid,
+                    "version": "v1",
+                    "status": "unregistered",
+                    "parameter_set_id": spec["parameter_set_id"],
+                    "code_version": CODE_VERSION,
+                    "risk_config": None,
+                    "effective_date": None,
+                }
+            )
+        for sid, row in latest.items():
+            if sid not in STRATEGY_SPECS:
+                out.append(row)
+        return out
+
     def generate_target_positions(self, strategy_id: str, trade_date: str) -> list[dict[str, Any]]:
         version = self._require_orderable(strategy_id)
         rows = read_market_daily(end=trade_date, settings=self.settings)
@@ -102,28 +129,28 @@ class LocalStrategyService:
             and signal_index > 0
             and signal_index % rebalance_every_n != 0
         )
-        if hold_prior:
-            prior = query_all(
-                """
-                SELECT symbol, target_weight FROM target_position
-                WHERE strategy_id = ? AND trade_date = (
-                    SELECT MAX(trade_date) FROM target_position
-                    WHERE strategy_id = ? AND trade_date < ?
-                )
-                """,
-                (strategy_id, strategy_id, trade_date),
-                settings=self.settings,
+        prior = query_all(
+            """
+            SELECT symbol, target_weight FROM target_position
+            WHERE strategy_id = ? AND trade_date = (
+                SELECT MAX(trade_date) FROM target_position
+                WHERE strategy_id = ? AND trade_date < ?
             )
+            """,
+            (strategy_id, strategy_id, trade_date),
+            settings=self.settings,
+        )
+        if hold_prior:
             weights = {str(row["symbol"]): float(row["target_weight"]) for row in prior}
         else:
-            weights = weights_for(
-                strategy_id,
-                rows,
-                trade_date,
-                limits=limits,
-                params=params,
-                settings=self.settings,
-            )
+            weight_kwargs: dict[str, Any] = {
+                "limits": limits,
+                "params": params,
+                "settings": self.settings,
+            }
+            if strategy_id == STOCK_2560:
+                weight_kwargs["held_symbols"] = [str(row["symbol"]) for row in prior]
+            weights = weights_for(strategy_id, rows, trade_date, **weight_kwargs)
         pool_tags = params.get("pool_tags")
         if pool_tags:
             from asqt.tags import resolve_pool
@@ -275,12 +302,41 @@ class LocalResearchEngine:
         parameter_set_id: str,
         data_version: str,
         progress: Callable[[int, int, str], None] | None = None,
+        *,
+        lab: bool = False,
+        params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if strategy_id not in STRATEGY_SPECS:
             raise ValueError(f"unknown strategy: {strategy_id}")
         spec = STRATEGY_SPECS[strategy_id]
-        if parameter_set_id != spec["parameter_set_id"]:
-            raise ValueError(f"parameter_set_id must be {spec['parameter_set_id']}")
+        pinned = spec["parameter_set_id"]
+        if parameter_set_id != pinned:
+            if not lab:
+                raise ValueError(
+                    f"parameter_set_id must be {pinned} "
+                    f"(lab=True to override paper pin; writes new id into reports)"
+                )
+            from asqt.strategies import pin_strategy_params
+
+            pin_strategy_params(
+                strategy_id,
+                params or dict(spec["params"]),
+                parameter_set_id=parameter_set_id,
+                settings=self.settings,
+                persist=True,
+            )
+            spec = STRATEGY_SPECS[strategy_id]
+        elif params is not None and lab:
+            from asqt.strategies import pin_strategy_params
+
+            pin_strategy_params(
+                strategy_id,
+                params,
+                parameter_set_id=parameter_set_id,
+                settings=self.settings,
+                persist=True,
+            )
+            spec = STRATEGY_SPECS[strategy_id]
 
         rows = read_market_daily(settings=self.settings)
         computed_version = data_version_for(rows)

@@ -1,4 +1,4 @@
-"""IS grid search → fixed OOS gate. Does not mutate paper parameter_set_id."""
+"""IS grid search → fixed OOS gate. Lab may overwrite paper parameter_set_id with a warning."""
 
 from __future__ import annotations
 
@@ -117,6 +117,25 @@ DEFAULT_GRIDS: dict[str, list[dict[str, Any]]] = {
             (3, 5),
         )
     ],
+    "stock_2560": [
+        {
+            "ma_fast": 5,
+            "ma_slow": slow,
+            "vol_fast": 5,
+            "vol_slow": vol_slow,
+            "pullback_band": band,
+            "top_k": k,
+            "max_weight": max_w,
+            "gross_limit": 0.95,
+        }
+        for slow, vol_slow, band, k, max_w in itertools.product(
+            (20, 25, 30),
+            (60,),
+            (0.02, 0.03),
+            (3, 5),
+            (0.10,),
+        )
+    ],
 }
 
 MAX_GRID = 24
@@ -182,6 +201,19 @@ def suggest_parameter_set_id(strategy_id: str, params: dict[str, Any]) -> str:
             f"stock_momentum_skip_month.k{int(params['top_k'])}"
             f".l{int(params['lookback'])}.s{int(params['skip'])}"
         )
+    if strategy_id == "stock_2560":
+        band = float(params.get("pullback_band", 0.02))
+        band_tag = f"b{int(round(band * 1000))}"
+        parts = [
+            f"stock_2560.k{int(params['top_k'])}",
+            f"f{int(params['ma_fast'])}.s{int(params['ma_slow'])}",
+            f"vf{int(params['vol_fast'])}.vs{int(params['vol_slow'])}",
+            band_tag,
+        ]
+        max_w = float(params.get("max_weight", 0.10))
+        if abs(max_w - 0.10) > 1e-9:
+            parts.append(f"w{int(round(max_w * 100))}")
+        return ".".join(parts)
     parts = [strategy_id] + [
         f"{key}{params[key]}"
         for key in sorted(params)
@@ -200,6 +232,10 @@ def simulate_path(
     is_end: str,
 ) -> dict[str, Any]:
     """Replay T+1 weights path with override params; no DB writes."""
+    if strategy_id == "stock_2560":
+        return _simulate_path_2560(
+            params=params, rows=rows, limits=limits, dates=dates, is_end=is_end
+        )
     grouped = market_by_symbol(rows)
     halted = suspended_keys(limits)
     by_date_symbol = {(str(row["trade_date"]), str(row["symbol"])): row for row in rows}
@@ -224,6 +260,115 @@ def simulate_path(
             )
         else:
             weights = dict(last_weights)
+        last_weights = weights
+        symbols = set(prev_weights) | set(weights)
+        turnover += 0.5 * sum(abs(weights.get(sym, 0.0) - prev_weights.get(sym, 0.0)) for sym in symbols)
+        prev_weights = weights
+        period_return = 0.0
+        for symbol, weight in weights.items():
+            left = by_date_symbol.get((signal_date, symbol))
+            right = by_date_symbol.get((fill_date, symbol))
+            if not left or not right:
+                continue
+            start_px = adj_close(left)
+            if start_px <= 0:
+                continue
+            period_return += weight * (adj_close(right) / start_px - 1.0)
+        nav = round(nav * (1.0 + period_return), 12)
+        point = {"trade_date": fill_date, "nav": nav, "gross": round(sum(weights.values()), 10)}
+        if fill_date <= is_end:
+            is_points.append(point)
+        else:
+            oos_points.append(point)
+    is_metrics = _nav_metrics(is_points, start_nav=1.0)
+    oos_start = float(is_points[-1]["nav"]) if is_points else 1.0
+    oos_metrics = _nav_metrics(oos_points, start_nav=oos_start)
+    sessions = max(1, len(dates) - 1)
+    return {
+        "nav": round(nav, 10),
+        "metrics": {"is": is_metrics, "oos": oos_metrics},
+        "last_weights": last_weights,
+        "avg_turnover": round(turnover / sessions, 10),
+        "in_sample_end": is_end,
+    }
+
+
+def _simulate_path_2560(
+    *,
+    params: dict[str, Any],
+    rows: list[dict[str, Any]],
+    limits: list[dict[str, Any]],
+    dates: list[str],
+    is_end: str,
+) -> dict[str, Any]:
+    """Sticky 2560 path with one timeline pass per symbol (fast grid)."""
+    from asqt.factors import rule_2560_timeline
+    from asqt.selectors import clip_weights
+
+    grouped = market_by_symbol(rows)
+    halted = suspended_keys(limits)
+    by_date_symbol = {(str(row["trade_date"]), str(row["symbol"])): row for row in rows}
+    top_k = int(params["top_k"])
+    max_weight = float(params["max_weight"])
+    gross_limit = float(params["gross_limit"])
+    tl_kw = {
+        "ma_fast": int(params["ma_fast"]),
+        "ma_slow": int(params["ma_slow"]),
+        "vol_fast": int(params["vol_fast"]),
+        "vol_slow": int(params["vol_slow"]),
+        "pullback_band": float(params["pullback_band"]),
+    }
+    timelines: dict[str, list[tuple[str, float] | None]] = {}
+    asof_index: dict[str, dict[str, int]] = {}
+    for symbol, series in grouped.items():
+        timelines[symbol] = rule_2560_timeline(series, **tl_kw)
+        asof_index[symbol] = {str(row["trade_date"]): i for i, row in enumerate(series)}
+
+    def weights_on(signal_date: str, held: list[str]) -> dict[str, float]:
+        states: dict[str, tuple[str, float]] = {}
+        for symbol, index_map in asof_index.items():
+            if (symbol, signal_date) in halted:
+                continue
+            idx = index_map.get(signal_date)
+            if idx is None:
+                continue
+            state = timelines[symbol][idx]
+            if state is not None:
+                states[symbol] = state
+        keep: list[str] = []
+        for symbol in held:
+            if symbol in states and symbol not in keep:
+                keep.append(symbol)
+            if len(keep) >= top_k:
+                break
+        slots = top_k - len(keep)
+        entries = sorted(
+            (
+                (score, symbol)
+                for symbol, (phase, score) in states.items()
+                if phase == "entry" and symbol not in keep
+            ),
+            reverse=True,
+        )
+        if not keep and slots == top_k:
+            ranked = sorted(((score, symbol) for symbol, (_p, score) in states.items()), reverse=True)
+            picked = [symbol for _score, symbol in ranked[:top_k]]
+        else:
+            picked = keep + [symbol for _score, symbol in entries[:slots]]
+        if not picked:
+            return {}
+        weight = 1.0 / len(picked)
+        return clip_weights({symbol: weight for symbol in picked}, max_weight, gross_limit)
+
+    nav = 1.0
+    is_points: list[dict[str, Any]] = []
+    oos_points: list[dict[str, Any]] = []
+    last_weights: dict[str, float] = {}
+    turnover = 0.0
+    prev_weights: dict[str, float] = {}
+    for index, signal_date in enumerate(dates[:-1]):
+        fill_date = dates[index + 1]
+        weights = weights_on(signal_date, list(last_weights))
         last_weights = weights
         symbols = set(prev_weights) | set(weights)
         turnover += 0.5 * sum(abs(weights.get(sym, 0.0) - prev_weights.get(sym, 0.0)) for sym in symbols)
@@ -315,19 +460,14 @@ def run_tune(
             {
                 "params": merged,
                 "suggested_parameter_set_id": candidate_id,
-                "blocked_paper_id": candidate_id in frozen or (candidate_id == pinned and pinned in frozen),
+                "blocked_paper_id": False,
+                "paper_id_warning": candidate_id in frozen or (candidate_id == pinned and pinned in frozen),
                 **path,
             }
         )
 
     ranked = sorted(results, key=_rank_key, reverse=True)
     winner = ranked[0] if ranked else None
-    if winner and winner.get("blocked_paper_id") and winner["suggested_parameter_set_id"] == pinned:
-        # Prefer next non-identical suggestion when top hits frozen pin with same id.
-        for row in ranked[1:]:
-            if row["suggested_parameter_set_id"] != pinned:
-                winner = row
-                break
 
     report = {
         "ok": bool(winner),
@@ -348,15 +488,20 @@ def run_tune(
             "metrics": winner["metrics"],
             "nav": winner["nav"],
             "avg_turnover": winner["avg_turnover"],
+            "paper_id_warning": bool(winner.get("paper_id_warning")),
             "note": (
-                "Copy suggested_parameter_set_id into STRATEGY_SPECS after review; "
-                "tune never mutates paper parameter sets."
+                "Lab may pin suggested_parameter_set_id via pin_strategy_params; "
+                "overwrite writes a new parameter_set_id and keep experiment reports."
+                if winner.get("paper_id_warning")
+                else "Copy suggested_parameter_set_id into STRATEGY_SPECS after review, "
+                "or pin via lab runner (reports keep history)."
             ),
         },
         "grid": [
             {
                 "params": row["params"],
                 "suggested_parameter_set_id": row["suggested_parameter_set_id"],
+                "paper_id_warning": bool(row.get("paper_id_warning")),
                 "metrics": row["metrics"],
                 "nav": row["nav"],
                 "avg_turnover": row["avg_turnover"],

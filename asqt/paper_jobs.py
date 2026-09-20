@@ -11,19 +11,12 @@ from uuid import uuid4
 
 from asqt.config import Settings, get_settings
 from asqt.db import execute, initialize_database, query_all
-from asqt.paper import PaperBusy, PAPER_BUSY_MESSAGE, run_paper_days
+from asqt.paper import PaperBusy, PaperCancelled, PAPER_BUSY_MESSAGE, run_paper_days
+from asqt.strategies import STRATEGY_LABEL
 
-STRATEGY_LABEL = {
-    "etf_ma_rotate": "ETF 均线轮动",
-    "stock_momentum_topk": "股票动量 TopK",
-    "etf_momentum_topk": "ETF 动量 TopK",
-    "stock_lowvol_momentum": "股票低波动量",
-    "etf_ma_momentum_filter": "ETF 均线动量过滤",
-    "stock_short_reversal_topk": "股票短反转 TopK",
-    "stock_momentum_volume_confirm": "股票动量量能确认",
-    "stock_momentum_skip_month": "股票跳月动量",
-    "stock_holder_increase_follow": "股票股东增持跟随",
-}
+_CANCEL_EVENTS: dict[str, threading.Event] = {}
+_CANCEL_REQUESTED: set[str] = set()
+_CANCEL_GUARD = threading.Lock()
 
 
 def _now() -> str:
@@ -54,6 +47,61 @@ def active_paper_run(settings: Settings | None = None) -> dict | None:
     return _public_row(rows[0]) if rows else None
 
 
+def clear_stale_paper_lock(settings: Settings | None = None) -> bool:
+    """Release leftover paper-run lock when no queued/running job exists."""
+    from asqt.paper import force_release_paper_run_lock, paper_run_locked
+
+    settings = settings or get_settings()
+    if active_paper_run(settings=settings):
+        return False
+    if not paper_run_locked(settings=settings):
+        return False
+    force_release_paper_run_lock(settings)
+    return True
+
+
+def cancel_paper_run(
+    run_id: str,
+    *,
+    reason: str = "用户终止跑模拟",
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Ask the worker to stop; lock is released when the thread unwinds."""
+    settings = settings or get_settings()
+    initialize_database(settings)
+    row = get_paper_run(run_id, settings=settings)
+    if not row:
+        raise ValueError("模拟任务不存在")
+    if row.get("status") not in {"queued", "running"}:
+        return row
+    note = str(reason or "用户终止跑模拟")[:500]
+    with _CANCEL_GUARD:
+        _CANCEL_REQUESTED.add(run_id)
+        event = _CANCEL_EVENTS.get(run_id)
+    if event:
+        event.set()
+        _patch(run_id, settings, status="running", progress_label="正在终止")
+        message = _message_dict((get_paper_run(run_id, settings=settings) or {}).get("message"))
+        message["fail_reason"] = note
+        execute(
+            "UPDATE task_run SET message = ? WHERE run_id = ?",
+            (json.dumps(message, ensure_ascii=False), run_id),
+            settings=settings,
+        )
+        return get_paper_run(run_id, settings=settings) or row
+    from asqt.paper import force_release_paper_run_lock
+
+    _finish(
+        run_id,
+        status="cancelled",
+        fail_reason=note,
+        settings=settings,
+        progress_label="已终止",
+    )
+    force_release_paper_run_lock(settings)
+    return get_paper_run(run_id, settings=settings) or row
+
+
 def recover_orphaned_paper_runs(settings: Settings | None = None) -> int:
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return 0
@@ -73,6 +121,9 @@ def recover_orphaned_paper_runs(settings: Settings | None = None) -> int:
             fail_reason="服务重启或代码热加载中断了模拟线程，任务并未真正跑完",
             settings=settings,
         )
+    from asqt.paper import force_release_paper_run_lock
+
+    force_release_paper_run_lock(settings)
     return len(rows)
 
 
@@ -84,23 +135,45 @@ def start_paper_job(
     mode: str = "sequential",
     settings: Settings | None = None,
     background: bool = True,
+    params: dict[str, Any] | None = None,
+    parameter_set_id: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> dict[str, Any]:
     settings = settings or get_settings()
     initialize_database(settings)
-    from asqt.paper import normalize_paper_mode, normalize_paper_targets, paper_run_locked
+    from asqt.lab_params import apply_run_pins
+    from asqt.paper import normalize_paper_mode, normalize_paper_targets
 
-    job_key, _ids = normalize_paper_targets(strategy_id, strategy_ids)
+    job_key, ids = normalize_paper_targets(strategy_id, strategy_ids)
     run_mode = normalize_paper_mode(mode)
+    pin_plan = apply_run_pins(
+        ids,
+        mode=run_mode,
+        lab_params=params,
+        parameter_set_id=parameter_set_id,
+        settings=settings,
+    )
     if active_paper_run(settings=settings):
         raise PaperBusy(PAPER_BUSY_MESSAGE)
-
-    if paper_run_locked(settings=settings):
-        raise PaperBusy(PAPER_BUSY_MESSAGE)
+    clear_stale_paper_lock(settings=settings)
     from asqt.versioning import run_signature
 
+    start = str(start_date or "").strip() or None
+    end = str(end_date or "").strip() or None
     signature = run_signature(
         "paper",
-        {"strategy_id": job_key, "days": int(days), "mode": run_mode},
+        {
+            "strategy_id": job_key,
+            "days": int(days),
+            "start_date": start,
+            "end_date": end,
+            "mode": run_mode,
+            "pin_mode": pin_plan.get("mode"),
+            "pins": {
+                sid: pin["parameter_set_id"] for sid, pin in (pin_plan.get("pins") or {}).items()
+            },
+        },
     )
     run_id = str(uuid4())
     now = _now()
@@ -116,12 +189,18 @@ def start_paper_job(
                 {
                     "strategy_id": job_key,
                     "days": days,
+                    "start_date": start,
+                    "end_date": end,
                     "mode": run_mode,
                     "run_signature": signature,
                     "progress_pct": 0,
                     "progress_done": 0,
                     "progress_total": 0,
                     "progress_label": "排队",
+                    "lab_pin_mode": pin_plan.get("mode"),
+                    "parameter_set_ids": {
+                        sid: pin["parameter_set_id"] for sid, pin in (pin_plan.get("pins") or {}).items()
+                    },
                 },
                 ensure_ascii=False,
             ),
@@ -131,13 +210,18 @@ def start_paper_job(
     if background:
         threading.Thread(
             target=_execute,
-            args=(run_id, job_key, days, settings, run_mode, signature),
+            args=(run_id, job_key, days, settings, run_mode, signature, start, end),
             daemon=True,
             name=f"asqt-paper-{run_id[:8]}",
         ).start()
     else:
-        _execute(run_id, job_key, days, settings, run_mode, signature)
-    return get_paper_run(run_id, settings=settings) or {"run_id": run_id, "status": "queued"}
+        _execute(run_id, job_key, days, settings, run_mode, signature, start, end)
+    row = get_paper_run(run_id, settings=settings) or {"run_id": run_id, "status": "queued"}
+    row["lab_pin_mode"] = pin_plan.get("mode")
+    row["parameter_set_ids"] = {
+        sid: pin["parameter_set_id"] for sid, pin in (pin_plan.get("pins") or {}).items()
+    }
+    return row
 
 
 def resume_paper_job(
@@ -171,6 +255,8 @@ def _execute(
     settings: Settings,
     mode: str = "sequential",
     expected_signature: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> None:
     if expected_signature:
         from asqt.versioning import assert_run_signature
@@ -178,36 +264,53 @@ def _execute(
         row = get_paper_run(run_id, settings=settings) or {}
         stored = _message_dict(row.get("message")).get("run_signature")
         assert_run_signature(stored, expected_signature, run_id=run_id)
-    _patch(
-        run_id,
-        settings,
-        status="running",
-        progress_label="开始模拟" if mode != "parallel" else "并行模拟",
-        progress_pct=0,
-    )
+    stop = threading.Event()
+    with _CANCEL_GUARD:
+        _CANCEL_EVENTS[run_id] = stop
+        if run_id in _CANCEL_REQUESTED:
+            stop.set()
+    current = get_paper_run(run_id, settings=settings) or {}
+    if current.get("status") not in {"queued", "running"}:
+        return
     try:
+        if stop.is_set():
+            raise PaperCancelled("用户终止跑模拟")
+        _patch(
+            run_id,
+            settings,
+            status="running",
+            progress_label="开始模拟" if mode != "parallel" else "并行模拟",
+            progress_pct=0,
+        )
 
         def progress(done: int, total: int, text: str) -> None:
+            if stop.is_set():
+                raise PaperCancelled("用户终止跑模拟")
             total = max(1, int(total))
             done = max(0, min(int(done), total))
-            _patch(
-                run_id,
-                settings,
-                status="running",
-                progress_pct=int(done * 100 / total),
-                progress_done=done,
-                progress_total=total,
-                progress_label=text[:80],
-            )
+            if done in {0, 1, total} or done % 5 == 0 or "halt" in text:
+                _patch(
+                    run_id,
+                    settings,
+                    status="running",
+                    progress_pct=int(done * 100 / total),
+                    progress_done=done,
+                    progress_total=total,
+                    progress_label=text[:80],
+                )
 
         summary = run_paper_days(
             strategy_id=strategy_id,
             days=days,
+            start_date=start_date,
+            end_date=end_date,
             settings=settings,
             progress=progress,
             record_task=False,
             mode=mode,
         )
+        if stop.is_set():
+            raise PaperCancelled("用户终止跑模拟")
         if summary.get("ok"):
             finish_status = "success"
             fail_reason = None
@@ -229,10 +332,22 @@ def _execute(
             progress_pct=100,
             progress_label=label,
         )
+    except PaperCancelled as exc:
+        _finish(
+            run_id,
+            status="cancelled",
+            fail_reason=str(exc)[:500],
+            settings=settings,
+            progress_label="已终止",
+        )
     except PaperBusy as exc:
         _finish(run_id, status="failed", fail_reason=str(exc), settings=settings)
     except Exception as exc:
         _finish(run_id, status="failed", fail_reason=str(exc)[:500], settings=settings)
+    finally:
+        with _CANCEL_GUARD:
+            _CANCEL_EVENTS.pop(run_id, None)
+            _CANCEL_REQUESTED.discard(run_id)
 
 
 def _message_dict(raw: Any) -> dict[str, Any]:

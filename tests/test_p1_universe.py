@@ -52,20 +52,20 @@ def _etf(**overrides) -> dict[str, str]:
 def test_repo_poc_universe_meets_policy():
     payload = load_poc_universe()
     assert len(payload["stocks"]) >= 50
-    assert len(payload["etfs"]) >= 5
+    assert 5 <= len(payload["etfs"]) <= 50
     assert all(row["exchange"] in {"SH", "SZ"} for row in payload["stocks"])
-    assert {row["index_name"] for row in payload["etfs"]} == {
+    indexes = {row["index_name"] for row in payload["etfs"]}
+    assert len(indexes) == len(payload["etfs"])
+    assert {
         "沪深300",
         "中证500",
         "中证1000",
         "创业板指",
         "科创50",
         "上证50",
-        "深证100",
-        "上证180",
-        "创业板50",
-        "中证A500",
-    }
+    } <= indexes
+    assert any(row["board"] == "sector" for row in payload["etfs"])
+    assert any(row["pool"] == "etf_sector_fallback" for row in payload["etfs"])
 
 
 def test_universe_rejects_bse_and_duplicate_etf_index():

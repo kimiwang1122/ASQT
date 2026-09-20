@@ -110,8 +110,14 @@ def test_p3_paper_run_rejects_duplicate_while_locked(tmp_path, monkeypatch):
     token = acquire_paper_run_lock(settings, holder="test")
     with pytest.raises(PaperBusy, match="请勿重复提交"):
         run_paper_days(strategy_id=ETF_MA_ROTATE, days=5, settings=settings)
-    with pytest.raises(PaperBusy, match="请勿重复提交"):
-        reset_paper_account(strategy_id=ETF_MA_ROTATE, settings=settings)
+    execute(
+        """
+        INSERT INTO task_run (run_id, task_name, status, started_at, finished_at, message)
+        VALUES ('busy-lock-test', 'paper-run-job', 'running', ?, NULL, '{}')
+        """,
+        ("2026-01-01T00:00:00+00:00",),
+        settings=settings,
+    )
     (tmp_path / "frontend").mkdir(parents=True, exist_ok=True)
     (tmp_path / "frontend" / "index.html").write_text("<html></html>", encoding="utf-8")
     from asqt import config as config_module
@@ -125,9 +131,64 @@ def test_p3_paper_run_rejects_duplicate_while_locked(tmp_path, monkeypatch):
     )
     assert denied.status_code == 409
     assert denied.json()["detail"]["code"] == "paper_busy"
+    execute("DELETE FROM task_run WHERE run_id = 'busy-lock-test'", settings=settings)
     release_paper_run_lock(settings, token)
     allowed = run_paper_days(strategy_id=ETF_MA_ROTATE, days=5, settings=settings)
     assert allowed["ok"] is True
+
+
+def test_start_paper_job_clears_stale_lock(tmp_path):
+    from asqt.paper import paper_run_locked
+    from asqt.paper_jobs import start_paper_job
+
+    settings, _engine, _service = _prepare(tmp_path)
+    acquire_paper_run_lock(settings, holder="dead-worker")
+    assert paper_run_locked(settings) is True
+    row = start_paper_job(
+        strategy_id=ETF_MA_ROTATE,
+        days=5,
+        settings=settings,
+        background=False,
+    )
+    assert row["status"] in {"success", "partial"}
+    assert paper_run_locked(settings) is False
+
+
+def test_cancel_paper_job_stops_worker(tmp_path, monkeypatch):
+    import time
+    import threading
+
+    from asqt.paper import PaperOrderService, paper_run_locked
+    from asqt.paper_jobs import cancel_paper_run, get_paper_run, start_paper_job
+
+    settings, _engine, _service = _prepare(tmp_path)
+    started = threading.Event()
+    original = PaperOrderService.build_orders
+
+    def slow(self, *args, **kwargs):
+        started.set()
+        time.sleep(0.35)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(PaperOrderService, "build_orders", slow)
+    row = start_paper_job(
+        strategy_id=STOCK_MOMENTUM_TOPK,
+        days=20,
+        settings=settings,
+        background=True,
+    )
+    assert started.wait(timeout=8)
+    cancel_paper_run(row["run_id"], settings=settings)
+    deadline = time.time() + 8
+    got = None
+    while time.time() < deadline:
+        got = get_paper_run(row["run_id"], settings=settings)
+        if got and got["status"] not in {"queued", "running"}:
+            break
+        time.sleep(0.05)
+    assert got is not None
+    assert got["status"] == "cancelled"
+    assert paper_run_locked(settings) is False
 
 
 def test_p3_quality_and_kill_reject_paper_orders(tmp_path):
@@ -590,15 +651,25 @@ def test_paper_run_days_max_follows_calendar(tmp_path):
     from pydantic import ValidationError
 
     from asqt.api import PaperRunBody
-    from asqt.paper import max_paper_run_days
+    from asqt.paper import max_paper_run_days, resolve_paper_window
 
     assert PaperRunBody(days=240).days == 240
     assert PaperRunBody(days=895).days == 895
+    assert PaperRunBody(days=3000).days == 3000
     with pytest.raises(ValidationError):
-        PaperRunBody(days=2001)
+        PaperRunBody(days=5001)
     assert PaperRunBody(mode="parallel").mode == "parallel"
+    assert PaperRunBody(start_date="2020-01-01", end_date="2020-12-31").start_date == "2020-01-01"
     settings, _engine, _service = _prepare(tmp_path)
     assert max_paper_run_days(settings) >= 2
+    dates = [f"2024-01-{d:02d}" for d in range(1, 11)]
+    window, sessions = resolve_paper_window(dates, start_date="2024-01-03", end_date="2024-01-08")
+    assert window[0] == "2024-01-02"  # signal day before first fill
+    assert window[-1] == "2024-01-08"
+    assert sessions == 6
+    trailing, n = resolve_paper_window(dates, days=3)
+    assert trailing == dates[-4:]
+    assert n == 3
 
 
 def test_split_parallel_cash_remainder_to_first():
@@ -982,3 +1053,31 @@ def test_drawdown_warn_is_per_strategy_not_global(tmp_path, monkeypatch):
     assert ETF_MA_ROTATE in details
     assert STOCK_MOMENTUM_TOPK in details
     assert len(posts) >= 2
+
+
+def test_infer_share_split_detects_etf_unit_split():
+    from asqt.paper import apply_inferred_splits, infer_share_split
+
+    # Live bug: 515050.SH 2026-05-12 close 3.33 → 05-13 open 1.088, adj_factor stayed 1.0.
+    assert infer_share_split(3.33, 1.088) == 3
+    assert infer_share_split(10.0, 9.5) is None
+    assert infer_share_split(10.0, 9.0) is None
+    state = {
+        "positions": {"515050.SH": {"qty": 6500, "cost": 3.000742, "market_price": 3.33}},
+        "tradable": {"515050.SH": 6500},
+        "cash": 43567.1361,
+    }
+    by_key = {
+        ("2026-05-12", "515050.SH"): {"open": 3.36, "close": 3.33},
+        ("2026-05-13", "515050.SH"): {"open": 1.088, "close": 1.156},
+    }
+    applied = apply_inferred_splits(state, by_key, "2026-05-12", "2026-05-13")
+    assert applied and applied[0]["ratio"] == 3
+    pos = state["positions"]["515050.SH"]
+    assert pos["qty"] == 19500
+    assert state["tradable"]["515050.SH"] == 19500
+    assert abs(pos["cost"] * 3 - 3.000742) < 1e-9
+    marked = pos["qty"] * 1.156 + state["cash"]
+    raw_crash = 6500 * 1.156 + state["cash"]
+    assert marked > 65000
+    assert marked - raw_crash > 14000

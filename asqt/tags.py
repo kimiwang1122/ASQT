@@ -49,16 +49,12 @@ def resolve_pool(
     return {str(row["symbol"]) for row in rows}
 
 
-def list_tags(
+def _tag_where(
     *,
     tag: str | None = None,
     symbol: str | None = None,
     source: str | None = None,
-    limit: int = 5000,
-    settings: Settings | None = None,
-) -> list[dict[str, Any]]:
-    settings = settings or get_settings()
-    initialize_database(settings)
+) -> tuple[str, list[object]]:
     clauses: list[str] = []
     params: list[object] = []
     if tag:
@@ -71,9 +67,68 @@ def list_tags(
         clauses.append("source = ?")
         params.append(source.strip())
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    return where, params
+
+
+def count_tags(
+    *,
+    tag: str | None = None,
+    symbol: str | None = None,
+    source: str | None = None,
+    settings: Settings | None = None,
+) -> int:
+    settings = settings or get_settings()
+    initialize_database(settings)
+    where, params = _tag_where(tag=tag, symbol=symbol, source=source)
+    rows = query_all(
+        f"SELECT COUNT(*) AS c FROM symbol_tag {where}",
+        tuple(params),
+        settings=settings,
+    )
+    return int(rows[0]["c"]) if rows else 0
+
+
+def summarize_tags(
+    *,
+    tag: str | None = None,
+    symbol: str | None = None,
+    source: str | None = None,
+    limit: int = 12,
+    settings: Settings | None = None,
+) -> list[dict[str, Any]]:
+    settings = settings or get_settings()
+    initialize_database(settings)
+    where, params = _tag_where(tag=tag, symbol=symbol, source=source)
     params.append(max(1, int(limit)))
     return query_all(
-        f"SELECT * FROM symbol_tag {where} ORDER BY tag, symbol LIMIT ?",
+        f"""
+        SELECT tag, COUNT(*) AS count
+        FROM symbol_tag
+        {where}
+        GROUP BY tag
+        ORDER BY count DESC, tag
+        LIMIT ?
+        """,
+        tuple(params),
+        settings=settings,
+    )
+
+
+def list_tags(
+    *,
+    tag: str | None = None,
+    symbol: str | None = None,
+    source: str | None = None,
+    limit: int = 5000,
+    offset: int = 0,
+    settings: Settings | None = None,
+) -> list[dict[str, Any]]:
+    settings = settings or get_settings()
+    initialize_database(settings)
+    where, params = _tag_where(tag=tag, symbol=symbol, source=source)
+    params.extend([max(1, int(limit)), max(0, int(offset))])
+    return query_all(
+        f"SELECT * FROM symbol_tag {where} ORDER BY tag, symbol LIMIT ? OFFSET ?",
         tuple(params),
         settings=settings,
     )

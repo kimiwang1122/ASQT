@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from asqt.config import Settings, ensure_runtime_dirs, get_settings
 from asqt.db import execute, initialize_database, query_all
-from asqt.strategies import STRATEGY_SPECS
+from asqt.strategies import STRATEGY_LABEL, STRATEGY_SPECS
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 # After cross-source (19:15) and before cron fallback (20:05).
@@ -18,17 +18,6 @@ CASH_RECONCILE_HOUR = 19
 CASH_RECONCILE_MINUTE = 45
 TASK_NAME = "cash-reconcile"
 STALE_RUNNING_MINUTES = 30
-STRATEGY_LABEL = {
-    "etf_ma_rotate": "ETF 均线轮动",
-    "stock_momentum_topk": "股票动量 TopK",
-    "etf_momentum_topk": "ETF 动量 TopK",
-    "stock_lowvol_momentum": "股票低波动量",
-    "etf_ma_momentum_filter": "ETF 均线动量过滤",
-    "stock_short_reversal_topk": "股票短反转 TopK",
-    "stock_momentum_volume_confirm": "股票动量量能确认",
-    "stock_momentum_skip_month": "股票跳月动量",
-    "stock_holder_increase_follow": "股票股东增持跟随",
-}
 
 
 def _now() -> str:
@@ -298,6 +287,7 @@ def _validate_paper_book(
         "initial_cash": initial,
         "expected_share": expected_share,
         "peak_asset": peak,
+        "cash": cash,
         "actual_cash": reconcile.get("actual_cash"),
         "expected_cash": reconcile.get("expected_cash"),
         "cash_diff": reconcile.get("cash_diff"),
@@ -306,6 +296,87 @@ def _validate_paper_book(
         "total_return": total_return,
         "qty_mismatches": len(reconcile.get("qty_mismatches") or []),
         "failed_checks": failed,
+    }
+
+
+def paper_overview_metrics(
+    books: list[dict[str, Any]],
+    *,
+    portfolio_cash: float,
+) -> dict[str, Any]:
+    """Canonical 账户总览 metrics for monitoring (mirrors frontend buildPaperOverviewAccount).
+
+    Principal = deployed book cash; only when lab overfunds above setting cash do we
+    scale NAV down to setting cash. Never divide subset NAV by full setting cash.
+    """
+    deployed = round(sum(float(item.get("initial_cash") or 0) for item in books), 4)
+    nav_raw = round(sum(float(item.get("end_asset") or 0) for item in books), 4)
+    cash_raw = round(sum(float(item.get("cash") or 0) for item in books), 4)
+    mv_raw = round(sum(float(item.get("market_value") or 0) for item in books), 4)
+    peak_raw = round(sum(float(item.get("peak_asset") or 0) for item in books), 4)
+    setting = float(portfolio_cash or 0)
+    overfunded = deployed > 0 and setting > 0 and deployed > setting * 1.05
+    underfunded = deployed > 0 and setting > 0 and setting > deployed * 2.5
+    scale = (setting / deployed) if overfunded else 1.0
+    principal = round(deployed * scale, 4)
+    nav = round(nav_raw * scale, 4)
+    peak = round(peak_raw * scale, 4)
+    total_return = (nav / principal - 1.0) if principal else 0.0
+    peak_return = (peak / principal - 1.0) if principal else 0.0
+    return {
+        "setting_cash": setting,
+        "deployed_raw": deployed,
+        "overfunded": overfunded,
+        "underfunded": underfunded,
+        "funding_scale": scale,
+        "principal": principal,
+        "nav": nav,
+        "cash": round(cash_raw * scale, 4),
+        "market_value": round(mv_raw * scale, 4),
+        "peak_asset": peak,
+        "total_return": total_return,
+        "peak_return": peak_return,
+    }
+
+
+def _validate_paper_overview(
+    *,
+    books: list[dict[str, Any]],
+    portfolio_cash: float,
+) -> dict[str, Any]:
+    """Monitoring checks for 账户总览口径 (principal / return / peak)."""
+    failed: list[str] = []
+    overview = paper_overview_metrics(books, portfolio_cash=portfolio_cash)
+    principal = float(overview["principal"])
+    nav = float(overview["nav"])
+    peak = float(overview["peak_asset"])
+    cash = float(overview["cash"])
+    mv = float(overview["market_value"])
+    total_return = float(overview["total_return"])
+    peak_return = float(overview["peak_return"])
+
+    if not _approx(nav, cash + mv, abs_tol=0.05):
+        failed.append("账户总览净资产恒等式")
+    if principal > 0 and not _approx(total_return, nav / principal - 1.0, abs_tol=1e-6):
+        failed.append("账户总览累计收益")
+    if principal > 0 and not _approx(peak_return, peak / principal - 1.0, abs_tol=1e-6):
+        failed.append("账户总览峰值收益")
+    if peak + 1e-9 < nav:
+        failed.append("账户总览峰值资产")
+    # Guard the exact UI bug: subset books priced against full setting cash.
+    if (
+        overview["underfunded"]
+        and overview["deployed_raw"] > 0
+        and _approx(principal, float(overview["setting_cash"]), abs_tol=1.0)
+    ):
+        failed.append("账户总览本金口径")
+    if overview["overfunded"] and not _approx(principal, float(overview["setting_cash"]), abs_tol=0.05):
+        failed.append("账户总览超配缩放")
+
+    return {
+        "ok": not failed,
+        "failed_checks": failed,
+        **overview,
     }
 
 
@@ -326,6 +397,7 @@ def _validate_paper_portfolio(
             "nav": 0.0,
             "funding_complete": False,
             "failed_checks": [],
+            "overview": _validate_paper_overview(books=[], portfolio_cash=portfolio_cash),
         }
     deployed = round(sum(float(item.get("initial_cash") or 0) for item in books), 4)
     nav = round(sum(float(item.get("end_asset") or 0) for item in books), 4)
@@ -345,6 +417,9 @@ def _validate_paper_portfolio(
         failed.append("净资产疑似满额加总")
     if funding_complete and not (portfolio_cash * 0.4 <= nav <= portfolio_cash * 1.8):
         failed.append("组合净资产异常")
+    overview = _validate_paper_overview(books=books, portfolio_cash=portfolio_cash)
+    if overview.get("ok") is False:
+        failed.extend(str(name) for name in (overview.get("failed_checks") or []))
     return {
         "ok": not failed,
         "portfolio_cash": portfolio_cash,
@@ -354,6 +429,7 @@ def _validate_paper_portfolio(
         "nav": nav,
         "funding_complete": funding_complete,
         "failed_checks": failed,
+        "overview": overview,
     }
 
 

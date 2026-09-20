@@ -373,7 +373,7 @@
                     <th>类型</th>
                     <th>代码</th>
                     <th class="col-actor">主体</th>
-                    <th class="num">数值</th>
+                    <th class="num" title="增减持变动股数">变动数量</th>
                     <th>来源</th>
                   </tr>
                 </thead>
@@ -456,7 +456,7 @@
               <h2>策略版本</h2>
               <span>生命周期 · 仅 paper 可下单</span>
             </div>
-            <p class="hint">草稿 / 回测 / 候选不能写可下单目标仓。准入模拟后才生成目标仓并由 PaperBroker 撮合。改参必须新版本，禁止改已 paper 的参数组。另有 `stock_lowvol_momentum`（动量/波动）、`etf_ma_momentum_filter`（均线过滤+动量）、`stock_short_reversal_topk`（短反转 TopK）、`stock_momentum_volume_confirm`（动量量能确认）、`stock_momentum_skip_month`（跳月动量）；调参用 CLI `asqt tune`，禁止改已 paper 参数组。样本沿用完整日 K（约 2018 起）。</p>
+            <p class="hint">草稿 / 回测 / 候选不能写可下单目标仓。准入模拟后才生成目标仓并由 PaperBroker 撮合。代码里新增、尚未回测的策略会显示「未注册」：勾选后点「重跑回测」，通过变为「候选」，再填原因点「准入模拟池」。实验室可覆盖已 paper 的参数组：覆盖前会写入新 `parameter_set_id` 并落实验报告。另有 `stock_lowvol_momentum`（动量/波动）、`etf_ma_momentum_filter`（均线过滤+动量）、`stock_short_reversal_topk`（短反转 TopK）、`stock_momentum_volume_confirm`（动量量能确认）、`stock_momentum_skip_month`（跳月动量）、`stock_2560`（25日线+60日均量）；调参用 CLI `asqt tune` 或实验室网格脚本。样本沿用完整日 K（约 2018 起）。</p>
             <p class="hint" id="strategy-gate-hint" hidden></p>
             <div class="strategy-batch" id="strategy-batch-bar">
               <div class="strategy-batch-meta">
@@ -511,6 +511,58 @@
           </section>
           <section class="panel">
             <div class="panel-title">
+              <h2>规则引擎 / 实验室参数</h2>
+              <span id="lab-rule-meta">增删改参数组</span>
+            </div>
+            <p class="hint">按策略配置可选参数组。内置组只能另存；自定义组可改、可删。交易页单策略顺序模拟时从这里选；「设为默认」给多策略/并行用。</p>
+            <form class="filters filters-inline" id="lab-rule-pick">
+              <label class="filter-inline">
+                策略
+                <select id="lab-rule-strategy" data-asqt-select="wide">
+                  <option value="etf_ma_rotate">ETF 均线轮动</option>
+                  <option value="stock_momentum_topk">股票动量 TopK</option>
+                  <option value="etf_momentum_topk">ETF 动量 TopK</option>
+                  <option value="stock_lowvol_momentum">股票低波动量</option>
+                  <option value="etf_ma_momentum_filter" selected>ETF 均线动量过滤</option>
+                  <option value="stock_short_reversal_topk">股票短反转 TopK</option>
+                  <option value="stock_momentum_volume_confirm">股票动量量能确认</option>
+                  <option value="stock_momentum_skip_month">股票跳月动量</option>
+                  <option value="stock_holder_increase_follow">股票股东增持跟随</option>
+                  <option value="stock_2560">股票2560战法</option>
+                </select>
+              </label>
+              <label class="filter-action">
+                <button type="button" class="secondary" id="lab-rule-new">新建</button>
+              </label>
+            </form>
+            <form class="filters filters-inline" id="lab-rule-form">
+              <div id="lab-rule-fields" class="lab-rule-fields"></div>
+              <label class="filter-action">
+                <button type="submit" id="lab-rule-save">保存</button>
+              </label>
+            </form>
+            <p id="lab-rule-hint" class="hint" hidden></p>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>参数组</th>
+                    <th>规则</th>
+                    <th>来源</th>
+                    <th>状态</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="lab-rule-body">
+                  <tr>
+                    <td colspan="5" class="empty-hint">选择策略后显示参数组。</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-title">
               <h2>最近实验</h2>
             </div>
             <div class="table-wrap">
@@ -551,6 +603,7 @@
                   <option value="stock_momentum_volume_confirm">股票动量量能确认</option>
                   <option value="stock_momentum_skip_month">股票跳月动量</option>
                   <option value="stock_holder_increase_follow">股票股东增持跟随</option>
+                  <option value="stock_2560">股票2560战法</option>
                 </select>
               </label>
               <label class="filter-action">
@@ -619,6 +672,7 @@
                   <option value="stock_momentum_volume_confirm">股票动量量能确认</option>
                   <option value="stock_momentum_skip_month">股票跳月动量</option>
                   <option value="stock_holder_increase_follow">股票股东增持跟随</option>
+                  <option value="stock_2560">股票2560战法</option>
                 </select>
               </label>
               <label class="filter-inline">
@@ -685,6 +739,11 @@
             </form>
             <p id="tags-action-hint" class="hint" hidden></p>
             <div class="kv-grid" id="tags-summary"></div>
+            <div class="pager" id="tags-pager">
+              <button type="button" class="secondary" id="tags-prev">上一页</button>
+              <span id="tags-page-label">-</span>
+              <button type="button" class="secondary" id="tags-next">下一页</button>
+            </div>
             <div class="table-wrap">
               <table>
                 <thead>
@@ -696,7 +755,11 @@
                     <th>更新</th>
                   </tr>
                 </thead>
-                <tbody id="tags-body"></tbody>
+                <tbody id="tags-body">
+                  <tr>
+                    <td colspan="5" class="empty-hint">暂无标签。宇宙同步或手工写入后会显示。</td>
+                  </tr>
+                </tbody>
               </table>
             </div>
           </section>
@@ -708,7 +771,7 @@
               <h2>模拟账户</h2>
               <span>PaperBroker · 次日开盘撮合</span>
             </div>
-            <p class="hint" id="paper-account-hint">先在策略页准入模拟，再跑连续交易日。急停优先于一切信号。</p>
+            <p class="hint" id="paper-account-hint">先在策略页准入模拟，再跑连续交易日。急停优先于一切信号。实验室改参仅在「只选 1 个策略 + 顺序跑模拟」时可用；多策略或并行一律用默认参数组（可点「设为默认」保存）。</p>
             <form class="filters filters-inline" id="paper-run-form">
               <label class="filter-inline">
                 策略
@@ -722,11 +785,24 @@
                   <option value="stock_short_reversal_topk" selected>股票短反转 TopK</option>
                   <option value="stock_momentum_volume_confirm" selected>股票动量量能确认</option>
                   <option value="stock_momentum_skip_month" selected>股票跳月动量</option>
+                  <option value="stock_holder_increase_follow">股票股东增持跟随</option>
+                  <option value="stock_2560">股票2560战法</option>
                 </select>
               </label>
               <label class="filter-inline">
                 天数
-                <input id="paper-run-days" type="number" min="2" max="2000" value="20" title="最多可跑到当前行情可用交易日上限" />
+                <input id="paper-run-days" type="number" min="1" max="5000" value="20" title="从最近行情往前推的撮合天数；若填写开始/结束日期则以日期为准" />
+              </label>
+              <label class="filter-inline">
+                开始
+                <input id="paper-run-start" type="date" title="首个撮合日（含）；需与结束同时填写。系统会自动取前一交易日做信号日" />
+              </label>
+              <label class="filter-inline">
+                结束
+                <input id="paper-run-end" type="date" title="最后撮合日（含）；需与开始同时填写" />
+              </label>
+              <label class="filter-action">
+                <button type="button" class="secondary" id="paper-run-stop" hidden title="终止当前这次跑模拟，已写出的快照会留下">终止</button>
               </label>
               <label class="filter-action">
                 <button type="submit" id="paper-run-submit" title="组合本金按本次勾选/参与跑模拟的策略数均分；只选 1 个则拿满组合本金；总览看净资产合计">跑模拟</button>
@@ -741,6 +817,15 @@
                 <button type="button" class="secondary" id="paper-clear-halt" hidden title="清除当前账本的平仓中/已平仓状态，后续交易日可再买卖；需填写原因">解除单策略平仓</button>
               </label>
             </form>
+            <div class="filters filters-inline" id="paper-lab-row">
+              <label class="filter-inline" id="paper-lab-params-wrap">
+                实验室参数
+                <select id="paper-lab-preset" data-asqt-select="wide" title="仅单策略顺序模拟可改参；多策略/并行强制默认参数组"></select>
+              </label>
+              <label class="filter-action" id="paper-lab-default-wrap">
+                <button type="button" class="secondary" id="paper-lab-set-default" title="把当前参数组设为多策略/并行时的默认钉扎">设为默认</button>
+              </label>
+            </div>
             <form class="filters filters-inline" id="kill-switch-form">
               <label class="filter-inline">
                 急停
@@ -809,8 +894,34 @@
                 </div>
                 <span id="paper-chart-meta">相对本金 1,000,000</span>
               </div>
+              <div id="paper-lab-metrics" class="paper-lab-metrics" hidden></div>
               <div id="paper-equity-chart" class="paper-chart" role="img" aria-label="模拟净值时间线"></div>
-              <p class="hint" id="paper-chart-hint">净值面积图。悬停或点选日期会弹出当日明细，并与下方列表互相同步；列表按日期由近到远，点行可展开当日成交。</p>
+              <p class="hint" id="paper-chart-hint">净值面积图。悬停或点选日期会弹出当日明细，并与下方列表互相同步；列表按日期由近到远，点行可展开当日成交。选中「ETF 均线动量过滤」时叠加基准与市场状态色带。</p>
+              <div id="paper-lab-grid-panel" class="paper-lab-grid-panel" hidden>
+                <div class="panel-title">
+                  <h3>实验室参数对比</h3>
+                  <span id="paper-lab-grid-meta">6×240 日 paper</span>
+                </div>
+                <p class="hint">来自最近一次 `etf_ma_momentum_grid` 批量实验；按累计收益排序。绿色行为最优参数组。</p>
+                <div class="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>参数组</th>
+                        <th>均线</th>
+                        <th>TopK</th>
+                        <th>累计收益</th>
+                        <th>最大回撤</th>
+                        <th>上涨市</th>
+                        <th>震荡市</th>
+                        <th>下跌市</th>
+                        <th>费用</th>
+                      </tr>
+                    </thead>
+                    <tbody id="paper-lab-grid-body"></tbody>
+                  </table>
+                </div>
+              </div>
             </div>
             <div class="table-wrap">
               <table>
@@ -923,30 +1034,12 @@
               <h2>人工覆盖</h2>
               <span id="override-page-meta">force_in / force_out / cap</span>
             </div>
-            <p class="hint">按策略改写目标仓后再进模拟撮合；写入会记 operation_audit。force_out 剔除，force_in / cap 需填权重（0–1）。</p>
-            <form class="filters filters-inline" id="override-filters">
-              <label class="filter-inline">
-                策略
-                <select id="override-filter-strategy" data-asqt-select="wide">
-                  <option value="">全部</option>
-                  <option value="etf_ma_rotate">ETF 均线轮动</option>
-                  <option value="stock_momentum_topk">股票动量 TopK</option>
-                  <option value="etf_momentum_topk">ETF 动量 TopK</option>
-                  <option value="stock_lowvol_momentum">股票低波动量</option>
-                  <option value="etf_ma_momentum_filter">ETF 均线动量过滤</option>
-                  <option value="stock_short_reversal_topk">股票短反转 TopK</option>
-                  <option value="stock_momentum_volume_confirm">股票动量量能确认</option>
-                  <option value="stock_momentum_skip_month">股票跳月动量</option>
-                </select>
-              </label>
-              <label class="filter-action">
-                <button type="submit">刷新</button>
-              </label>
-            </form>
+            <p class="hint">按策略改写目标仓后再进模拟撮合；写入会记 operation_audit。force_out 剔除，force_in / cap 需填权重（0–1）。策略选「全部」只用于筛选列表；保存覆盖须选具体策略。</p>
             <form class="filters filters-inline" id="override-upsert-form">
               <label class="filter-inline">
                 策略
-                <select id="override-strategy" data-asqt-select="wide" required>
+                <select id="override-strategy" data-asqt-select="wide">
+                  <option value="">全部</option>
                   <option value="etf_ma_rotate">ETF 均线轮动</option>
                   <option value="stock_momentum_topk" selected>股票动量 TopK</option>
                   <option value="etf_momentum_topk">ETF 动量 TopK</option>
@@ -955,7 +1048,12 @@
                   <option value="stock_short_reversal_topk">股票短反转 TopK</option>
                   <option value="stock_momentum_volume_confirm">股票动量量能确认</option>
                   <option value="stock_momentum_skip_month">股票跳月动量</option>
+                  <option value="stock_holder_increase_follow">股票股东增持跟随</option>
+                  <option value="stock_2560">股票2560战法</option>
                 </select>
+              </label>
+              <label class="filter-action">
+                <button type="button" class="secondary" id="override-refresh">刷新</button>
               </label>
               <label class="filter-inline">
                 代码
@@ -1086,6 +1184,8 @@
                   <option value="stock_short_reversal_topk">股票短反转 TopK</option>
                   <option value="stock_momentum_volume_confirm">股票动量量能确认</option>
                   <option value="stock_momentum_skip_month">股票跳月动量</option>
+                  <option value="stock_holder_increase_follow">股票股东增持跟随</option>
+                  <option value="stock_2560">股票2560战法</option>
                 </select>
               </label>
               <label class="filter-action">
@@ -1273,6 +1373,6 @@
         </div>
       </div>
     </div>
-    <script src="/assets/app.js?v=p3-ui93"></script>
+    <script src="/assets/app.js?v=p3-ui94"></script>
   </body>
 </html>

@@ -37,6 +37,14 @@ _BUILTIN: dict[str, Callable[..., float | None]] = {
     "risk_adjusted_momentum": lambda hist, **kw: F.risk_adjusted_momentum(
         hist, lookback=int(kw["lookback"]), vol_window=int(kw["vol_window"])
     ),
+    "rule_2560": lambda hist, **kw: F.rule_2560(
+        hist,
+        ma_fast=int(kw.get("ma_fast", 5)),
+        ma_slow=int(kw.get("ma_slow", 25)),
+        vol_fast=int(kw.get("vol_fast", 5)),
+        vol_slow=int(kw.get("vol_slow", 60)),
+        pullback_band=float(kw.get("pullback_band", 0.02)),
+    ),
 }
 
 

@@ -14,6 +14,7 @@ from asqt.storage import write_market_daily
 from asqt.strategies import (
     ETF_MA_ROTATE,
     ETF_MOMENTUM_TOPK,
+    STOCK_2560,
     STOCK_MOMENTUM_TOPK,
     STRATEGY_SPECS,
     asof_rows,
@@ -318,6 +319,10 @@ def test_p2_attribution_api(tmp_path, monkeypatch):
     client = TestClient(create_app())
     versions = client.get("/api/strategies").json()
     assert any(row["strategy_id"] == STOCK_MOMENTUM_TOPK for row in versions)
+    by_id = {row["strategy_id"]: row for row in versions}
+    assert STOCK_2560 in by_id
+    assert by_id[STOCK_2560]["status"] == "unregistered"
+    assert by_id[STOCK_MOMENTUM_TOPK]["status"] != "unregistered"
     experiments = client.get("/api/research/experiments").json()
     assert any(row["strategy_id"] == STOCK_MOMENTUM_TOPK for row in experiments)
     attr = client.get("/api/research/attribution", params={"strategy_id": STOCK_MOMENTUM_TOPK}).json()

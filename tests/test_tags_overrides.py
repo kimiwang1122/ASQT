@@ -143,9 +143,13 @@ def test_tags_and_overrides_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     )
     assert posted.status_code == 200
     assert posted.json()[0]["symbol"] == "000001.SZ"
-    listed = client.get("/api/tags", params={"tag": "hs300"})
+    listed = client.get("/api/tags", params={"tag": "hs300", "page": 1, "page_size": 10})
     assert listed.status_code == 200
-    assert listed.json()[0]["symbol"] == "000001.SZ"
+    body = listed.json()
+    assert body["total"] == 1
+    assert body["page"] == 1
+    assert body["items"][0]["symbol"] == "000001.SZ"
+    assert body["summary"][0]["tag"] == "hs300"
     pool = client.get("/api/pools/hs300")
     assert pool.status_code == 200
     assert {row["symbol"] for row in pool.json()} == {"000001.SZ"}

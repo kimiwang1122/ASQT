@@ -144,9 +144,27 @@ class PaperRunBody(BaseModel):
     strategy_id: str = "all"
     strategy_ids: list[str] | None = None
     # Hard ceiling for request validation; runtime still caps to available sessions - 1.
-    days: int = Field(default=20, ge=2, le=2000)
+    # Date-range runs may exceed the old 2000-day UI default.
+    days: int = Field(default=20, ge=1, le=5000)
+    start_date: str | None = None
+    end_date: str | None = None
     background: bool = True
     mode: str = "sequential"
+    # Lab override: only allowed for single-strategy sequential runs.
+    params: dict | None = None
+    parameter_set_id: str | None = None
+
+
+class PaperLabDefaultBody(BaseModel):
+    strategy_id: str
+    params: dict = Field(default_factory=dict)
+    parameter_set_id: str | None = None
+
+
+class PaperLabPresetBody(BaseModel):
+    strategy_id: str
+    params: dict = Field(default_factory=dict)
+    replace_id: str | None = None
 
 
 class PaperHaltClearBody(BaseModel):
@@ -296,8 +314,9 @@ def create_app() -> FastAPI:
         limit_count = query_all("SELECT COUNT(*) AS c FROM limit_suspension", settings=settings)[0]["c"]
         factor_count = query_all("SELECT COUNT(*) AS c FROM factor_signal", settings=settings)[0]["c"]
         from asqt.ops import kill_engaged, paper_trading_enabled
-        from asqt.paper import max_paper_run_days
+        from asqt.paper import max_paper_run_days, paper_market_date_bounds
 
+        bounds = paper_market_date_bounds(settings)
         return {
             "data_sources": data_sources,
             "instruments": instruments,
@@ -313,6 +332,8 @@ def create_app() -> FastAPI:
             "kill_switch": kill_engaged(settings),
             "paper_trading": paper_trading_enabled(settings),
             "max_paper_days": max_paper_run_days(settings),
+            "paper_first_date": bounds.get("first_date"),
+            "paper_last_date": bounds.get("last_date"),
             "ports": port_entries(),
             "layout": settings.layout(),
         }
@@ -758,7 +779,7 @@ def create_app() -> FastAPI:
     def strategies() -> list[dict]:
         from asqt.research_engine import LocalStrategyService
 
-        return LocalStrategyService(settings).list_versions()
+        return LocalStrategyService(settings).list_catalog()
 
     @app.get("/api/research/experiments")
     def experiments() -> list[dict]:
@@ -990,9 +1011,13 @@ def create_app() -> FastAPI:
                 strategy_id=payload.strategy_id,
                 strategy_ids=payload.strategy_ids,
                 days=payload.days,
+                start_date=payload.start_date,
+                end_date=payload.end_date,
                 mode=payload.mode,
                 settings=settings,
                 background=payload.background,
+                params=payload.params,
+                parameter_set_id=payload.parameter_set_id,
             )
         except PaperBusy as exc:
             raise HTTPException(
@@ -1001,6 +1026,87 @@ def create_app() -> FastAPI:
             ) from exc
         except (ValueError, PermissionError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/paper/run/{run_id}/cancel")
+    def paper_run_cancel(run_id: str, payload: dict | None = None) -> dict:
+        from asqt.paper_jobs import cancel_paper_run
+
+        body = payload or {}
+        reason = str(body.get("reason") or "用户终止跑模拟")
+        try:
+            return cancel_paper_run(run_id, reason=reason, settings=settings)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/paper/lab/defaults")
+    def paper_lab_defaults() -> dict:
+        from asqt.lab_params import load_lab_defaults
+
+        defaults = load_lab_defaults(settings=settings)
+        return {"ok": True, "defaults": defaults}
+
+    @app.put("/api/paper/lab/defaults")
+    def put_paper_lab_default(body: PaperLabDefaultBody) -> dict:
+        from asqt.lab_params import load_lab_defaults, set_lab_default
+
+        try:
+            pin = set_lab_default(
+                body.strategy_id,
+                body.params,
+                parameter_set_id=body.parameter_set_id,
+                settings=settings,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "default": pin, "defaults": load_lab_defaults(settings=settings)}
+
+    @app.get("/api/paper/lab/presets")
+    def paper_lab_presets(strategy_id: str = Query(...)) -> dict:
+        from asqt.lab_params import load_lab_defaults, param_schema, presets_for
+
+        try:
+            presets = presets_for(strategy_id, settings=settings)
+            default = load_lab_defaults(settings=settings).get(strategy_id)
+            schema = param_schema(strategy_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "strategy_id": strategy_id,
+            "schema": schema,
+            "presets": presets,
+            "default": default,
+        }
+
+    @app.post("/api/paper/lab/presets")
+    def post_paper_lab_preset(body: PaperLabPresetBody) -> dict:
+        from asqt.lab_params import presets_for, upsert_preset
+
+        try:
+            preset = upsert_preset(
+                body.strategy_id,
+                body.params,
+                replace_id=body.replace_id,
+                settings=settings,
+            )
+            presets = presets_for(body.strategy_id, settings=settings)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"ok": True, "preset": preset, "presets": presets}
+
+    @app.delete("/api/paper/lab/presets")
+    def delete_paper_lab_preset(
+        strategy_id: str = Query(...),
+        parameter_set_id: str = Query(...),
+    ) -> dict:
+        from asqt.lab_params import delete_preset, presets_for
+
+        try:
+            deleted = delete_preset(strategy_id, parameter_set_id, settings=settings)
+            presets = presets_for(strategy_id, settings=settings)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {**deleted, "presets": presets}
 
     @app.get("/api/paper/run/active")
     def paper_run_active() -> dict:
@@ -1090,6 +1196,31 @@ def create_app() -> FastAPI:
 
         return paper_board(strategy_id, settings)
 
+    @app.get("/api/paper/lab/timeline")
+    def paper_lab_timeline(
+        strategy_id: str = Query(...),
+        benchmark: str = Query(default="510300.SH"),
+    ) -> dict:
+        from asqt.lab_timeline import lab_timeline
+
+        try:
+            return lab_timeline(strategy_id, settings=settings, benchmark_symbol=benchmark)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/paper/lab/grid")
+    def paper_lab_grid(
+        strategy_id: str = Query(default="etf_ma_momentum_filter"),
+    ) -> dict:
+        from asqt.lab_timeline import LAB_GRID_STRATEGY, load_latest_lab_grid
+
+        if strategy_id != LAB_GRID_STRATEGY:
+            raise HTTPException(
+                status_code=400,
+                detail=f"lab grid currently only supports {LAB_GRID_STRATEGY}",
+            )
+        return load_latest_lab_grid(settings=settings)
+
     @app.get("/api/paper/orders")
     def paper_orders(
         limit: int = Query(default=50, ge=1, le=5000),
@@ -1104,11 +1235,34 @@ def create_app() -> FastAPI:
         tag: str | None = Query(default=None),
         symbol: str | None = Query(default=None),
         source: str | None = Query(default=None),
-        limit: int = Query(default=5000, ge=1, le=50_000),
-    ) -> list[dict]:
-        from asqt.tags import list_tags
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=10, ge=1, le=200),
+        limit: int | None = Query(default=None, ge=1, le=50_000),
+    ) -> dict:
+        from asqt.tags import count_tags, list_tags, summarize_tags
 
-        return list_tags(tag=tag, symbol=symbol, source=source, limit=limit, settings=settings)
+        size = int(limit) if limit is not None else int(page_size)
+        size = max(1, min(size, 200 if limit is None else 50_000))
+        total = count_tags(tag=tag, symbol=symbol, source=source, settings=settings)
+        pages = max(1, (total + size - 1) // size) if total else 1
+        page_n = min(max(1, int(page)), pages)
+        offset = (page_n - 1) * size
+        items = list_tags(
+            tag=tag,
+            symbol=symbol,
+            source=source,
+            limit=size,
+            offset=offset,
+            settings=settings,
+        )
+        return {
+            "items": items,
+            "total": total,
+            "page": page_n,
+            "pages": pages,
+            "page_size": size,
+            "summary": summarize_tags(tag=tag, symbol=symbol, source=source, settings=settings),
+        }
 
     @app.post("/api/tags")
     def post_tags(body: TagUpsertBody) -> list[dict]:

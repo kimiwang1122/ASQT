@@ -14,19 +14,7 @@ from asqt.config import Settings, get_settings
 from asqt.db import connect, execute, initialize_database, query_all
 from asqt.research_engine import LocalResearchEngine
 from asqt.storage import read_market_daily
-from asqt.strategies import STRATEGY_SPECS
-
-STRATEGY_LABEL = {
-    "etf_ma_rotate": "ETF 均线轮动",
-    "stock_momentum_topk": "股票动量 TopK",
-    "etf_momentum_topk": "ETF 动量 TopK",
-    "stock_lowvol_momentum": "股票低波动量",
-    "etf_ma_momentum_filter": "ETF 均线动量过滤",
-    "stock_short_reversal_topk": "股票短反转 TopK",
-    "stock_momentum_volume_confirm": "股票动量量能确认",
-    "stock_momentum_skip_month": "股票跳月动量",
-    "stock_holder_increase_follow": "股票股东增持跟随",
-}
+from asqt.strategies import STRATEGY_LABEL, STRATEGY_SPECS
 
 
 def normalize_backtest_targets(

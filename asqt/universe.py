@@ -25,7 +25,7 @@ COLUMNS = (
 STOCK_MIN = 50
 STOCK_MAX = 100
 ETF_MIN = 5
-ETF_MAX = 12
+ETF_MAX = 50  # lab raised from POC 12
 CHINEXT_STAR_MAX_SHARE = 0.40
 
 
@@ -124,7 +124,8 @@ def _check_row(row: dict[str, str], *, expect_type: str, errors: list[str]) -> N
         errors.append(f"{symbol} inferred type != {expect_type}")
     if row["instrument_type"] != expect_type:
         errors.append(f"{symbol} instrument_type != {expect_type}")
-    if infer_board(symbol) != row["board"]:
+    # ETF board is policy (broad_index vs sector); infer_board always returns broad_index.
+    if expect_type != "etf" and infer_board(symbol) != row["board"]:
         errors.append(f"{symbol} board {row['board']} != inferred {infer_board(symbol)}")
     if not row["name"] or not row["reason"] or not row["asof_date"]:
         errors.append(f"{symbol} missing name/reason/asof_date")

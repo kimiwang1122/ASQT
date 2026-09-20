@@ -146,6 +146,10 @@ class PaperBusy(Exception):
     """Another paper-run or reset is already holding the ledger lock."""
 
 
+class PaperCancelled(Exception):
+    """Operator stopped an in-flight paper-run job."""
+
+
 def account_id_for(strategy_id: str) -> str:
     return f"{ACCOUNT_PREFIX}{strategy_id}"
 
@@ -209,6 +213,23 @@ def release_paper_run_lock(settings: Settings | None, run_id: str) -> None:
     )
 
 
+def force_release_paper_run_lock(settings: Settings | None = None) -> int:
+    """Drop the paper lock regardless of token. Use when the holder process is gone."""
+    settings = ensure_runtime_dirs(settings or get_settings())
+    initialize_database(settings)
+    rows = query_all(
+        "SELECT run_id FROM data_sync_lock WHERE lock_id = ?",
+        (PAPER_LOCK_ID,),
+        settings=settings,
+    )
+    execute(
+        "DELETE FROM data_sync_lock WHERE lock_id = ?",
+        (PAPER_LOCK_ID,),
+        settings=settings,
+    )
+    return len(rows)
+
+
 def paper_run_locked(settings: Settings | None = None) -> bool:
     now = _now()
     rows = query_all(
@@ -245,6 +266,65 @@ def _fill_price(open_px: float, side: str) -> float:
     if side == "BUY":
         return round(open_px * (1.0 + SLIPPAGE), 6)
     return round(open_px * (1.0 - SLIPPAGE), 6)
+
+
+# ETF/share splits often arrive as a raw-price cliff while adj_factor stays 1.0.
+# Paper marks/fills unadjusted OHLC, so we must scale lots or NAV will fake-crash.
+_SPLIT_NS = (2, 3, 4, 5, 6, 8, 10)
+_SPLIT_TOL = 0.15
+
+
+def infer_share_split(prev_close: float, today_open: float) -> float | None:
+    """Return integer split n (old:new = 1:n) when overnight raw price looks like a unit split."""
+    prev = float(prev_close or 0)
+    cur = float(today_open or 0)
+    if prev <= 0 or cur <= 0:
+        return None
+    ratio = prev / cur
+    if ratio < 1.7:
+        return None
+    best_n = None
+    best_err = 1e9
+    for n in _SPLIT_NS:
+        err = abs(ratio / n - 1.0)
+        if err < best_err:
+            best_err = err
+            best_n = float(n)
+    if best_n is None or best_err > _SPLIT_TOL:
+        return None
+    return best_n
+
+
+def apply_inferred_splits(
+    state: dict[str, Any],
+    by_key: dict[tuple[str, str], dict[str, Any]],
+    prev_date: str,
+    trade_date: str,
+) -> list[dict[str, Any]]:
+    """Scale holdings when a raw-price split is not reflected in share quantity."""
+    applied: list[dict[str, Any]] = []
+    for symbol, item in list((state.get("positions") or {}).items()):
+        qty = int(item.get("qty") or 0)
+        if qty <= 0:
+            continue
+        prev = by_key.get((prev_date, symbol))
+        today = by_key.get((trade_date, symbol))
+        if not prev or not today:
+            continue
+        n = infer_share_split(float(prev.get("close") or 0), float(today.get("open") or 0))
+        if not n or abs(n - 1.0) < 1e-9:
+            continue
+        new_qty = int(round(qty * n))
+        if new_qty <= 0 or new_qty == qty:
+            continue
+        item["qty"] = new_qty
+        item["cost"] = float(item.get("cost") or 0) / n
+        if "market_price" in item:
+            item["market_price"] = float(item.get("market_price") or 0) / n
+        tradable = state.setdefault("tradable", {})
+        tradable[symbol] = new_qty
+        applied.append({"symbol": symbol, "ratio": n, "qty_before": qty, "qty_after": new_qty})
+    return applied
 
 
 def _empty_state(
@@ -443,6 +523,9 @@ class PaperLedger:
         state["halted"] = bool(detail.get("halted"))
         state["flatten_pending"] = bool(detail.get("flatten_pending"))
         state["halt_reason"] = detail.get("halt_reason")
+        state["halt_dd"] = detail.get("halt_dd")
+        state["halt_asset"] = detail.get("halt_asset")
+        state["halt_stop"] = detail.get("halt_stop")
         sync_halt_lifecycle(state)
         state["_prior_halted"] = bool(state.get("halted") or state.get("flatten_pending"))
         return state
@@ -472,6 +555,10 @@ class PaperLedger:
         if was_halted or book_dd <= strategy_stop:
             state["halted"] = True
             state["halt_reason"] = state.get("halt_reason") or "strategy_drawdown"
+            if not was_halted and book_dd <= strategy_stop:
+                state["halt_dd"] = book_dd
+                state["halt_asset"] = total
+                state["halt_stop"] = strategy_stop
             if _open_position_qty(state) > 0:
                 state["flatten_pending"] = True
         status = sync_halt_lifecycle(state)
@@ -484,6 +571,9 @@ class PaperLedger:
             "flatten_pending": bool(state.get("flatten_pending")),
             "halt_reason": state.get("halt_reason"),
             "halt_status": status,
+            "halt_dd": state.get("halt_dd"),
+            "halt_asset": state.get("halt_asset"),
+            "halt_stop": state.get("halt_stop"),
         }
         execute(
             "DELETE FROM account_snapshot WHERE account_id = ? AND trade_date = ?",
@@ -602,7 +692,8 @@ class PaperOrderService:
 
         ledger = PaperLedger(strategy_id, self.settings)
         state = ledger.load(before=trade_date)
-        # T+1: yesterday's buys become tradable at next session open.
+        apply_inferred_splits(state, by_key, signal_date, trade_date)
+        # T+1: yesterday's buys become tradable at next session open (after split adjust).
         state["tradable"] = {symbol: int(item["qty"]) for symbol, item in state["positions"].items()}
         sync_halt_lifecycle(state)
         book_halted = bool(state.get("halted") or state.get("flatten_pending"))
@@ -728,7 +819,9 @@ class PaperOrderService:
                 if bar_fill:
                     self._match(order, state, bar_fill, trade_date)
 
-            # Same-day flatten if this session's MTM already breaches strategy stop.
+            # Same-day close MTM may breach stop after fills. Flag halt and flatten
+            # next session at that day's open — do not sell at this day's already-passed open,
+            # which would hide the trigger NAV and understate max_drawdown.
             cfg = paper_account_config(self.settings)
             strategy_stop = -abs(float(cfg["strategy_drawdown_stop"]))
             marks = {
@@ -743,27 +836,14 @@ class PaperOrderService:
             )
             total = float(state["cash"]) + market_value
             peak = max(float(state.get("peak_asset", state.get("initial_cash", 0))), total)
-            if peak > 0 and total / peak - 1.0 <= strategy_stop:
+            book_dd = total / peak - 1.0 if peak else 0.0
+            if peak > 0 and book_dd <= strategy_stop:
                 state["halted"] = True
                 state["flatten_pending"] = True
                 state["halt_reason"] = "strategy_drawdown"
-                if state["positions"]:
-                    extra = self._flatten_all(
-                        state=state,
-                        trade_date=trade_date,
-                        strategy_id=strategy_id,
-                        by_key=by_key,
-                        risk_tag="strategy_halt",
-                        apply_fills=True,
-                        decision_id=decision_id,
-                    )
-                    created.extend(extra)
-                sync_halt_lifecycle(state)
-                marks = {
-                    symbol: float(by_key[(trade_date, symbol)]["close"])
-                    for symbol in state["positions"]
-                    if (trade_date, symbol) in by_key
-                }
+                state["halt_dd"] = book_dd
+                state["halt_asset"] = round(total, 4)
+                state["halt_stop"] = strategy_stop
             ledger.save(trade_date, state, marks)
             market_value_after = sum(
                 int(item["qty"]) * float(marks.get(symbol, item["cost"]))
@@ -1086,11 +1166,79 @@ def max_paper_run_days(settings: Settings | None = None) -> int:
     return max(0, len(dates) - 1)
 
 
+def paper_market_date_bounds(settings: Settings | None = None) -> dict[str, Any]:
+    """First/last trade_date in market_daily (for UI date pickers)."""
+    settings = ensure_runtime_dirs(settings or get_settings())
+    dates = sorted({str(row["trade_date"]) for row in read_market_daily(settings=settings)})
+    if not dates:
+        return {"first_date": None, "last_date": None, "sessions": 0, "max_days": 0}
+    return {
+        "first_date": dates[0],
+        "last_date": dates[-1],
+        "sessions": len(dates),
+        "max_days": max(0, len(dates) - 1),
+    }
+
+
+def resolve_paper_window(
+    dates: list[str],
+    *,
+    days: int | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> tuple[list[str], int]:
+    """Build paper window (signal day + fill days).
+
+    Date mode: ``start_date``/``end_date`` are the first/last *fill* dates (inclusive);
+    the prior trading day is prepended as the signal day. Days mode: trailing N fills.
+    """
+    if not dates:
+        raise ValueError("没有可用行情交易日。")
+    start = str(start_date or "").strip() or None
+    end = str(end_date or "").strip() or None
+    if start or end:
+        if not start or not end:
+            raise ValueError("开始与结束日期需同时填写；也可只填「天数」从最近行情往前推。")
+        if start > end:
+            raise ValueError(f"开始日期 {start} 不能晚于结束日期 {end}。")
+        fill_dates = [d for d in dates if start <= d <= end]
+        if len(fill_dates) < 1:
+            raise ValueError(f"区间 {start}～{end} 内没有交易日。")
+        first_fill = fill_dates[0]
+        last_fill = fill_dates[-1]
+        i_fill = dates.index(first_fill)
+        if i_fill < 1:
+            raise ValueError(
+                f"开始日 {first_fill} 已是行情首日，缺少前一交易日做信号日；请延后开始日期。"
+            )
+        i_end = dates.index(last_fill)
+        window = dates[i_fill - 1 : i_end + 1]
+        sessions = len(window) - 1
+        if sessions < 1:
+            raise ValueError("日期区间至少需要 1 个可撮合交易日。")
+        return window, sessions
+
+    session_days = int(days if days is not None else 20)
+    if session_days < 1:
+        raise ValueError("模拟天数至少为 1。")
+    max_days = max(0, len(dates) - 1)
+    if session_days > max_days:
+        raise ValueError(
+            f"模拟天数不能超过当前可用交易日上限 {max_days}（行情共 {len(dates)} 个交易日）。"
+        )
+    if len(dates) < session_days + 1:
+        raise ValueError(f"need {session_days + 1} sessions, have {len(dates)}")
+    window = dates[-(session_days + 1) :]
+    return window, session_days
+
+
 def run_paper_days(
     *,
     strategy_id: str = "all",
     strategy_ids: list[str] | None = None,
     days: int = 20,
+    start_date: str | None = None,
+    end_date: str | None = None,
     settings: Settings | None = None,
     progress: Any | None = None,
     record_task: bool = True,
@@ -1104,6 +1252,8 @@ def run_paper_days(
         return _run_paper_days_locked(
             strategy_id=job_key,
             days=days,
+            start_date=start_date,
+            end_date=end_date,
             settings=settings,
             progress=progress,
             record_task=record_task,
@@ -1128,17 +1278,15 @@ def _run_paper_days_locked(
     progress: Any | None = None,
     record_task: bool = True,
     mode: str = "sequential",
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> dict[str, Any]:
     job_key, requested = normalize_paper_targets(strategy_id)
     rows = read_market_daily(settings=settings)
     dates = sorted({str(row["trade_date"]) for row in rows})
-    max_days = max(0, len(dates) - 1)
-    if days > max_days:
-        raise ValueError(
-            f"模拟天数不能超过当前可用交易日上限 {max_days}（行情共 {len(dates)} 个交易日）。"
-        )
-    if len(dates) < days + 1:
-        raise ValueError(f"need {days + 1} sessions, have {len(dates)}")
+    window, session_days = resolve_paper_window(
+        dates, days=days, start_date=start_date, end_date=end_date
+    )
     from asqt.ops import paper_trading_enabled
 
     if not paper_trading_enabled(settings):
@@ -1161,7 +1309,6 @@ def _run_paper_days_locked(
                 raise ValueError(
                     f"策略尚未准入模拟（{sid}={status}）。请先到策略页提交「准入模拟」。"
                 )
-    window = dates[-(days + 1) :]
     started = _now()
     run_mode = normalize_paper_mode(mode)
     if run_mode == "parallel":
@@ -1209,12 +1356,16 @@ def _run_paper_days_locked(
             )
     ok = all(item.get("incomplete_reason") is None for item in reports)
     reasons = sorted({item["incomplete_reason"] for item in reports if item.get("incomplete_reason")})
-    detail = _paper_run_detail(ok=ok, reasons=reasons, reports=reports, days=days) + detail_extra
+    detail = (
+        _paper_run_detail(ok=ok, reasons=reasons, reports=reports, days=session_days) + detail_extra
+    )
     summary = {
         "ok": ok,
-        "days": days,
+        "days": session_days,
         "mode": run_mode,
         "window": {"start": window[0], "end": window[-1]},
+        "start_date": start_date,
+        "end_date": end_date,
         "reports": reports,
         "incomplete_reasons": reasons,
         "detail": detail,
@@ -1235,9 +1386,11 @@ def _run_paper_days_locked(
                 _now(),
                 json.dumps(
                     {
-                        "days": days,
+                        "days": session_days,
                         "mode": run_mode,
                         "window": summary["window"],
+                        "start_date": start_date,
+                        "end_date": end_date,
                         "incomplete_reasons": reasons,
                         "detail": detail,
                     },
@@ -1344,6 +1497,8 @@ def _run_one_strategy_window(
     saw_kill = kill_engaged(settings)
     for index, signal_date in enumerate(window[:-1]):
         fill_date = window[index + 1]
+        if on_step:
+            on_step(0, f"{sid} {fill_date}")
         if kill_engaged(settings):
             saw_kill = True
         created = service.build_orders(fill_date, sid, signal_date=signal_date, apply_fills=True)
@@ -1391,7 +1546,7 @@ def _run_paper_days_sequential(
             def on_step(delta: int, label: str, *, _sid: str = sid) -> None:
                 nonlocal done
                 done += delta
-                if progress and (done == 1 or done == grand or done % 5 == 0 or "halt" in label):
+                if progress:
                     progress(done, grand, label)
 
             reports.append(
@@ -1433,7 +1588,7 @@ def _run_paper_days_parallel(
     def bump(delta: int, label: str) -> None:
         nonlocal done
         done += delta
-        if progress and (done == 1 or done == grand or done % 5 == 0 or "halt" in label):
+        if progress:
             progress(done, grand, label)
 
     def run_day(sid: str, fill_date: str, signal_date: str) -> tuple[str, list[dict[str, Any]]]:
@@ -1456,6 +1611,7 @@ def _run_paper_days_parallel(
         workers = max(1, len(ids))
         for index, signal_date in enumerate(window[:-1]):
             fill_date = window[index + 1]
+            bump(0, f"parallel {fill_date}")
             with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="asqt-paper-par") as pool:
                 day_results = list(
                     pool.map(
@@ -1771,6 +1927,9 @@ def reset_paper_account(
     settings = ensure_runtime_dirs(settings or get_settings())
     initialize_database(settings)
     job_key, _ids = normalize_paper_targets(strategy_id, strategy_ids)
+    from asqt.paper_jobs import clear_stale_paper_lock
+
+    clear_stale_paper_lock(settings)
     with paper_exclusive(settings, holder=f"paper-reset:{job_key}"):
         return _reset_paper_account_locked(
             strategy_id=job_key,
@@ -2169,6 +2328,9 @@ def paper_board(strategy_id: str, settings: Settings | None = None) -> dict[str,
         "flatten_pending": bool(state.get("flatten_pending")),
         "halt_status": halt_status_of(state),
         "halt_reason": state.get("halt_reason"),
+        "halt_dd": state.get("halt_dd"),
+        "halt_asset": state.get("halt_asset"),
+        "halt_stop": state.get("halt_stop"),
     }
     return {
         "account_id": account_id_for(sid),

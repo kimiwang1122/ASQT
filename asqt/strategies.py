@@ -1,11 +1,11 @@
-"""P2/P2.4 strategies: MA rotate, momentum/reversal TopK, low-vol, volume confirm, skip-month, holder events."""
+"""P2/P2.4 strategies: MA rotate, momentum/reversal TopK, low-vol, volume confirm, skip-month, holder events, 2560."""
 
 from __future__ import annotations
 
 from typing import Any
 
 from asqt.factor_pipeline import build_data_frame, compute_factor_frame, series_asof
-from asqt.selectors import clip_weights, select_targets
+from asqt.selectors import _is_suspended, clip_weights, select_targets
 
 CODE_VERSION = "p2.4"
 
@@ -18,6 +18,7 @@ STOCK_SHORT_REVERSAL_TOPK = "stock_short_reversal_topk"
 STOCK_MOMENTUM_VOLUME_CONFIRM = "stock_momentum_volume_confirm"
 STOCK_MOMENTUM_SKIP_MONTH = "stock_momentum_skip_month"
 STOCK_HOLDER_INCREASE_FOLLOW = "stock_holder_increase_follow"
+STOCK_2560 = "stock_2560"
 
 STRATEGY_SPECS: dict[str, dict[str, Any]] = {
     ETF_MA_ROTATE: {
@@ -113,6 +114,34 @@ STRATEGY_SPECS: dict[str, dict[str, Any]] = {
             "gross_limit": 0.95,
         },
     },
+    STOCK_2560: {
+        "kind": "topk",
+        "instrument_type": "stock",
+        "parameter_set_id": "stock_2560.k10.f5.s20.vf5.vs90.b30",
+        "params": {
+            "ma_fast": 5,
+            "ma_slow": 20,
+            "vol_fast": 5,
+            "vol_slow": 90,
+            "pullback_band": 0.03,
+            "top_k": 10,
+            "max_weight": 0.10,
+            "gross_limit": 0.95,
+        },
+    },
+}
+
+STRATEGY_LABEL = {
+    ETF_MA_ROTATE: "ETF 均线轮动",
+    STOCK_MOMENTUM_TOPK: "股票动量 TopK",
+    ETF_MOMENTUM_TOPK: "ETF 动量 TopK",
+    STOCK_LOWVOL_MOMENTUM: "股票低波动量",
+    ETF_MA_MOMENTUM_FILTER: "ETF 均线动量过滤",
+    STOCK_SHORT_REVERSAL_TOPK: "股票短反转 TopK",
+    STOCK_MOMENTUM_VOLUME_CONFIRM: "股票动量量能确认",
+    STOCK_MOMENTUM_SKIP_MONTH: "股票跳月动量",
+    STOCK_HOLDER_INCREASE_FOLLOW: "股票股东增持跟随",
+    STOCK_2560: "股票2560战法",
 }
 
 
@@ -154,6 +183,44 @@ def _merged_params(strategy_id: str, params: dict[str, Any] | None) -> dict[str,
     spec = dict(STRATEGY_SPECS[strategy_id]["params"])
     spec.update(params or {})
     return spec
+
+
+def pin_strategy_params(
+    strategy_id: str,
+    params: dict[str, Any],
+    *,
+    parameter_set_id: str | None = None,
+    settings: Any | None = None,
+    persist: bool = True,
+) -> dict[str, Any]:
+    """Lab: rewrite in-process STRATEGY_SPECS pin (+ optional strategy_version row).
+
+    Overwrites papered pins intentionally; callers should keep experiment reports.
+    """
+    if strategy_id not in STRATEGY_SPECS:
+        raise ValueError(f"unknown strategy: {strategy_id}")
+    merged = _merged_params(strategy_id, params)
+    from asqt.tune import suggest_parameter_set_id
+
+    psid = parameter_set_id or suggest_parameter_set_id(strategy_id, merged)
+    STRATEGY_SPECS[strategy_id]["params"] = merged
+    STRATEGY_SPECS[strategy_id]["parameter_set_id"] = psid
+    if persist:
+        from asqt.config import ensure_runtime_dirs, get_settings
+        from asqt.db import execute, initialize_database
+
+        cfg = ensure_runtime_dirs(settings or get_settings())
+        initialize_database(cfg)
+        execute(
+            """
+            UPDATE strategy_version
+            SET parameter_set_id = ?
+            WHERE strategy_id = ? AND version = 'v1'
+            """,
+            (psid, strategy_id),
+            settings=cfg,
+        )
+    return {"strategy_id": strategy_id, "parameter_set_id": psid, "params": merged}
 
 
 def _resolve_events(
@@ -326,6 +393,33 @@ def factor_specs_for(
             },
         ]
         return out
+    if strategy_id == STOCK_2560:
+        ma_fast = int(spec["ma_fast"])
+        ma_slow = int(spec["ma_slow"])
+        vol_fast = int(spec["vol_fast"])
+        vol_slow = int(spec["vol_slow"])
+        pullback_band = float(spec["pullback_band"])
+        return [
+            {
+                "name": "stock_2560",
+                "instrument_type": "stock",
+                "kind": "rule_2560",
+                "kwargs": {
+                    "ma_fast": ma_fast,
+                    "ma_slow": ma_slow,
+                    "vol_fast": vol_fast,
+                    "vol_slow": vol_slow,
+                    "pullback_band": pullback_band,
+                },
+                "params_for_hash": {
+                    "ma_fast": ma_fast,
+                    "ma_slow": ma_slow,
+                    "vol_fast": vol_fast,
+                    "vol_slow": vol_slow,
+                    "pullback_band": pullback_band,
+                },
+            }
+        ]
     raise ValueError(f"unknown strategy: {strategy_id}")
 
 
@@ -413,6 +507,13 @@ def selector_rules_for(strategy_id: str, params: dict[str, Any] | None = None) -
             "filters": filters,
             "top_k": int(spec["top_k"]),
         }
+    if strategy_id == STOCK_2560:
+        return {
+            **base,
+            "score_factor": "stock_2560",
+            "filters": [],
+            "top_k": int(spec["top_k"]),
+        }
     raise ValueError(f"unknown strategy: {strategy_id}")
 
 
@@ -427,7 +528,18 @@ def _weights_via_pipeline(
     suspended: set[tuple[str, str]] | None = None,
     events: list[dict[str, Any]] | None = None,
     settings: Any | None = None,
+    held_symbols: list[str] | None = None,
 ) -> dict[str, float]:
+    if strategy_id == STOCK_2560:
+        return _weights_stock_2560(
+            rows,
+            asof,
+            limits=limits,
+            params=params,
+            market_by_symbol=market_by_symbol,
+            suspended=suspended,
+            held_symbols=held_symbols,
+        )
     grouped = market_by_symbol if market_by_symbol is not None else _by_symbol(rows)
     factors = compute_factor_frame(
         grouped,
@@ -442,6 +554,71 @@ def _weights_via_pipeline(
         limits=limits,
         suspended=suspended,
     )
+
+
+def _weights_stock_2560(
+    rows: list[dict[str, Any]],
+    asof: str,
+    *,
+    limits: list[dict[str, Any]] | None = None,
+    params: dict[str, Any] | None = None,
+    market_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
+    suspended: set[tuple[str, str]] | None = None,
+    held_symbols: list[str] | None = None,
+) -> dict[str, float]:
+    """Sticky 2560: keep prior names until exit; fill free slots from new entries only."""
+    from asqt.factors import rule_2560_state
+
+    spec = _merged_params(STOCK_2560, params)
+    top_k = int(spec["top_k"])
+    max_weight = float(spec["max_weight"])
+    gross_limit = float(spec["gross_limit"])
+    ma_fast = int(spec["ma_fast"])
+    ma_slow = int(spec["ma_slow"])
+    vol_fast = int(spec["vol_fast"])
+    vol_slow = int(spec["vol_slow"])
+    pullback_band = float(spec["pullback_band"])
+    grouped = market_by_symbol if market_by_symbol is not None else _by_symbol(rows)
+    states: dict[str, tuple[str, float]] = {}
+    for symbol, series in grouped.items():
+        if _is_suspended(symbol, asof, limits=limits, suspended=suspended):
+            continue
+        hist = series_asof(series, asof)
+        state = rule_2560_state(
+            hist,
+            ma_fast=ma_fast,
+            ma_slow=ma_slow,
+            vol_fast=vol_fast,
+            vol_slow=vol_slow,
+            pullback_band=pullback_band,
+        )
+        if state is not None:
+            states[symbol] = state
+    keep: list[str] = []
+    for symbol in held_symbols or []:
+        if symbol in states and symbol not in keep:
+            keep.append(symbol)
+        if len(keep) >= top_k:
+            break
+    slots = top_k - len(keep)
+    entries = sorted(
+        (
+            (score, symbol)
+            for symbol, (phase, score) in states.items()
+            if phase == "entry" and symbol not in keep
+        ),
+        reverse=True,
+    )
+    if not keep and slots == top_k:
+        # cold start: TopK among anything currently in a trade (entry or hist-hold)
+        ranked = sorted(((score, symbol) for symbol, (_phase, score) in states.items()), reverse=True)
+        picked = [symbol for _score, symbol in ranked[:top_k]]
+    else:
+        picked = keep + [symbol for _score, symbol in entries[:slots]]
+    if not picked:
+        return {}
+    weight = 1.0 / len(picked)
+    return clip_weights({symbol: weight for symbol in picked}, max_weight, gross_limit)
 
 
 def signal_etf_ma_rotate(

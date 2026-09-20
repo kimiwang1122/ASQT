@@ -198,6 +198,7 @@ const OVERRIDE_ACTION_LABEL = {
   cap: "权重上限",
 };
 const STRATEGY_STATUS_LABEL = {
+  unregistered: "未注册",
   draft: "草稿",
   backtest: "回测中",
   candidate: "候选",
@@ -285,7 +286,13 @@ function toneForSync(status) {
   if (status === "success") {
     return "ok";
   }
-  if (status === "skipped" || status === "partial" || status === "review") {
+  if (status === "review") {
+    return "block";
+  }
+  if (status === "partial") {
+    return "warn";
+  }
+  if (status === "skipped") {
     return "accent";
   }
   if (status === "quality_failed" || status === "failed" || status === "blocked") {
@@ -295,6 +302,22 @@ function toneForSync(status) {
     return "info";
   }
   return "muted";
+}
+
+function isReconcileReviewTask(task, status) {
+  const name = String(task?.task_name || "");
+  return (
+    status === "review" ||
+    (
+      status === "partial" &&
+      (
+        name === "reconcile-daily" ||
+        name === "reconcile_daily" ||
+        name === "cash-reconcile" ||
+        name === "cash_reconcile"
+      )
+    )
+  );
 }
 
 function toneForStrategy(status) {
@@ -510,17 +533,15 @@ function renderTasks(tasks) {
     const li = document.createElement("li");
     const left = document.createElement("span");
     const status = task.status || "";
-    const statusLabel =
-      (
-        task.task_name === "reconcile-daily" ||
-        task.task_name === "reconcile_daily" ||
-        task.task_name === "cash-reconcile" ||
-        task.task_name === "cash_reconcile"
-      ) && status === "partial"
-        ? "待复核"
-        : SYNC_STATUS_LABEL[status] || status || "-";
+    const review = isReconcileReviewTask(task, status);
+    const statusLabel = review
+      ? "待复核"
+      : SYNC_STATUS_LABEL[status] || status || "-";
     left.textContent = `${formatTaskName(task.task_name)} ${formatDateTime(task.started_at)}`;
-    const tag = makeTag(statusLabel, toneForSync(status));
+    const tag = makeTag(statusLabel, review ? "block" : toneForSync(status));
+    if (review) {
+      tag.classList.add("is-review-alert");
+    }
     if (task.message) {
       tag.title = typeof task.message === "string" ? task.message : JSON.stringify(task.message);
     }
@@ -931,16 +952,6 @@ function appendAlertFullDetail(container, row) {
   push("类别", ALERT_CATEGORY_LABEL[category] || category || "-");
   push("事件", formatAlertTitle(row));
 
-  const strategyLabel = {
-    etf_ma_rotate: "ETF 均线轮动",
-    stock_momentum_topk: "股票动量 TopK",
-    etf_momentum_topk: "ETF 动量 TopK",
-    stock_lowvol_momentum: "股票低波动量",
-    etf_ma_momentum_filter: "ETF 均线动量过滤",
-    stock_short_reversal_topk: "股票短反转 TopK",
-    stock_momentum_volume_confirm: "股票动量量能确认",
-    stock_momentum_skip_month: "股票跳月动量",
-  };
   const isDrawdown =
     String(payload.kind || "").startsWith("drawdown") ||
     category === "drawdown" ||
@@ -948,7 +959,7 @@ function appendAlertFullDetail(container, row) {
 
   if (isDrawdown) {
     if (payload.strategy_id) {
-      push("策略", strategyLabel[payload.strategy_id] || payload.strategy_id);
+      push("策略", STRATEGY_LABEL[payload.strategy_id] || payload.strategy_id);
     }
     if (payload.account_id) {
       push("账户", payload.account_id);
@@ -1135,16 +1146,6 @@ function formatAlertFull(row) {
     `类别：${ALERT_CATEGORY_LABEL[category] || category || "-"}`,
     `事件：${title}`,
   ];
-  const strategyLabel = {
-    etf_ma_rotate: "ETF 均线轮动",
-    stock_momentum_topk: "股票动量 TopK",
-    etf_momentum_topk: "ETF 动量 TopK",
-    stock_lowvol_momentum: "股票低波动量",
-    etf_ma_momentum_filter: "ETF 均线动量过滤",
-    stock_short_reversal_topk: "股票短反转 TopK",
-    stock_momentum_volume_confirm: "股票动量量能确认",
-    stock_momentum_skip_month: "股票跳月动量",
-  };
 
   if (
     String(payload.kind || "").startsWith("drawdown") ||
@@ -1152,7 +1153,7 @@ function formatAlertFull(row) {
     String(row?.title || "").includes("drawdown")
   ) {
     if (payload.strategy_id) {
-      lines.push(`策略：${strategyLabel[payload.strategy_id] || payload.strategy_id}`);
+      lines.push(`策略：${STRATEGY_LABEL[payload.strategy_id] || payload.strategy_id}`);
     }
     if (payload.account_id) {
       lines.push(`账户：${payload.account_id}`);
@@ -1685,6 +1686,7 @@ async function refresh() {
   renderSources(sources);
   renderPorts(ports);
   syncPaperRunDaysMax(status.max_paper_days);
+  syncPaperRunDateBounds(status.paper_first_date, status.paper_last_date);
   await loadOverviewAlerts().catch(() => {});
   if ((location.hash || "").includes("overview-alerts")) {
     window.setTimeout(focusOverviewAlerts, 80);
@@ -1704,9 +1706,11 @@ async function refresh() {
 }
 
 let paperRunDaysMax = 2000;
+let paperRunFirstDate = "";
+let paperRunLastDate = "";
 
 function syncPaperRunDaysMax(maxDays) {
-  const max = Math.max(2, Number(maxDays) || 0);
+  const max = Math.max(1, Number(maxDays) || 0);
   if (!max) {
     return;
   }
@@ -1716,11 +1720,43 @@ function syncPaperRunDaysMax(maxDays) {
     return;
   }
   input.max = String(max);
-  input.title = `最多可跑到当前行情可用交易日上限（${max}）`;
+  input.title = `从最近行情往前推；上限 ${max}。填写开始/结束日期时以日期为准`;
   const current = Number(input.value);
   if (Number.isFinite(current) && current > max) {
     input.value = String(max);
   }
+}
+
+function syncPaperRunDateBounds(firstDate, lastDate) {
+  paperRunFirstDate = firstDate || "";
+  paperRunLastDate = lastDate || "";
+  for (const id of ["paper-run-start", "paper-run-end"]) {
+    const input = document.getElementById(id);
+    if (!input) {
+      continue;
+    }
+    if (paperRunFirstDate) {
+      input.min = paperRunFirstDate;
+    }
+    if (paperRunLastDate) {
+      input.max = paperRunLastDate;
+    }
+  }
+}
+
+function paperRunDateRange() {
+  const start = document.getElementById("paper-run-start")?.value || "";
+  const end = document.getElementById("paper-run-end")?.value || "";
+  if (!start && !end) {
+    return { start_date: null, end_date: null };
+  }
+  if (!start || !end) {
+    return { error: "开始与结束日期需同时填写，或都留空改用「天数」" };
+  }
+  if (start > end) {
+    return { error: "开始日期不能晚于结束日期" };
+  }
+  return { start_date: start, end_date: end };
 }
 
 function showActionError(message) {
@@ -2902,6 +2938,7 @@ const STRATEGY_LABEL = {
   stock_momentum_volume_confirm: "股票动量量能确认",
   stock_momentum_skip_month: "股票跳月动量",
   stock_holder_increase_follow: "股票股东增持跟随",
+  stock_2560: "股票2560战法",
 };
 
 const PARAM_LABEL = {
@@ -2913,14 +2950,19 @@ const PARAM_LABEL = {
   vol_window: "波动窗口",
   vol_z_window: "量能窗口",
   min_volume_z: "最小量能Z",
-  skip: "跳过天数",
-  ma_window: "均线窗口",
-  mom_lookback: "动量回看",
-  event_lookback: "事件回看",
-  min_momentum: "最小动量",
+    skip: "跳过天数",
+    ma_window: "均线窗口",
+    mom_lookback: "动量回看",
+    event_lookback: "事件回看",
+    min_momentum: "最小动量",
+    ma_fast: "快线天数",
+    ma_slow: "慢线天数",
+    vol_fast: "快量天数",
+    vol_slow: "慢量天数",
+    pullback_band: "回踩带宽",
 };
 
-const PARAM_PCT_KEYS = new Set(["max_weight", "gross_limit"]);
+const PARAM_PCT_KEYS = new Set(["max_weight", "gross_limit", "pullback_band"]);
 
 /** 与后端 STRATEGY_SPECS.params 对齐；策略页无 params 字段时用此展示。 */
 const STRATEGY_PARAMS = {
@@ -2936,6 +2978,16 @@ const STRATEGY_PARAMS = {
     event_lookback: 20,
     lookback: 20,
     min_momentum: 0.0,
+    top_k: 5,
+    max_weight: 0.1,
+    gross_limit: 0.95,
+  },
+  stock_2560: {
+    ma_fast: 5,
+    ma_slow: 25,
+    vol_fast: 5,
+    vol_slow: 60,
+    pullback_band: 0.02,
     top_k: 5,
     max_weight: 0.1,
     gross_limit: 0.95,
@@ -2976,6 +3028,18 @@ function formatPct(value) {
     return "-";
   }
   return `${(number * 100).toFixed(2)}%`;
+}
+
+function formatEventValue(value) {
+  if (value == null || value === "") {
+    return "-";
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return String(value);
+  }
+  const digits = Number.isInteger(number) ? 0 : Math.abs(number) >= 1 ? 2 : 4;
+  return number.toLocaleString("zh-CN", { maximumFractionDigits: digits });
 }
 
 function formatMoney(value) {
@@ -3288,6 +3352,7 @@ async function loadStrategyPage() {
   ]);
   renderStrategyVersions(versions);
   renderExperiments(experiments);
+  loadLabRuleEngine().catch((error) => showToast(error.message || "加载规则引擎失败", "warn"));
   const gate = document.getElementById("strategy-gate-hint");
   if (gate) {
     if (kill?.engaged) {
@@ -3300,6 +3365,230 @@ async function loadStrategyPage() {
     }
   }
 }
+
+const labRuleState = {
+  strategyId: "",
+  schema: [],
+  presets: [],
+  editId: "",
+  editable: false,
+};
+
+function labRuleStrategyId() {
+  return document.getElementById("lab-rule-strategy")?.value || "etf_ma_momentum_filter";
+}
+
+function fillLabRuleFields(params) {
+  const host = document.getElementById("lab-rule-fields");
+  if (!host) {
+    return;
+  }
+  const values = params && typeof params === "object" ? params : {};
+  host.innerHTML = "";
+  for (const field of labRuleState.schema) {
+    const label = document.createElement("label");
+    label.className = "filter-inline";
+    const input = document.createElement("input");
+    input.id = `lab-rule-${field.key}`;
+    input.name = field.key;
+    input.type = "number";
+    input.required = true;
+    input.step = field.kind === "integer" ? "1" : "0.01";
+    const fallback = values[field.key] ?? field.default;
+    input.value = fallback == null ? "" : String(fallback);
+    label.append(document.createTextNode(PARAM_LABEL[field.key] || field.key), input);
+    host.appendChild(label);
+  }
+}
+
+function readLabRuleFields() {
+  const params = {};
+  for (const field of labRuleState.schema) {
+    const input = document.getElementById(`lab-rule-${field.key}`);
+    const raw = input?.value?.trim();
+    if (raw === "" || raw == null) {
+      throw new Error(`请填写${PARAM_LABEL[field.key] || field.key}`);
+    }
+    const number = Number(raw);
+    if (Number.isNaN(number)) {
+      throw new Error(`${PARAM_LABEL[field.key] || field.key} 无效`);
+    }
+    params[field.key] = field.kind === "integer" ? Math.round(number) : number;
+  }
+  return params;
+}
+
+function renderLabRuleEngine() {
+  const body = document.getElementById("lab-rule-body");
+  if (!body) {
+    return;
+  }
+  body.innerHTML = "";
+  const list = labRuleState.presets;
+  if (!list.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 5;
+    td.className = "empty-hint";
+    td.textContent = "暂无参数组。";
+    tr.appendChild(td);
+    body.appendChild(tr);
+  } else {
+    for (const row of list) {
+      const tr = document.createElement("tr");
+      if (row.parameter_set_id === labRuleState.editId) {
+        tr.classList.add("is-active");
+      }
+      appendCell(tr, row.parameter_set_id);
+      appendCell(tr, formatParamsChinese(row.params, row.parameter_set_id));
+      appendCell(tr, row.source === "custom" ? "自定义" : "内置", {
+        tone: row.source === "custom" ? "accent" : "muted",
+      });
+      if (row.is_default) {
+        appendCell(tr, "默认", { tone: "ok" });
+      } else {
+        appendCell(tr, "—", { tone: "muted" });
+      }
+      const td = document.createElement("td");
+      const actions = document.createElement("div");
+      actions.className = "lab-rule-actions";
+      const editBtn = document.createElement("button");
+      editBtn.type = "button";
+      editBtn.className = "secondary";
+      editBtn.textContent = "编辑";
+      editBtn.addEventListener("click", () => {
+        labRuleState.editId = row.parameter_set_id;
+        labRuleState.editable = Boolean(row.editable);
+        fillLabRuleFields(row.params);
+        setHint(
+          "lab-rule-hint",
+          row.editable ? `正在编辑 ${row.parameter_set_id}` : `内置组 ${row.parameter_set_id}：保存将另存为新组`,
+        );
+        renderLabRuleEngine();
+      });
+      const defaultBtn = document.createElement("button");
+      defaultBtn.type = "button";
+      defaultBtn.className = "secondary";
+      defaultBtn.textContent = "设为默认";
+      defaultBtn.disabled = Boolean(row.is_default);
+      defaultBtn.addEventListener("click", () => {
+        setLabRuleDefault(row).catch((error) => showToast(error.message || "设置默认失败", "block"));
+      });
+      const delBtn = document.createElement("button");
+      delBtn.type = "button";
+      delBtn.className = "secondary";
+      delBtn.textContent = "删除";
+      delBtn.disabled = !row.editable;
+      delBtn.title = row.editable ? "删除自定义参数组" : "内置参数组不能删除";
+      delBtn.addEventListener("click", () => {
+        deleteLabRule(row).catch((error) => showToast(error.message || "删除失败", "block"));
+      });
+      actions.append(editBtn, defaultBtn, delBtn);
+      td.appendChild(actions);
+      tr.appendChild(td);
+      body.appendChild(tr);
+    }
+  }
+  const sid = labRuleState.strategyId;
+  setText(
+    "lab-rule-meta",
+    `${STRATEGY_LABEL[sid] || sid} · ${list.length} 组 · 自定义 ${list.filter((row) => row.source === "custom").length}`,
+  );
+}
+
+async function loadLabRuleEngine(strategyId = labRuleStrategyId()) {
+  const payload = await requestJson(`/api/paper/lab/presets?strategy_id=${encodeURIComponent(strategyId)}`);
+  labRuleState.strategyId = strategyId;
+  labRuleState.schema = payload.schema || [];
+  labRuleState.presets = payload.presets || [];
+  const current = labRuleState.presets.find((row) => row.parameter_set_id === labRuleState.editId);
+  if (!current) {
+    labRuleState.editId = "";
+    labRuleState.editable = false;
+    const fallback = labRuleState.presets.find((row) => row.is_default) || labRuleState.presets[0];
+    fillLabRuleFields(fallback?.params);
+  }
+  renderLabRuleEngine();
+  if (isPaperLabSoloMode() && getPaperSelectedStrategyIds()[0] === strategyId) {
+    loadPaperLabPresets(strategyId).catch(() => {});
+  }
+}
+
+async function saveLabRule(event) {
+  event.preventDefault();
+  const strategyId = labRuleStrategyId();
+  const params = readLabRuleFields();
+  const replaceId = labRuleState.editable ? labRuleState.editId : "";
+  const payload = await requestJson("/api/paper/lab/presets", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      strategy_id: strategyId,
+      params,
+      replace_id: replaceId || null,
+    }),
+  });
+  labRuleState.editId = payload.preset?.parameter_set_id || "";
+  labRuleState.editable = true;
+  showToast(`已保存 ${labRuleState.editId}`, "ok");
+  setHint("lab-rule-hint", `已保存 ${labRuleState.editId}`);
+  await loadLabRuleEngine(strategyId);
+}
+
+async function setLabRuleDefault(row) {
+  const strategyId = labRuleStrategyId();
+  await requestJson("/api/paper/lab/defaults", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      strategy_id: strategyId,
+      params: row.params,
+      parameter_set_id: row.parameter_set_id,
+    }),
+  });
+  showToast(`已设默认：${row.parameter_set_id}`, "ok");
+  await loadLabRuleEngine(strategyId);
+}
+
+async function deleteLabRule(row) {
+  if (!row?.editable) {
+    showToast("内置参数组不能删除", "warn");
+    return;
+  }
+  const ok = await confirmDialog(`删除自定义参数组 ${row.parameter_set_id}？`);
+  if (!ok) {
+    return;
+  }
+  const strategyId = labRuleStrategyId();
+  await requestJson(
+    `/api/paper/lab/presets?strategy_id=${encodeURIComponent(strategyId)}&parameter_set_id=${encodeURIComponent(row.parameter_set_id)}`,
+    { method: "DELETE" },
+  );
+  if (labRuleState.editId === row.parameter_set_id) {
+    labRuleState.editId = "";
+    labRuleState.editable = false;
+  }
+  showToast("已删除参数组", "ok");
+  await loadLabRuleEngine(strategyId);
+}
+
+document.getElementById("lab-rule-strategy")?.addEventListener("change", () => {
+  labRuleState.editId = "";
+  labRuleState.editable = false;
+  loadLabRuleEngine().catch((error) => showToast(error.message || "加载规则失败", "block"));
+});
+
+document.getElementById("lab-rule-new")?.addEventListener("click", () => {
+  labRuleState.editId = "";
+  labRuleState.editable = false;
+  fillLabRuleFields();
+  setHint("lab-rule-hint", "填写参数后保存为新组");
+  renderLabRuleEngine();
+});
+
+document.getElementById("lab-rule-form")?.addEventListener("submit", (event) => {
+  saveLabRule(event).catch((error) => showToast(error.message || "保存失败", "block"));
+});
 
 function renderAttribution(payload) {
   const body = document.getElementById("review-body");
@@ -3506,7 +3795,20 @@ let backtestTimer = 0;
 let watchedBacktestId = "";
 let backtestBusy = false;
 let paperBusy = false;
+let paperStopping = false;
 let syncInFlight = false;
+
+function syncPaperStopBtn() {
+  const btn = document.getElementById("paper-run-stop");
+  if (!btn) {
+    return;
+  }
+  const show = Boolean(paperBusy);
+  btn.hidden = !show;
+  btn.disabled = !show;
+  btn.textContent = paperStopping ? "终止中…" : "终止";
+  btn.title = paperStopping ? "正在终止当前模拟" : "终止当前这次跑模拟，已写出的快照会留下";
+}
 
 function setControlReadonly(el, on, title) {
   if (!el) {
@@ -3573,7 +3875,10 @@ function applyTradeLocks() {
   setControlReadonly(document.getElementById("paper-reset"), locked, lockTitle);
   setControlReadonly(document.getElementById("paper-clear-halt"), locked, lockTitle);
   setControlReadonly(document.getElementById("paper-run-days"), paperBusy, lockTitle);
+  setControlReadonly(document.getElementById("paper-run-start"), paperBusy, lockTitle);
+  setControlReadonly(document.getElementById("paper-run-end"), paperBusy, lockTitle);
   lockSelectTriggers(document.getElementById("paper-run-form"), locked);
+  syncPaperStopBtn();
   syncStrategyBatchUi();
   refreshHeaderActionLocks();
 }
@@ -3585,6 +3890,9 @@ function setBacktestBusy(busy) {
 
 function setPaperBusy(busy) {
   paperBusy = Boolean(busy);
+  if (!paperBusy) {
+    paperStopping = false;
+  }
   applyTradeLocks();
 }
 
@@ -3827,12 +4135,132 @@ function paperStrategyRequestBody(extra = {}) {
   return { ...extra, strategy_ids: ids };
 }
 
+let paperLabDefaults = {};
+let paperLabPresets = [];
+
+function isPaperLabSoloMode() {
+  const ids = getPaperSelectedStrategyIds();
+  return ids.length === 1;
+}
+
+function selectedPaperLabPreset() {
+  const select = document.getElementById("paper-lab-preset");
+  if (!select || !select.value) {
+    return null;
+  }
+  return paperLabPresets.find((row) => row.parameter_set_id === select.value) || null;
+}
+
+function syncPaperLabParamsUi() {
+  const row = document.getElementById("paper-lab-row");
+  const select = document.getElementById("paper-lab-preset");
+  const btn = document.getElementById("paper-lab-set-default");
+  const solo = isPaperLabSoloMode();
+  const lockTip = "多策略时不可改参，统一使用默认参数组";
+  if (row) {
+    row.hidden = false;
+    row.classList.toggle("is-lab-locked", !solo);
+  }
+  if (select) {
+    select.disabled = !solo;
+    select.setAttribute("aria-disabled", solo ? "false" : "true");
+    select.title = solo
+      ? "仅单策略顺序模拟可改参；多策略/并行强制默认参数组"
+      : lockTip;
+  }
+  if (btn) {
+    btn.disabled = !solo;
+    btn.setAttribute("aria-disabled", solo ? "false" : "true");
+    btn.title = solo ? "把当前参数组设为多策略/并行时的默认钉扎" : lockTip;
+  }
+  lockSelectTriggers(row, !solo);
+  if (row && !solo) {
+    row.querySelectorAll(".asqt-select-trigger").forEach((el) => {
+      el.title = lockTip;
+    });
+  }
+  if (!solo || !select) {
+    return;
+  }
+  const sid = getPaperSelectedStrategyIds()[0];
+  loadPaperLabPresets(sid).catch((error) => showToast(error.message || "加载实验室参数失败", "warn"));
+}
+
+async function loadPaperLabPresets(strategyId) {
+  const select = document.getElementById("paper-lab-preset");
+  if (!select) {
+    return;
+  }
+  const [presetsPayload, defaultsPayload] = await Promise.all([
+    requestJson(`/api/paper/lab/presets?strategy_id=${encodeURIComponent(strategyId)}`),
+    requestJson("/api/paper/lab/defaults").catch(() => ({ defaults: {} })),
+  ]);
+  paperLabDefaults = defaultsPayload.defaults || {};
+  paperLabPresets = presetsPayload.presets || [];
+  const defaultId = paperLabDefaults[strategyId]?.parameter_set_id
+    || presetsPayload.default?.parameter_set_id
+    || paperLabPresets[0]?.parameter_set_id
+    || "";
+  // Ensure default pin appears in the list even if not in hardcoded presets.
+  if (
+    paperLabDefaults[strategyId]
+    && !paperLabPresets.some((row) => row.parameter_set_id === paperLabDefaults[strategyId].parameter_set_id)
+  ) {
+    paperLabPresets = [paperLabDefaults[strategyId], ...paperLabPresets];
+  }
+  const prev = select.value;
+  select.innerHTML = "";
+  for (const row of paperLabPresets) {
+    const opt = document.createElement("option");
+    opt.value = row.parameter_set_id;
+    const mark = row.parameter_set_id === defaultId ? "（默认）" : "";
+    opt.textContent = `${row.parameter_set_id}${mark}`;
+    select.appendChild(opt);
+  }
+  select.value = paperLabPresets.some((row) => row.parameter_set_id === prev)
+    ? prev
+    : defaultId;
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+async function setPaperLabDefaultFromUi() {
+  const ids = getPaperSelectedStrategyIds();
+  if (ids.length !== 1) {
+    showToast("请先只选一个策略，再设默认参数组", "warn");
+    return;
+  }
+  const preset = selectedPaperLabPreset();
+  if (!preset) {
+    showToast("请选择参数组", "warn");
+    return;
+  }
+  await requestJson("/api/paper/lab/defaults", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      strategy_id: ids[0],
+      params: preset.params,
+      parameter_set_id: preset.parameter_set_id,
+    }),
+  });
+  showToast(`已设默认：${preset.parameter_set_id}`, "ok");
+  await loadPaperLabPresets(ids[0]);
+}
+
 const paperRunId = document.getElementById("paper-run-id");
 if (paperRunId) {
   paperRunId.addEventListener("change", () => {
+    syncPaperLabParamsUi();
     loadOrders().catch((error) => showToast(error.message || "加载模拟账户失败", "block"));
   });
 }
+
+document.getElementById("paper-lab-set-default")?.addEventListener("click", () => {
+  setPaperLabDefaultFromUi().catch((error) => showToast(error.message || "设置默认失败", "block"));
+});
+
+// Initial lab params visibility (after DOM ready).
+queueMicrotask(() => syncPaperLabParamsUi());
 
 let paperRunTimer = 0;
 let watchedPaperRunId = "";
@@ -3842,6 +4270,9 @@ function paperProgressText(row) {
   const label = row.progress_label || "";
   if (row.status === "queued") {
     return pct ? `模拟排队 ${pct}` : "模拟已入队";
+  }
+  if (row.status === "cancelled") {
+    return row.fail_reason || label || "已终止跑模拟";
   }
   if (row.status === "running") {
     return `模拟盘运行中 ${pct || ""}${label ? ` · ${label}` : ""}`.replace(/\s+/g, " ").trim();
@@ -3856,9 +4287,13 @@ function finishPaperWatch(row) {
   const detail = row.detail || {};
   const ok = row.status === "success" && detail.ok !== false;
   const partial = row.status === "partial";
+  const cancelled = row.status === "cancelled";
   const message = paperProgressText(row);
   setText("paper-account-hint", message);
-  showToast(ok ? "模拟已跑完" : message || "模拟未完整", ok ? "ok" : partial ? "warn" : "block");
+  showToast(
+    ok ? "模拟已跑完" : cancelled ? "已终止跑模拟" : message || "模拟未完整",
+    ok ? "ok" : partial || cancelled ? "warn" : "block",
+  );
   loadOrders().catch(() => {});
 }
 
@@ -3943,7 +4378,7 @@ function watchPaperRun(runId) {
             refreshPaperBooksDuringRun().catch(() => {});
           }
         }
-        if (row.status === "success" || row.status === "failed" || row.status === "partial") {
+        if (row.status === "success" || row.status === "failed" || row.status === "partial" || row.status === "cancelled") {
           window.clearInterval(paperRunTimer);
           paperRunTimer = 0;
           watchedPaperRunId = "";
@@ -3983,6 +4418,29 @@ if (paperRunForm) {
   });
 }
 
+const paperRunStop = document.getElementById("paper-run-stop");
+if (paperRunStop) {
+  paperRunStop.addEventListener("click", async () => {
+    if (!paperBusy || !watchedPaperRunId || paperStopping) {
+      return;
+    }
+    paperStopping = true;
+    syncPaperStopBtn();
+    try {
+      await requestJson(`/api/paper/run/${encodeURIComponent(watchedPaperRunId)}/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "用户终止跑模拟" }),
+      });
+      showToast("已请求终止，当前交易日结束后停止", "warn");
+    } catch (error) {
+      paperStopping = false;
+      syncPaperStopBtn();
+      showToast(error.message || "终止失败", "block");
+    }
+  });
+}
+
 const paperRunParallel = document.getElementById("paper-run-parallel");
 if (paperRunParallel) {
   paperRunParallel.addEventListener("click", () => {
@@ -3999,25 +4457,47 @@ async function startPaperRunFromUi(mode) {
   const parallel = mode === "parallel";
   setText("paper-account-hint", parallel ? "并行模拟入队中…请勿重复提交。" : "模拟盘入队中…请勿重复提交。");
   try {
+    const range = paperRunDateRange();
+    if (range.error) {
+      setPaperBusy(false);
+      setText("paper-account-hint", range.error);
+      showToast(range.error, "warn");
+      return;
+    }
     const body = paperStrategyRequestBody({
       days: Math.min(
         paperRunDaysMax,
-        Math.max(2, Number(document.getElementById("paper-run-days").value) || 20),
+        Math.max(1, Number(document.getElementById("paper-run-days").value) || 20),
       ),
       mode: parallel ? "parallel" : "sequential",
     });
+    if (range.start_date && range.end_date) {
+      body.start_date = range.start_date;
+      body.end_date = range.end_date;
+    }
     if (body.error) {
       setPaperBusy(false);
       setText("paper-account-hint", body.error);
       showToast(body.error, "warn");
       return;
     }
+    const solo = Array.isArray(body.strategy_ids) && body.strategy_ids.length === 1;
+    if (!parallel && solo) {
+      const preset = selectedPaperLabPreset();
+      if (preset) {
+        body.params = preset.params;
+        body.parameter_set_id = preset.parameter_set_id;
+      }
+    }
     const payload = await requestJson("/api/paper/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    showToast(parallel ? "并行模拟已在后台开始" : "模拟已在后台开始", "ok");
+    const pinHint = payload.parameter_set_ids
+      ? ` · 参数 ${Object.values(payload.parameter_set_ids).join(", ")}`
+      : "";
+    showToast((parallel ? "并行模拟已在后台开始" : "模拟已在后台开始") + pinHint, "ok");
     watchPaperRun(payload.run_id);
   } catch (error) {
     setPaperBusy(false);
@@ -4346,11 +4826,13 @@ async function loadOrders() {
     }
   }
   const bookIds = paperBookIds();
-  if (
+  if (bookIds.length <= 1) {
+    paperFocusId = bookIds[0] || null;
+  } else if (
     !paperFocusId
     || (paperFocusId !== PAPER_OVERVIEW_ID && !paperBooks[paperFocusId])
   ) {
-    paperFocusId = bookIds.length > 1 ? PAPER_OVERVIEW_ID : bookIds[0] || null;
+    paperFocusId = PAPER_OVERVIEW_ID;
   }
   renderOrders(mockRows, "mock-order-body");
   await showPaperFocus();
@@ -4470,35 +4952,74 @@ function buildPaperOverviewAccount(ids) {
   const stats = paperSessionStats(ids);
   const active = boards.filter((board) => Number(board.sessions || 0) > 0);
   const portfolioCash = Number(lastPaperConfig?.initial_cash);
-  const deployed = active.reduce((sum, board) => sum + Number(board.initial_cash || 0), 0);
-  const endAsset = active.reduce((sum, board) => sum + Number(board.end_asset || 0), 0);
-  const cash = active.reduce((sum, board) => sum + Number(board.cash || 0), 0);
-  const marketValue = active.reduce((sum, board) => sum + Number(board.market_value || 0), 0);
-  const peakAsset = active.reduce((sum, board) => sum + Number(board.peak_asset || 0), 0);
+  const deployedRaw = active.reduce((sum, board) => sum + Number(board.initial_cash || 0), 0);
+  const endAssetRaw = active.reduce((sum, board) => sum + Number(board.end_asset || 0), 0);
+  const cashRaw = active.reduce((sum, board) => sum + Number(board.cash || 0), 0);
+  const marketValueRaw = active.reduce((sum, board) => sum + Number(board.market_value || 0), 0);
   const buyNotional = active.reduce((sum, board) => sum + Number(board.buy_notional || 0), 0);
   const sellNotional = active.reduce((sum, board) => sum + Number(board.sell_notional || 0), 0);
   const fees = active.reduce((sum, board) => sum + Number(board.fees || 0), 0);
   const filled = active.reduce((sum, board) => sum + Number(board.orders_filled || 0), 0);
   const rejected = active.reduce((sum, board) => sum + Number(board.orders_rejected || 0), 0);
-  // 组合本金以设置为准；若设置未加载/偏离已部署份额过大，回退到已部署，避免图表 Y 轴被错误本金撑爆。
-  let initial = Number.isFinite(portfolioCash) && portfolioCash > 0 ? portfolioCash : deployed;
-  if (deployed > 0 && initial > deployed * 2.5) {
-    initial = deployed;
-  }
-  const returnBase = deployed > 0 ? deployed : initial;
+  // 设置本金是组合上限。总览本金 = 当前所选/已跑账本的已部署本金；
+  // 仅当实验室满仓导致合计 > 设置本金时，按比例缩到设置本金再算收益。
+  // 切勿在只选 2/8 本（已部署 2.5 万）时仍用 10 万做分母，否则会出现假的 -76%。
+  const settingCash = Number.isFinite(portfolioCash) && portfolioCash > 0
+    ? portfolioCash
+    : (deployedRaw > 0 ? deployedRaw : 0);
+  const overfunded = deployedRaw > 0 && settingCash > 0 && deployedRaw > settingCash * 1.05;
+  const underfunded = deployedRaw > 0 && settingCash > 0 && settingCash > deployedRaw * 2.5;
+  const scale = overfunded ? settingCash / deployedRaw : 1;
+  const deployed = deployedRaw * scale;
+  const endAsset = endAssetRaw * scale;
+  const cash = cashRaw * scale;
+  const marketValue = marketValueRaw * scale;
+  const initial = deployed > 0 ? deployed : settingCash;
+  const returnBase = initial;
   const starts = active.map((board) => board.window_start).filter(Boolean).sort();
   const ends = active.map((board) => board.window_end).filter(Boolean).sort();
-  const maxDd = active.reduce((worst, board) => {
-    const value = Number(board.max_drawdown);
-    if (Number.isNaN(value)) {
-      return worst;
+  const activeIds = ids.filter((id) => Number(paperBooks[id]?.summary?.sessions || 0) > 0);
+  const timeline = mergePaperTimelines(activeIds, deployedRaw > 0 ? deployedRaw : returnBase);
+  if (scale !== 1) {
+    for (const row of timeline) {
+      row.cash = Number(row.cash || 0) * scale;
+      row.market_value = Number(row.market_value || 0) * scale;
+      row.total_asset = Number(row.total_asset || 0) * scale;
+      row.buy_notional = Number(row.buy_notional || 0) * scale;
+      row.sell_notional = Number(row.sell_notional || 0) * scale;
+      row.fees = Number(row.fees || 0) * scale;
+      row.daily_pnl = Number(row.daily_pnl || 0) * scale;
     }
-    return worst == null || value < worst ? value : worst;
-  }, null);
-  const timeline = mergePaperTimelines(
-    ids.filter((id) => Number(paperBooks[id]?.summary?.sessions || 0) > 0),
-    returnBase,
-  );
+    // Recompute returns vs scaled principal (setting cash when overfunded).
+    let prev = returnBase;
+    let peak = returnBase;
+    for (const row of timeline) {
+      const asset = Number(row.total_asset || 0);
+      row.daily_return = prev ? (asset - prev) / prev : 0;
+      row.total_return = returnBase ? asset / returnBase - 1 : 0;
+      peak = Math.max(peak, asset);
+      row.drawdown = peak ? asset / peak - 1 : 0;
+      prev = asset;
+    }
+  }
+  const peakAsset = timeline.length
+    ? timeline.reduce((peak, row) => Math.max(peak, Number(row.total_asset || 0)), Number(timeline[0].total_asset || 0))
+    : active.reduce((sum, board) => sum + Number(board.peak_asset || 0), 0) * scale;
+  const maxDd = timeline.length
+    ? timeline.reduce((worst, row) => {
+      const value = Number(row.drawdown);
+      if (Number.isNaN(value)) {
+        return worst;
+      }
+      return worst == null || value < worst ? value : worst;
+    }, null)
+    : active.reduce((worst, board) => {
+      const value = Number(board.max_drawdown);
+      if (Number.isNaN(value)) {
+        return worst;
+      }
+      return worst == null || value < worst ? value : worst;
+    }, null);
   const positions = [];
   const fills = [];
   for (const id of ids) {
@@ -4506,7 +5027,11 @@ function buildPaperOverviewAccount(ids) {
       continue;
     }
     for (const row of paperBooks[id]?.positions || []) {
-      positions.push({ ...row, strategy_id: id });
+      positions.push({
+        ...row,
+        strategy_id: id,
+        market_value: Number(row.market_value || 0) * scale,
+      });
     }
     for (const row of paperBooks[id]?.fills || []) {
       fills.push({ ...row, strategy_id: id });
@@ -4517,7 +5042,11 @@ function buildPaperOverviewAccount(ids) {
   const haltCounts = paperHaltCounts(ids);
   const fundingComplete = active.length > 0
     && active.length === ids.length
-    && Math.abs(deployed - initial) <= Math.max(1, initial * 1e-6);
+    && !overfunded
+    && !underfunded
+    && Math.abs(deployedRaw - settingCash) <= Math.max(1, settingCash * 1e-6);
+  const totalReturn = returnBase ? endAsset / returnBase - 1 : 0;
+  const peakReturn = returnBase ? peakAsset / returnBase - 1 : 0;
   const summary = {
     window_start: starts[0] || null,
     window_end: ends[ends.length - 1] || null,
@@ -4531,15 +5060,19 @@ function buildPaperOverviewAccount(ids) {
     halt_flat_count: haltCounts.halted,
     halt_active_count: haltCounts.active,
     initial_cash: initial,
-    deployed_cash: deployed,
+    setting_cash: settingCash,
+    deployed_cash: deployedRaw,
+    funding_scale: scale,
     funding_complete: fundingComplete,
+    funding_underfunded: underfunded,
+    funding_overfunded: overfunded,
     end_asset: endAsset,
     cash,
     market_value: marketValue,
-    total_return: returnBase ? endAsset / returnBase - 1 : 0,
+    total_return: totalReturn,
     max_drawdown: maxDd == null ? 0 : maxDd,
     peak_asset: peakAsset,
-    peak_return: returnBase ? peakAsset / returnBase - 1 : 0,
+    peak_return: peakReturn,
     position_count: positions.length,
     orders_filled: filled,
     orders_rejected: rejected,
@@ -4548,17 +5081,18 @@ function buildPaperOverviewAccount(ids) {
     sell_notional: sellNotional,
     fees,
   };
-  const activeIds = ids.filter((id) => Number(paperBooks[id]?.summary?.sessions || 0) > 0);
   const activeReconciles = activeIds.map((id) => paperBooks[id]?.reconcile || {});
   const okCount = activeReconciles.filter((item) => item.ok).length;
   const buyQty = activeReconciles.reduce((sum, item) => sum + Number(item.buy_qty || 0), 0);
   const sellQty = activeReconciles.reduce((sum, item) => sum + Number(item.sell_qty || 0), 0);
-  const expectedCash = activeReconciles.reduce((sum, item) => sum + Number(item.expected_cash || 0), 0);
+  const expectedCashRaw = activeReconciles.reduce((sum, item) => sum + Number(item.expected_cash || 0), 0);
+  const expectedCash = expectedCashRaw * scale;
   const actualCash = cash;
   const cashDiff = roundMoney(actualCash - expectedCash);
-  const reconcileOk = activeReconciles.length > 0
-    && okCount === activeReconciles.length
-    && Math.abs(cashDiff) <= 0.05;
+  const approx = (a, b, tol = 0.05) => Math.abs(Number(a) - Number(b)) <= tol;
+  const approxRet = (a, b) => Math.abs(Number(a) - Number(b)) <= 1e-6;
+  const expectedReturn = returnBase ? endAsset / returnBase - 1 : 0;
+  const expectedPeakReturn = returnBase ? peakAsset / returnBase - 1 : 0;
   const reconcileChecks = [
     {
       name: "现金",
@@ -4568,39 +5102,33 @@ function buildPaperOverviewAccount(ids) {
       ok: Math.abs(cashDiff) <= 0.05,
     },
     {
-      name: "买入额",
-      expected: roundMoney(buyNotional),
-      actual: roundMoney(buyNotional),
-      diff: 0,
-      ok: true,
-    },
-    {
-      name: "卖出额",
-      expected: roundMoney(sellNotional),
-      actual: roundMoney(sellNotional),
-      diff: 0,
-      ok: true,
-    },
-    {
-      name: "费用",
-      expected: roundMoney(fees),
-      actual: roundMoney(fees),
-      diff: 0,
-      ok: true,
-    },
-    {
-      name: "持仓市值",
-      expected: roundMoney(marketValue),
-      actual: roundMoney(marketValue),
-      diff: 0,
-      ok: true,
-    },
-    {
       name: "总资产",
       expected: roundMoney(expectedCash + marketValue),
       actual: roundMoney(endAsset),
       diff: roundMoney(endAsset - (expectedCash + marketValue)),
-      ok: Math.abs(endAsset - (expectedCash + marketValue)) <= 0.05,
+      ok: approx(endAsset, expectedCash + marketValue),
+    },
+    {
+      name: "账户总览本金",
+      expected: roundMoney(deployed),
+      actual: roundMoney(initial),
+      diff: roundMoney(initial - deployed),
+      ok: approx(initial, deployed, 0.02)
+        && !(settingCash > 0 && deployedRaw > 0 && deployedRaw < settingCash * 0.5 && approx(initial, settingCash, 1)),
+    },
+    {
+      name: "账户总览累计收益",
+      expected: expectedReturn,
+      actual: totalReturn,
+      diff: totalReturn - expectedReturn,
+      ok: approxRet(totalReturn, expectedReturn),
+    },
+    {
+      name: "账户总览峰值收益",
+      expected: expectedPeakReturn,
+      actual: peakReturn,
+      diff: peakReturn - expectedPeakReturn,
+      ok: approxRet(peakReturn, expectedPeakReturn) && peakAsset + 1e-9 >= endAsset,
     },
     {
       name: "通过账本数量",
@@ -4610,6 +5138,14 @@ function buildPaperOverviewAccount(ids) {
       ok: okCount === activeReconciles.length,
     },
   ];
+  const reconcileOk = activeReconciles.length > 0
+    && okCount === activeReconciles.length
+    && reconcileChecks.every((row) => row.ok);
+  const fundingNote = overfunded
+    ? `实验室超配已按 ${scale.toFixed(4)} 缩至设置本金 ${formatMoney(settingCash)}；`
+    : underfunded
+      ? `仅含所选 ${active.length} 本已部署 ${formatMoney(deployed)}（设置本金 ${formatMoney(settingCash)}）；`
+      : "";
   return {
     account_id: "paper:overview",
     strategy_id: PAPER_OVERVIEW_ID,
@@ -4623,16 +5159,17 @@ function buildPaperOverviewAccount(ids) {
       peak_asset: peakAsset,
     },
     reconcile: {
-      ok: reconcileOk && reconcileChecks.every((row) => row.ok),
+      ok: reconcileOk,
       asof: ends[ends.length - 1] || null,
       formula:
-        `组合净资产=已跑账本合计；本金 ${formatMoney(initial)}；`
+        `账户总览：净资产=所选已跑账本合计；本金=已部署本金 ${formatMoney(initial)}；`
+        + fundingNote
         + `对账通过 ${okCount}/${activeReconciles.length}（已跑 ${active.length}/${ids.length}）。`
-        + `期末现金 = 各账本金合计 − 买入 + 卖出 − 费用。`,
+        + `累计收益 = 净资产 / 已部署本金 − 1。`,
       initial_cash: initial,
-      buy_notional: roundMoney(buyNotional),
-      sell_notional: roundMoney(sellNotional),
-      fees: roundMoney(fees),
+      buy_notional: roundMoney(buyNotional * scale),
+      sell_notional: roundMoney(sellNotional * scale),
+      fees: roundMoney(fees * scale),
       buy_qty: buyQty,
       sell_qty: sellQty,
       expected_cash: roundMoney(expectedCash),
@@ -4653,45 +5190,84 @@ function roundMoney(value) {
 }
 
 function mergePaperTimelines(ids, initialCash) {
-  const byDate = new Map();
+  // Build per-book series, then on the union of dates use that day's asset or
+  // carry-forward (idle initial before start / last asset after end). Avoids
+  // fake portfolio jumps when lab solo-runs leave misaligned windows / cash.
+  const series = [];
   for (const id of ids) {
-    for (const row of paperBooks[id]?.timeline || []) {
-      const day = row.trade_date;
-      if (!day) {
-        continue;
-      }
-      const cur = byDate.get(day) || {
-        trade_date: day,
-        cash: 0,
-        market_value: 0,
-        total_asset: 0,
-        buys: 0,
-        sells: 0,
-        buy_notional: 0,
-        sell_notional: 0,
-        fees: 0,
-        books: 0,
-      };
-      cur.cash += Number(row.cash || 0);
-      cur.market_value += Number(row.market_value || 0);
-      cur.total_asset += Number(row.total_asset || 0);
-      cur.buys += Number(row.buys || 0);
-      cur.sells += Number(row.sells || 0);
-      cur.buy_notional += Number(row.buy_notional || 0);
-      cur.sell_notional += Number(row.sell_notional || 0);
-      cur.fees += Number(row.fees || 0);
-      cur.books += 1;
-      byDate.set(day, cur);
+    const rows = paperBooks[id]?.timeline || [];
+    if (!rows.length) {
+      continue;
     }
+    const byDate = new Map(rows.map((row) => [row.trade_date, row]));
+    const dates = rows.map((row) => row.trade_date);
+    const initial = Number(paperBooks[id]?.summary?.initial_cash || 0);
+    const firstAsset = Number(rows[0].total_asset || initial);
+    const last = rows[rows.length - 1];
+    series.push({
+      id,
+      byDate,
+      start: dates[0],
+      end: dates[dates.length - 1],
+      initial,
+      firstAsset,
+      lastAsset: Number(last.total_asset || 0),
+      lastCash: Number(last.cash || 0),
+      lastMv: Number(last.market_value || 0),
+    });
   }
-  const timeline = [...byDate.values()].sort((a, b) => String(a.trade_date).localeCompare(String(b.trade_date)));
-  let prev = initialCash;
-  let peak = initialCash;
+  const allDates = [...new Set(series.flatMap((item) => [...item.byDate.keys()]))].sort((a, b) =>
+    String(a).localeCompare(String(b)),
+  );
+  const timeline = allDates.map((day) => {
+    const cur = {
+      trade_date: day,
+      cash: 0,
+      market_value: 0,
+      total_asset: 0,
+      buys: 0,
+      sells: 0,
+      buy_notional: 0,
+      sell_notional: 0,
+      fees: 0,
+      books: 0,
+    };
+    for (const book of series) {
+      const row = book.byDate.get(day);
+      if (row) {
+        cur.cash += Number(row.cash || 0);
+        cur.market_value += Number(row.market_value || 0);
+        cur.total_asset += Number(row.total_asset || 0);
+        cur.buys += Number(row.buys || 0);
+        cur.sells += Number(row.sells || 0);
+        cur.buy_notional += Number(row.buy_notional || 0);
+        cur.sell_notional += Number(row.sell_notional || 0);
+        cur.fees += Number(row.fees || 0);
+        cur.books += 1;
+      } else if (day < book.start) {
+        // Funded but not yet in window: count idle book cash.
+        cur.cash += book.initial;
+        cur.total_asset += book.initial;
+        cur.books += 1;
+      } else if (day > book.end) {
+        cur.cash += book.lastCash;
+        cur.market_value += book.lastMv;
+        cur.total_asset += book.lastAsset;
+        cur.books += 1;
+      }
+    }
+    return cur;
+  });
+  const base = Number(initialCash) > 0
+    ? Number(initialCash)
+    : (timeline[0] ? Number(timeline[0].total_asset) : 0);
+  let prev = base;
+  let peak = base;
   for (const row of timeline) {
     const asset = Number(row.total_asset || 0);
     row.daily_pnl = asset - prev;
     row.daily_return = prev ? row.daily_pnl / prev : 0;
-    row.total_return = initialCash ? asset / initialCash - 1 : 0;
+    row.total_return = base ? asset / base - 1 : 0;
     peak = Math.max(peak, asset);
     row.drawdown = peak ? asset / peak - 1 : 0;
     prev = asset;
@@ -4872,7 +5448,7 @@ async function showPaperFocus(options = {}) {
   if (!account) {
     return;
   }
-  renderPaperAccount(account, paperKillState, paperGateState, multi);
+  await renderPaperAccount(account, paperKillState, paperGateState, multi);
   if (skipOrders) {
     return;
   }
@@ -4936,7 +5512,16 @@ function renderPaperCompare(ids) {
   }
 }
 
-function renderPaperAccount(account, kill, paperGate, multi = false) {
+function paperHaltTriggerText(board) {
+  const dd = board?.halt_dd;
+  const stop = board?.halt_stop;
+  if (dd == null || dd === "" || stop == null || stop === "") {
+    return "";
+  }
+  return `触发时收盘盯市回撤 ${formatPct(dd)}，阈值 ${formatPct(stop)}。日终快照最大回撤可能略浅，因为平仓后净值会回一点。`;
+}
+
+async function renderPaperAccount(account, kill, paperGate, multi = false) {
   const body = document.getElementById("paper-curve-body");
   if (!body) {
     return;
@@ -4954,9 +5539,22 @@ function renderPaperAccount(account, kill, paperGate, multi = false) {
   const timeline = account.timeline || [];
   renderPaperBoard(board, overview);
   renderPaperReconcile(account.reconcile || {});
+  let lab = null;
+  if (!overview && account.strategy_id === "etf_ma_momentum_filter" && timeline.length) {
+    try {
+      lab = await requestJson(
+        `/api/paper/lab/timeline?strategy_id=${encodeURIComponent(account.strategy_id)}`,
+      );
+    } catch (_err) {
+      lab = null;
+    }
+  }
+  renderPaperLabMetrics(lab, board);
+  await loadPaperLabGrid(overview ? null : account.strategy_id);
   renderPaperChart(timeline, board, {
     strategyId: account.strategy_id,
     overview,
+    lab,
   });
   paperDailyState.rows = timeline;
   paperDailyState.fillsByDate = groupFillsByDate(account.fills || []);
@@ -4996,10 +5594,12 @@ function renderPaperAccount(account, kill, paperGate, multi = false) {
       : "";
     const fundingText = board.funding_complete
       ? `组合本金 ${cashText}，净资产 ${formatMoney(board.end_asset)}。`
-      : `组合本金 ${cashText}；已部署 ${formatMoney(board.deployed_cash || 0)}（${board.active_book_count || 0}/${board.book_count || 0} 本已跑），净资产 ${formatMoney(board.end_asset)}。`;
+      : Number(board.deployed_cash) > Number(board.setting_cash ?? board.initial_cash) * 1.05
+        ? `本金固定为设置值 ${formatMoney(board.setting_cash ?? board.initial_cash)}（不是各账相加）。当前各账合计部署 ${formatMoney(board.deployed_cash)}，总览已按比例缩放到本金；要账本真实均分请重置后用「全部/并行」重跑。`
+        : `组合本金 ${cashText}；已部署 ${formatMoney(board.deployed_cash || 0)}（${board.active_book_count || 0}/${board.book_count || 0} 本已跑），净资产 ${formatMoney(board.end_asset)}。`;
     setText(
       "paper-account-hint",
-      `${fundingText}${alignText}。${haltText}本金按本次参与跑模拟的策略数均分；总览看组合净资产而非各账满额加总。`,
+      `${fundingText}${alignText}。${haltText}本金按设置页初始资金；总览合并各账并结转缺日。`,
     );
   }   else if (multi) {
     const status = paperHaltStatus({ summary: board, state: account.state });
@@ -5014,15 +5614,16 @@ function renderPaperAccount(account, kill, paperGate, multi = false) {
     );
   } else {
     const status = paperHaltStatus({ summary: board, state: account.state });
+    const trigger = paperHaltTriggerText(board);
     if (status === "flatten_pending") {
       setText(
         "paper-account-hint",
-        `${windowText}。该账本平仓中：禁买，后续交易日继续强平。可用「解除单策略平仓」恢复交易。`,
+        `${windowText}。该账本平仓中：禁买，后续交易日继续强平。${trigger}可用「解除单策略平仓」恢复交易。`,
       );
     } else if (status === "halted") {
       setText(
         "paper-account-hint",
-        `${windowText}。该账本已平仓：禁买。可用「解除单策略平仓」恢复交易。`,
+        `${windowText}。该账本已平仓：禁买。${trigger}可用「解除单策略平仓」恢复交易。`,
       );
     } else {
       setText("paper-account-hint", `${windowText}。收益相对本金 ${cashText}；折线与下表可对每日盈亏和成交。`);
@@ -5096,9 +5697,13 @@ function renderPaperReconcile(reconcile) {
     return;
   }
   const qtyName = (name) => /数量|账本/.test(String(name || ""));
+  const returnName = (name) => /收益/.test(String(name || ""));
   const formatValue = (name, value) => {
     if (qtyName(name)) {
       return String(Math.round(Number(value) || 0));
+    }
+    if (returnName(name)) {
+      return formatPct(value);
     }
     return formatMoney(value);
   };
@@ -5637,10 +6242,87 @@ function paperChartBookLabel(board, opts = {}) {
   return STRATEGY_LABEL[strategyId] || strategyId || "当前账户";
 }
 
+function renderPaperLabMetrics(lab, board) {
+  const el = document.getElementById("paper-lab-metrics");
+  if (!el) {
+    return;
+  }
+  if (!lab || !lab.points?.length) {
+    el.hidden = true;
+    el.innerHTML = "";
+    return;
+  }
+  const summary = lab.summary || board || {};
+  el.hidden = false;
+  el.innerHTML = [
+    `<span>参数 <strong>${lab.parameter_set_id || "—"}</strong></span>`,
+    `<span>累计收益 <strong class="${pnlClass(summary.total_return)}">${formatPct(summary.total_return)}</strong></span>`,
+    `<span>最大回撤 <strong class="${pnlClass(summary.max_drawdown)}">${formatPct(summary.max_drawdown)}</strong></span>`,
+    `<span>基准 <strong>${lab.benchmark_symbol || "510300.SH"}</strong></span>`,
+    `<a href="#paper-lab-grid-panel" class="paper-lab-grid-link">实验对比 ↓</a>`,
+  ].join("");
+}
+
+function renderPaperLabGrid(payload) {
+  const panel = document.getElementById("paper-lab-grid-panel");
+  const body = document.getElementById("paper-lab-grid-body");
+  const meta = document.getElementById("paper-lab-grid-meta");
+  if (!panel || !body) {
+    return;
+  }
+  const rows = payload?.ok ? payload.rows || [] : [];
+  if (!rows.length) {
+    panel.hidden = true;
+    body.innerHTML = "";
+    return;
+  }
+  panel.hidden = false;
+  if (meta) {
+    const winner = payload.winner?.parameter_set_id || "—";
+    meta.textContent = `batch ${payload.batch_id || "—"} · ${payload.days || "—"} 日 · 最优 ${winner}`;
+  }
+  body.innerHTML = "";
+  const bestId = payload.winner?.parameter_set_id;
+  for (const row of rows) {
+    const tr = document.createElement("tr");
+    if (row.parameter_set_id === bestId) {
+      tr.classList.add("is-lab-winner");
+    }
+    appendCell(tr, row.parameter_set_id || "-");
+    appendCell(tr, row.ma_window != null ? String(row.ma_window) : "-", { className: "num" });
+    appendCell(tr, row.top_k != null ? String(row.top_k) : "-", { className: "num" });
+    appendCell(tr, formatPct(row.total_return), { className: pnlClass(row.total_return) });
+    appendCell(tr, formatPct(row.max_drawdown), { className: pnlClass(row.max_drawdown) });
+    appendCell(tr, formatPct(row.regime_return_up), { className: pnlClass(row.regime_return_up) });
+    appendCell(tr, formatPct(row.regime_return_range), { className: pnlClass(row.regime_return_range) });
+    appendCell(tr, formatPct(row.regime_return_down), { className: pnlClass(row.regime_return_down) });
+    appendCell(tr, row.fees == null ? "-" : formatMoney(row.fees), { className: "num" });
+    body.appendChild(tr);
+  }
+}
+
+async function loadPaperLabGrid(strategyId) {
+  const panel = document.getElementById("paper-lab-grid-panel");
+  if (!panel) {
+    return;
+  }
+  if (strategyId !== "etf_ma_momentum_filter") {
+    renderPaperLabGrid(null);
+    return;
+  }
+  try {
+    const payload = await requestJson("/api/paper/lab/grid");
+    renderPaperLabGrid(payload);
+  } catch (_err) {
+    renderPaperLabGrid(null);
+  }
+}
+
 function renderPaperChart(rows, board, opts = {}) {
   const host = document.getElementById("paper-equity-chart");
   const meta = document.getElementById("paper-chart-meta");
   const bookEl = document.getElementById("paper-chart-book");
+  const lab = opts.lab || null;
   paperChartView = null;
   if (!host) {
     return;
@@ -5666,9 +6348,18 @@ function renderPaperChart(rows, board, opts = {}) {
   const innerW = width - pad.left - pad.right;
   const innerH = height - pad.top - pad.bottom;
   const assets = rows.map((row) => Number(row.total_asset));
+  const principal = paperChartPrincipal(board, Math.min(...assets), Math.max(...assets));
+  // Include scaled benchmark so dashed line stays inside Y domain.
+  if (lab?.points?.length === rows.length && principal != null && Number.isFinite(principal)) {
+    for (const point of lab.points) {
+      const nav = Number(point.benchmark_nav);
+      if (Number.isFinite(nav)) {
+        assets.push(nav * principal);
+      }
+    }
+  }
   const dataMin = Math.min(...assets);
   const dataMax = Math.max(...assets);
-  const principal = paperChartPrincipal(board, dataMin, dataMax);
   const domain = paperChartYDomain(assets, principal);
   const minY = domain.minY;
   const maxY = domain.maxY;
@@ -5679,6 +6370,36 @@ function renderPaperChart(rows, board, opts = {}) {
   const svg = document.createElementNS(ns, "svg");
   svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
   svg.setAttribute("class", "paper-chart-svg");
+
+  // Regime bands (lab view) — behind everything else
+  if (lab?.points?.length === rows.length) {
+    let i = 0;
+    while (i < lab.points.length) {
+      const regime = lab.points[i].regime || "range";
+      let j = i + 1;
+      while (j < lab.points.length && (lab.points[j].regime || "range") === regime) {
+        j += 1;
+      }
+      const x0 = xAt(i);
+      const x1 = xAt(Math.max(i, j - 1));
+      const rect = document.createElementNS(ns, "rect");
+      rect.setAttribute("x", String(x0));
+      rect.setAttribute("y", String(pad.top));
+      rect.setAttribute("width", String(Math.max(1, x1 - x0 + (rows.length === 1 ? 0 : innerW / (rows.length - 1)))));
+      rect.setAttribute("height", String(innerH));
+      rect.setAttribute(
+        "class",
+        regime === "trend_up"
+          ? "paper-chart-regime-up"
+          : regime === "trend_down"
+            ? "paper-chart-regime-down"
+            : "paper-chart-regime-range",
+      );
+      svg.appendChild(rect);
+      i = j;
+    }
+  }
+
   const ticks = [];
   ticks.push(maxY);
   if (domain.showPrincipal && principal != null) {
@@ -5757,6 +6478,49 @@ function renderPaperChart(rows, board, opts = {}) {
   line.setAttribute("d", lineD);
   line.setAttribute("class", "paper-chart-line");
   svg.appendChild(line);
+
+  // Benchmark nav scaled to principal
+  if (lab?.points?.length === rows.length && principal != null) {
+    const benchPts = lab.points.map((p, index) => ({
+      x: xAt(index),
+      y: yAt(Number(p.benchmark_nav || 1) * principal),
+    }));
+    if (benchPts.length) {
+      const bench = document.createElementNS(ns, "path");
+      bench.setAttribute("d", smoothLinePath(benchPts));
+      bench.setAttribute("class", "paper-chart-bench");
+      svg.appendChild(bench);
+    }
+  }
+
+  // Rebalance markers + drawdown trough
+  if (lab?.markers?.length) {
+    const byDate = new Map(points.map((p) => [p.date, p]));
+    lab.markers.forEach((m) => {
+      const pt = byDate.get(m.trade_date);
+      if (!pt) {
+        return;
+      }
+      const dot = document.createElementNS(ns, "circle");
+      dot.setAttribute("cx", String(pt.x));
+      dot.setAttribute("cy", String(pt.y));
+      dot.setAttribute("r", "2.6");
+      dot.setAttribute("class", "paper-chart-rebalance");
+      svg.appendChild(dot);
+    });
+  }
+  if (lab?.trough_date) {
+    const trough = points.find((p) => p.date === lab.trough_date);
+    if (trough) {
+      const mark = document.createElementNS(ns, "circle");
+      mark.setAttribute("cx", String(trough.x));
+      mark.setAttribute("cy", String(trough.y));
+      mark.setAttribute("r", "4");
+      mark.setAttribute("class", "paper-chart-dd-mark");
+      svg.appendChild(mark);
+    }
+  }
+
   const tickIndexes = xTickIndexes(rows.length);
   const spanYears = xAxisSpanYears(rows);
   tickIndexes.forEach((index, order) => {
@@ -6284,7 +7048,7 @@ function renderEvents(payload) {
       const actor = row.actor || "-";
       appendCell(tr, actor, { className: "col-actor", title: actor });
       const value = row.value;
-      appendCell(tr, value == null || value === "" ? "-" : String(value), { className: "num" });
+      appendCell(tr, value == null || value === "" ? "-" : formatEventValue(value), { className: "num" });
       appendCell(tr, row.source || "-");
       body.appendChild(tr);
     }
@@ -6637,7 +7401,15 @@ document.getElementById("events-pull")?.addEventListener("click", async () => {
   }
 });
 
-function renderTags(rows) {
+const TAGS_PAGE_SIZE = 10;
+const tagsViewState = {
+  page: 1,
+  pages: 1,
+  total: 0,
+  seq: 0,
+};
+
+function renderTags(payload) {
   const body = document.getElementById("tags-body");
   const summary = document.getElementById("tags-summary");
   if (!body) {
@@ -6647,21 +7419,31 @@ function renderTags(rows) {
   if (summary) {
     summary.innerHTML = "";
   }
-  const list = Array.isArray(rows) ? rows : [];
-  const counts = new Map();
-  for (const row of list) {
-    const tag = row.tag || "-";
-    counts.set(tag, (counts.get(tag) || 0) + 1);
-  }
+  const list = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.items)
+      ? payload.items
+      : [];
+  const total = Array.isArray(payload) ? list.length : Number(payload?.total) || 0;
+  const page = Array.isArray(payload) ? 1 : Number(payload?.page) || 1;
+  const pages = Array.isArray(payload) ? 1 : Number(payload?.pages) || 1;
+  const size = Array.isArray(payload) ? list.length || TAGS_PAGE_SIZE : Number(payload?.page_size) || TAGS_PAGE_SIZE;
+  tagsViewState.page = page;
+  tagsViewState.pages = pages;
+  tagsViewState.total = total;
+  const summaryRows = Array.isArray(payload?.summary)
+    ? payload.summary
+    : [];
   if (summary) {
-    const top = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
-    if (!top.length) {
+    if (!summaryRows.length && !list.length) {
       const item = document.createElement("div");
       item.className = "kv-item";
       item.innerHTML = "<span>池</span><strong>暂无标签</strong>";
       summary.appendChild(item);
     } else {
-      for (const [tag, count] of top) {
+      for (const row of summaryRows) {
+        const tag = row.tag || "-";
+        const count = Number(row.count) || 0;
         const item = document.createElement("div");
         item.className = "kv-item";
         const k = document.createElement("button");
@@ -6674,7 +7456,8 @@ function renderTags(rows) {
           if (input) {
             input.value = tag;
           }
-          loadTagsPage().catch((error) => showToast(error.message, "block"));
+          tagsViewState.page = 1;
+          loadTagsList(1).catch((error) => showToast(error.message, "block"));
         });
         const v = document.createElement("strong");
         v.textContent = `${count} 只`;
@@ -6691,20 +7474,38 @@ function renderTags(rows) {
     td.textContent = "暂无标签。宇宙同步或手工写入后会显示。";
     tr.appendChild(td);
     body.appendChild(tr);
-    return;
+  } else {
+    for (const row of list) {
+      const tr = document.createElement("tr");
+      appendCell(tr, row.tag || "-");
+      appendCell(tr, row.symbol || "-");
+      appendCell(tr, row.source || "-");
+      appendCell(tr, row.note || "-");
+      appendCell(tr, formatDateTime(row.updated_at, false));
+      body.appendChild(tr);
+    }
   }
-  for (const row of list.slice(0, 500)) {
-    const tr = document.createElement("tr");
-    appendCell(tr, row.tag || "-");
-    appendCell(tr, row.symbol || "-");
-    appendCell(tr, row.source || "-");
-    appendCell(tr, row.note || "-");
-    appendCell(tr, formatDateTime(row.updated_at, false));
-    body.appendChild(tr);
+  setText("tags-page-label", `共 ${total} 条 · ${page} / ${pages} · 每页 ${size}`);
+  const prev = document.getElementById("tags-prev");
+  const next = document.getElementById("tags-next");
+  if (prev) {
+    prev.disabled = page <= 1 || total === 0;
   }
+  if (next) {
+    next.disabled = page >= pages || total === 0;
+  }
+  const tagFilter = document.getElementById("tags-filter-tag")?.value?.trim();
+  setText(
+    "tags-page-meta",
+    total
+      ? tagFilter
+        ? `池 ${tagFilter} · 共 ${total} 只 · 第 ${page}/${pages} 页`
+        : `共 ${total} 条 · 第 ${page}/${pages} 页`
+      : "暂无匹配",
+  );
 }
 
-async function loadTagsPage() {
+function tagsViewQuery(page = tagsViewState.page) {
   const params = new URLSearchParams();
   const tag = document.getElementById("tags-filter-tag")?.value?.trim();
   const symbol = document.getElementById("tags-filter-symbol")?.value?.trim();
@@ -6714,20 +7515,60 @@ async function loadTagsPage() {
   if (symbol) {
     params.set("symbol", symbol);
   }
-  params.set("limit", "2000");
-  const rows = await requestJsonOrMissing(`/api/tags?${params.toString()}`, undefined, "标签接口暂不可用");
-  if (rows == null) {
-    renderTags([]);
+  params.set("page", String(Math.max(1, Number(page) || 1)));
+  params.set("page_size", String(TAGS_PAGE_SIZE));
+  return params;
+}
+
+async function loadTagsList(page = tagsViewState.page) {
+  const seq = ++tagsViewState.seq;
+  const prev = document.getElementById("tags-prev");
+  const next = document.getElementById("tags-next");
+  if (prev) {
+    prev.disabled = true;
+  }
+  if (next) {
+    next.disabled = true;
+  }
+  const payload = await requestJsonOrMissing(
+    `/api/tags?${tagsViewQuery(page).toString()}`,
+    undefined,
+    "标签接口暂不可用",
+  );
+  if (seq !== tagsViewState.seq) {
+    return;
+  }
+  if (payload == null) {
+    renderTags({ items: [], total: 0, page: 1, pages: 1, page_size: TAGS_PAGE_SIZE, summary: [] });
     setText("tags-page-meta", "接口暂不可用");
     return;
   }
-  renderTags(rows);
-  setText("tags-page-meta", tag ? `池 ${tag} · ${rows.length} 只` : `${rows.length} 条`);
+  renderTags(payload);
+}
+
+async function loadTagsPage() {
+  tagsViewState.page = 1;
+  await loadTagsList(1);
 }
 
 document.getElementById("tags-filters")?.addEventListener("submit", (event) => {
   event.preventDefault();
-  loadTagsPage().catch((error) => showToast(error.message, "block"));
+  tagsViewState.page = 1;
+  loadTagsList(1).catch((error) => showToast(error.message, "block"));
+});
+
+document.getElementById("tags-prev")?.addEventListener("click", () => {
+  if (tagsViewState.page <= 1) {
+    return;
+  }
+  loadTagsList(tagsViewState.page - 1).catch((error) => showToast(error.message, "block"));
+});
+
+document.getElementById("tags-next")?.addEventListener("click", () => {
+  if (tagsViewState.page >= tagsViewState.pages) {
+    return;
+  }
+  loadTagsList(tagsViewState.page + 1).catch((error) => showToast(error.message, "block"));
 });
 
 document.getElementById("tags-upsert-form")?.addEventListener("submit", async (event) => {
@@ -6828,7 +7669,7 @@ function renderOverrides(rows) {
 
 async function loadOverridesPage() {
   const params = new URLSearchParams();
-  const strategyId = document.getElementById("override-filter-strategy")?.value;
+  const strategyId = document.getElementById("override-strategy")?.value;
   if (strategyId) {
     params.set("strategy_id", strategyId);
   }
@@ -6847,8 +7688,11 @@ async function loadOverridesPage() {
   setText("override-page-meta", `${rows.length} 条`);
 }
 
-document.getElementById("override-filters")?.addEventListener("submit", (event) => {
-  event.preventDefault();
+document.getElementById("override-refresh")?.addEventListener("click", () => {
+  loadOverridesPage().catch((error) => showToast(error.message, "block"));
+});
+
+document.getElementById("override-strategy")?.addEventListener("change", () => {
   loadOverridesPage().catch((error) => showToast(error.message, "block"));
 });
 
@@ -6873,8 +7717,12 @@ document.getElementById("override-upsert-form")?.addEventListener("submit", asyn
   const action = document.getElementById("override-action")?.value;
   const reason = document.getElementById("override-reason")?.value?.trim() || null;
   const weightRaw = document.getElementById("override-weight")?.value;
-  if (!strategyId || !symbol || !action) {
-    showToast("请填写策略、代码与动作", "warn");
+  if (!strategyId) {
+    showToast("保存覆盖请先选择具体策略（不能是「全部」）", "warn");
+    return;
+  }
+  if (!symbol || !action) {
+    showToast("请填写代码与动作", "warn");
     return;
   }
   const body = {
