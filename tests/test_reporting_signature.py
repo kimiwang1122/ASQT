@@ -7,9 +7,10 @@ from pathlib import Path
 import pytest
 
 from asqt.db import initialize_database, query_all
-from asqt.reporting import list_latest_experiments, run_dir, write_run_tree
+from asqt.research_engine import LocalResearchEngine, LocalStrategyService
+from asqt.reporting import list_latest_experiments, latest_summary_path, run_dir, write_run_tree
 from asqt.research_jobs import resume_backtest_job, start_backtest_job
-from asqt.strategies import STOCK_MOMENTUM_TOPK
+from asqt.strategies import STOCK_MOMENTUM_TOPK, STRATEGY_SPECS
 from asqt.versioning import SignatureMismatch, assert_run_signature, run_signature
 from tests.test_p2_research import _seed, _trend_book, make_settings
 
@@ -83,3 +84,47 @@ def test_gate_d5_signature_persisted_on_research_run(tmp_path: Path):
         settings=settings,
     )
     assert rows and rows[0]["run_signature"] == job["run_signature"]
+
+
+def test_backtest_job_keeps_admit_pins(tmp_path: Path):
+    import json
+
+    settings = make_settings(tmp_path)
+    rows, instruments = _trend_book()
+    _seed(settings, rows, instruments)
+    job = start_backtest_job(STOCK_MOMENTUM_TOPK, settings=settings, background=False)
+    assert job["status"] == "success"
+    compact = job["detail"]["reports"][0]
+    assert compact["parameter_set_id"]
+    assert compact["data_version"]
+    path = latest_summary_path(STOCK_MOMENTUM_TOPK, settings=settings)
+    assert path is not None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload.get("parameter_set_id")
+    assert payload.get("data_version")
+    assert payload.get("job") is not True
+    version = LocalStrategyService(settings).admit_to_paper(STOCK_MOMENTUM_TOPK, "job admit")
+    assert version["status"] == "paper"
+
+
+def test_admit_skips_job_envelope_without_pins(tmp_path: Path):
+    import json
+
+    settings = make_settings(tmp_path)
+    rows, instruments = _trend_book()
+    _seed(settings, rows, instruments)
+    LocalResearchEngine(settings).run_backtest(
+        STOCK_MOMENTUM_TOPK, STRATEGY_SPECS[STOCK_MOMENTUM_TOPK]["parameter_set_id"], "auto"
+    )
+    modern = settings.experiment_dir / "latest" / "backtest" / f"{STOCK_MOMENTUM_TOPK}.json"
+    modern.parent.mkdir(parents=True, exist_ok=True)
+    modern.write_text(
+        json.dumps({"ok": True, "strategy_id": STOCK_MOMENTUM_TOPK, "job": True, "reports": []}),
+        encoding="utf-8",
+    )
+    path = latest_summary_path(STOCK_MOMENTUM_TOPK, settings=settings)
+    assert path is not None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload.get("parameter_set_id")
+    version = LocalStrategyService(settings).admit_to_paper(STOCK_MOMENTUM_TOPK, "legacy pins")
+    assert version["status"] == "paper"

@@ -787,6 +787,32 @@ a.metric {
   justify-content: center;
 }
 
+.asqt-select-search-row {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 4px 6px 8px !important;
+  background: var(--panel);
+  cursor: default;
+}
+
+.asqt-select-search-row:hover {
+  background: var(--panel);
+}
+
+.asqt-select-filter {
+  width: 100%;
+  height: 30px;
+  margin: 0;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
 .asqt-select-menu li.asqt-select-empty:hover {
   background: transparent;
 }
@@ -1129,6 +1155,21 @@ select[data-asqt-select] {
   text-decoration: underline;
 }
 
+#lab-rule-pick {
+  flex-wrap: nowrap;
+  align-items: center;
+}
+
+#lab-rule-pick .filter-inline {
+  height: 36px;
+}
+
+#lab-rule-q {
+  width: 220px;
+  max-width: 220px;
+  height: 36px;
+}
+
 .lab-rule-fields {
   display: flex;
   flex-wrap: wrap;
@@ -1139,6 +1180,63 @@ select[data-asqt-select] {
 
 .lab-rule-fields .filter-inline input {
   width: 88px;
+}
+
+.lab-rule-card {
+  width: min(880px, calc(100vw - 48px));
+  padding: 22px 28px 24px;
+  font-size: 12px;
+}
+
+.lab-rule-card .confirm-head {
+  margin-bottom: 20px;
+}
+
+.lab-rule-card .confirm-head h3 {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.lab-rule-card .lab-rule-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px 24px;
+  margin-bottom: 16px;
+}
+
+.lab-rule-card .lab-rule-fields .filter-inline {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  white-space: normal;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.lab-rule-card .lab-rule-fields input {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  height: 36px;
+  padding: 0 12px;
+  font-size: 12px;
+  appearance: textfield;
+}
+
+.lab-rule-card .lab-rule-fields input::-webkit-outer-spin-button,
+.lab-rule-card .lab-rule-fields input::-webkit-inner-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
+.lab-rule-card #lab-rule-hint {
+  margin: 4px 0 20px;
+  font-size: 12px;
+}
+
+.lab-rule-card .confirm-actions {
+  gap: 16px;
 }
 
 .lab-rule-actions {
@@ -1682,8 +1780,68 @@ td.num {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
   margin-bottom: 8px;
+}
+
+.paper-chart-years {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  flex: 1 0 100%;
+}
+
+.paper-chart-years[hidden] {
+  display: none;
+}
+
+.paper-chart-year {
+  margin: 0;
+  padding: 2px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.paper-chart-year:hover {
+  color: var(--text);
+  border-color: var(--text);
+}
+
+.paper-chart-year.is-active {
+  color: var(--bg);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.paper-chart-year[data-paper-year="stack"].is-active {
+  background: #38bdf8;
+  border-color: #38bdf8;
+  color: #0b1220;
+}
+
+:root[data-theme="light"] .paper-chart-year.is-active {
+  color: #fff;
+}
+
+:root[data-theme="light"] .paper-chart-year[data-paper-year="stack"].is-active {
+  color: #0b1220;
+}
+
+.paper-chart-legend-swatch {
+  font-size: 7.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.paper-chart-year-cursor {
+  fill: color-mix(in srgb, var(--text) 8%, transparent);
+  stroke: none;
 }
 
 .paper-chart-title {

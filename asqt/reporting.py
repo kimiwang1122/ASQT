@@ -55,6 +55,7 @@ def write_run_tree(
     strategy_id: str | None = None,
     manifest: dict[str, Any] | None = None,
     write_legacy_latest: bool = True,
+    refresh_latest: bool = True,
 ) -> Path:
     """Persist summary (+ optional manifest) and refresh latest pointers."""
     folder = run_dir(kind, run_id, settings=settings)
@@ -82,6 +83,9 @@ def write_run_tree(
         encoding="utf-8",
     )
 
+    if not refresh_latest:
+        return summary_path
+
     key = str(strategy_id or stamped.get("strategy_id") or run_id)
     latest_dir = experiment_root(settings) / "latest" / kind
     latest_dir.mkdir(parents=True, exist_ok=True)
@@ -98,29 +102,53 @@ def write_run_tree(
     return summary_path
 
 
+def _summary_has_version_pins(payload: dict[str, Any]) -> bool:
+    if payload.get("parameter_set_id") and payload.get("data_version"):
+        return True
+    sid = str(payload.get("strategy_id") or "")
+    for item in payload.get("reports") or []:
+        if not isinstance(item, dict):
+            continue
+        item_sid = str(item.get("strategy_id") or "")
+        if sid and item_sid and item_sid != sid:
+            continue
+        if item.get("parameter_set_id") and item.get("data_version"):
+            return True
+    return False
+
+
 def latest_summary_path(
     strategy_id: str,
     *,
     kind: str = "backtest",
     settings: Settings | None = None,
 ) -> Path | None:
-    """Prefer new tree pointer, then legacy flat ``latest-*.json``."""
+    """Prefer a pinned summary: tree pointer, then legacy flat ``latest-*.json``.
+
+    Job envelopes without parameter_set_id/data_version lose to a pinned sibling.
+    """
     sid = str(strategy_id or "").strip()
     if not sid:
         return None
     root = experiment_root(settings)
-    modern = root / "latest" / kind / f"{sid}.json"
-    if modern.exists():
-        return modern
+    candidates: list[Path] = [root / "latest" / kind / f"{sid}.json"]
     if kind == "backtest":
-        legacy = root / f"latest-{sid}.json"
-        if legacy.exists():
-            return legacy
-    if kind == "tune":
-        legacy = root / f"latest-tune-{sid}.json"
-        if legacy.exists():
-            return legacy
-    return None
+        candidates.append(root / f"latest-{sid}.json")
+    elif kind == "tune":
+        candidates.append(root / f"latest-tune-{sid}.json")
+    fallback: Path | None = None
+    for path in candidates:
+        if not path.exists():
+            continue
+        if fallback is None:
+            fallback = path
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and _summary_has_version_pins(payload):
+            return path
+    return fallback
 
 
 def list_latest_experiments(*, settings: Settings | None = None) -> list[dict[str, Any]]:

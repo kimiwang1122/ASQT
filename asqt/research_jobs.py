@@ -239,8 +239,10 @@ def _execute(run_id: str, strategy_id: str, settings: Settings, expected_signatu
             run_id,
             {"ok": detail["ok"], "strategy_id": strategy_id, "reports": reports, "job": True},
             settings=settings,
-            strategy_id=strategy_id if strategy_id != "all" and "," not in strategy_id else None,
+            # Job envelope must not overwrite per-strategy latest (admit reads pins there).
+            strategy_id=None,
             write_legacy_latest=False,
+            refresh_latest=False,
         )
         _finish(
             run_id,
@@ -263,6 +265,7 @@ def _compact_report(report: dict[str, Any]) -> dict[str, Any]:
         "status": report.get("status"),
         "nav": report.get("nav"),
         "metrics": report.get("metrics"),
+        "parameter_set_id": report.get("parameter_set_id"),
         "data_version": report.get("data_version"),
         "reason": report.get("reason"),
     }

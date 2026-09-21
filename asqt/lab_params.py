@@ -10,7 +10,7 @@ from asqt.config import Settings, ensure_runtime_dirs, get_settings
 from asqt.db import execute, initialize_database
 from asqt.ops import _setting_value
 from asqt.strategies import STRATEGY_SPECS, pin_strategy_params
-from asqt.tune import suggest_parameter_set_id
+from asqt.tune import stock_2560_short_id, suggest_parameter_set_id
 
 PAPER_LAB_DEFAULTS_KEY = "paper.lab_defaults"
 PAPER_LAB_PRESETS_KEY = "paper.lab_presets"
@@ -64,6 +64,67 @@ STOCK_2560_PRESETS: list[dict[str, Any]] = [
         "max_weight": 0.10,
         "gross_limit": 0.95,
     },
+    # paper-matched SL/TP grid (2018-01-02→2026-09-18, live held, whole-order reject)
+    {
+        "ma_fast": 5,
+        "ma_slow": 20,
+        "vol_fast": 5,
+        "vol_slow": 90,
+        "pullback_band": 0.03,
+        "top_k": 8,
+        "max_weight": 0.10,
+        "gross_limit": 0.95,
+        "stop_loss": 0.08,
+        "take_profit": 0.0,
+    },
+    {
+        "ma_fast": 5,
+        "ma_slow": 25,
+        "vol_fast": 5,
+        "vol_slow": 90,
+        "pullback_band": 0.02,
+        "top_k": 8,
+        "max_weight": 0.10,
+        "gross_limit": 0.95,
+        "stop_loss": 0.04,
+        "take_profit": 0.20,
+    },
+    {
+        "ma_fast": 5,
+        "ma_slow": 20,
+        "vol_fast": 5,
+        "vol_slow": 90,
+        "pullback_band": 0.03,
+        "top_k": 10,
+        "max_weight": 0.10,
+        "gross_limit": 0.95,
+        "stop_loss": 0.08,
+        "take_profit": 0.0,
+    },
+    {
+        "ma_fast": 5,
+        "ma_slow": 20,
+        "vol_fast": 5,
+        "vol_slow": 90,
+        "pullback_band": 0.03,
+        "top_k": 8,
+        "max_weight": 0.10,
+        "gross_limit": 0.95,
+        "stop_loss": 0.06,
+        "take_profit": 0.0,
+    },
+    {
+        "ma_fast": 5,
+        "ma_slow": 25,
+        "vol_fast": 5,
+        "vol_slow": 90,
+        "pullback_band": 0.02,
+        "top_k": 8,
+        "max_weight": 0.10,
+        "gross_limit": 0.95,
+        "stop_loss": 0.08,
+        "take_profit": 0.30,
+    },
 ]
 
 
@@ -98,7 +159,8 @@ def load_lab_defaults(*, settings: Settings | None = None) -> dict[str, dict[str
         params = dict(STRATEGY_SPECS[sid]["params"])
         if isinstance(item.get("params"), dict):
             params.update(item["params"])
-        psid = str(item.get("parameter_set_id") or suggest_parameter_set_id(sid, params))
+        # ID is derived from params so a suffix change (e.g. sl/tp) still matches presets.
+        psid = suggest_parameter_set_id(sid, params)
         out[sid] = {
             "strategy_id": sid,
             "parameter_set_id": psid,
@@ -247,6 +309,10 @@ def presets_for(strategy_id: str, *, settings: Settings | None = None) -> list[d
         item = dict(row)
         item["editable"] = item.get("source") == "custom"
         item["is_default"] = item["parameter_set_id"] == default_id
+        if strategy_id == "stock_2560":
+            item["short_id"] = stock_2560_short_id(item["params"])
+        else:
+            item["short_id"] = item["parameter_set_id"]
         out.append(item)
     out.sort(key=lambda row: (0 if row.get("is_default") else 1, row["parameter_set_id"]))
     return out

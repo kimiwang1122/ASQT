@@ -42,6 +42,26 @@ GROSS_LIMIT = 0.95
 TAKE_PROFIT = 0.20
 STOP_LOSS = -0.08
 MAX_WEIGHT = {"stock": 0.10, "etf": 0.20}
+
+
+def strategy_stops(strategy_id: str | None) -> tuple[float, float]:
+    """Return (take_profit, stop_loss). 0 disables that side.
+
+    ``stop_loss`` in strategy params is a positive fraction (0.08 → −8%).
+    Strategies without the keys keep the global paper defaults.
+    """
+    params = (STRATEGY_SPECS.get(strategy_id or "") or {}).get("params") or {}
+    if "take_profit" in params:
+        take = max(0.0, float(params["take_profit"]))
+    else:
+        take = TAKE_PROFIT
+    if "stop_loss" in params:
+        mag = float(params["stop_loss"])
+        stop = mag if mag < 0 else (-abs(mag) if mag > 0 else 0.0)
+    else:
+        stop = STOP_LOSS
+    return take, stop
+
 PAPER_LOCK_ID = "paper-run"
 PAPER_LOCK_MINUTES = 120
 PAPER_BUSY_MESSAGE = "模拟盘运行中，请勿重复提交"
@@ -656,6 +676,20 @@ class PaperOrderService:
         initialize_database(self.settings)
         self.broker = PaperBroker(self.settings)
         self.strategies = LocalStrategyService(self.settings)
+        self._mkt: dict[str, Any] | None = None
+
+    def _market(self) -> dict[str, Any]:
+        if self._mkt is None:
+            from asqt.strategies import market_by_symbol
+
+            rows = read_market_daily(settings=self.settings)
+            self._mkt = {
+                "rows": rows,
+                "grouped": market_by_symbol(rows),
+                "by_key": {(str(r["trade_date"]), str(r["symbol"])): r for r in rows},
+                "dates": sorted({str(r["trade_date"]) for r in rows}),
+            }
+        return self._mkt
 
     def list_orders(self, limit: int = 50, strategy_id: str | None = None) -> list[dict[str, Any]]:
         if strategy_id:
@@ -681,14 +715,14 @@ class PaperOrderService:
         if strategy_id not in STRATEGY_SPECS:
             raise ValueError(f"unknown strategy: {strategy_id}")
 
-        dates = self._dates()
+        mkt = self._market()
+        dates = mkt["dates"]
         if signal_date is None:
             signal_date = _prev_date(dates, trade_date)
         if signal_date is None:
             raise ValueError("no prior session for T+1 fill")
 
-        rows = read_market_daily(end=trade_date, settings=self.settings)
-        by_key = {(str(row["trade_date"]), str(row["symbol"])): row for row in rows}
+        by_key = mkt["by_key"]
 
         ledger = PaperLedger(strategy_id, self.settings)
         state = ledger.load(before=trade_date)
@@ -745,7 +779,18 @@ class PaperOrderService:
             return created
 
         try:
-            self.strategies.generate_target_positions(strategy_id, signal_date)
+            held = [
+                symbol
+                for symbol, item in state["positions"].items()
+                if int(item.get("qty") or 0) > 0
+            ]
+            self.strategies.generate_target_positions(
+                strategy_id,
+                signal_date,
+                held_symbols=held,
+                market_by_symbol=mkt["grouped"],
+                session_dates=dates,
+            )
         except PermissionError:
             return self._reject_stub(trade_date, strategy_id, "not_paper")
         targets = query_all(
@@ -772,7 +817,7 @@ class PaperOrderService:
         nav = _nav(state, by_key, signal_date)
         nav_before = float(nav)
         intended = {row["symbol"]: float(row["target_weight"]) for row in targets}
-        intended = self._apply_stops(intended, state, by_key, signal_date)
+        intended = self._apply_stops(intended, state, by_key, signal_date, strategy_id)
 
         for symbol, weight in intended.items():
             bar_signal = by_key.get((signal_date, symbol))
@@ -1097,15 +1142,19 @@ class PaperOrderService:
         state: dict[str, Any],
         by_key: dict[tuple[str, str], dict[str, Any]],
         asof: str,
+        strategy_id: str | None = None,
     ) -> dict[str, float]:
+        take, stop = strategy_stops(strategy_id)
         out = dict(intended)
+        if take <= 0 and stop >= 0:
+            return out
         for symbol, item in state["positions"].items():
             bar = by_key.get((asof, symbol))
             cost = float(item.get("cost") or 0)
             if not bar or cost <= 0:
                 continue
             pnl = float(bar["close"]) / cost - 1.0
-            if pnl >= TAKE_PROFIT or pnl <= STOP_LOSS:
+            if (take > 0 and pnl >= take) or (stop < 0 and pnl <= stop):
                 out[symbol] = 0.0
         return out
 
@@ -1155,8 +1204,7 @@ class PaperOrderService:
         return int(rows[0]["is_open"] or 0) == 1
 
     def _dates(self) -> list[str]:
-        rows = read_market_daily(settings=self.settings)
-        return sorted({str(row["trade_date"]) for row in rows})
+        return list(self._market()["dates"])
 
 
 def max_paper_run_days(settings: Settings | None = None) -> int:
@@ -1208,9 +1256,13 @@ def resolve_paper_window(
         last_fill = fill_dates[-1]
         i_fill = dates.index(first_fill)
         if i_fill < 1:
-            raise ValueError(
-                f"开始日 {first_fill} 已是行情首日，缺少前一交易日做信号日；请延后开始日期。"
-            )
+            # First listed session cannot be a fill day; use it as signal, next as first fill.
+            if len(fill_dates) < 2:
+                raise ValueError(
+                    f"开始日 {first_fill} 是行情首日，区间内还需要至少 1 个后续交易日才能撮合。"
+                )
+            first_fill = fill_dates[1]
+            i_fill = dates.index(first_fill)
         i_end = dates.index(last_fill)
         window = dates[i_fill - 1 : i_end + 1]
         sessions = len(window) - 1

@@ -136,6 +136,23 @@ DEFAULT_GRIDS: dict[str, list[dict[str, Any]]] = {
             (0.10,),
         )
     ],
+    "stock_yin_arb": [
+        {
+            "ma_fast": 10,
+            "ma_slow": 20,
+            "burst_lookback": 5,
+            "burst_ratio": ratio,
+            "pullback_band": band,
+            "min_body": 0.005,
+            "ma_gap_max": 0.03,
+            "top_k": k,
+            "max_weight": 0.10,
+            "gross_limit": 0.95,
+            "stop_loss": 0.0,
+            "take_profit": 0.0,
+        }
+        for ratio, band, k in itertools.product((1.5, 1.8), (0.02, 0.025), (5, 10))
+    ],
 }
 
 MAX_GRID = 24
@@ -213,13 +230,47 @@ def suggest_parameter_set_id(strategy_id: str, params: dict[str, Any]) -> str:
         max_w = float(params.get("max_weight", 0.10))
         if abs(max_w - 0.10) > 1e-9:
             parts.append(f"w{int(round(max_w * 100))}")
+        sl = abs(float(params.get("stop_loss") or 0))
+        tp = float(params.get("take_profit") or 0)
+        if sl > 0 or tp > 0:
+            parts.append(f"sl{int(round(sl * 100))}")
+            parts.append(f"tp{int(round(tp * 100))}")
         return ".".join(parts)
+    if strategy_id == "stock_yin_arb":
+        band = float(params.get("pullback_band", 0.025))
+        ratio = float(params.get("burst_ratio", 1.8))
+        gap = float(params.get("ma_gap_max", 0.03))
+        return (
+            f"stock_yin_arb.k{int(params['top_k'])}"
+            f".f{int(params['ma_fast'])}.s{int(params['ma_slow'])}"
+            f".bl{int(params['burst_lookback'])}"
+            f".br{int(round(ratio * 100))}"
+            f".b{int(round(band * 1000))}"
+            f".mg{int(round(gap * 1000))}"
+        )
     parts = [strategy_id] + [
         f"{key}{params[key]}"
         for key in sorted(params)
         if key not in {"max_weight", "gross_limit", "rebalance_every_n"}
     ]
     return ".".join(str(part) for part in parts)
+
+
+def stock_2560_short_id(params: dict[str, Any]) -> str:
+    """Table-style id: k8.s25.vs90.b20.sl0.tp60 (searchable in lab UI)."""
+    band = float(params.get("pullback_band", 0.02))
+    parts = [
+        f"k{int(params['top_k'])}",
+        f"s{int(params['ma_slow'])}",
+        f"vs{int(params['vol_slow'])}",
+        f"b{int(round(band * 1000))}",
+    ]
+    sl = abs(float(params.get("stop_loss") or 0))
+    tp = float(params.get("take_profit") or 0)
+    if sl > 0 or tp > 0:
+        parts.append(f"sl{int(round(sl * 100))}")
+        parts.append(f"tp{int(round(tp * 100))}")
+    return ".".join(parts)
 
 
 def simulate_path(

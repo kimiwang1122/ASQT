@@ -2469,15 +2469,48 @@ function enhanceSelect(select) {
   menu.className = "asqt-select-menu";
   menu.hidden = true;
   wrap.append(trigger, menu);
+  const searchable = modes.includes("search");
+  let query = "";
+  let search = null;
+  if (searchable) {
+    const searchRow = document.createElement("li");
+    searchRow.className = "asqt-select-search-row";
+    search = document.createElement("input");
+    search.type = "search";
+    search.className = "asqt-select-filter";
+    search.autocomplete = "off";
+    search.spellcheck = false;
+    search.placeholder = "搜索参数组";
+    search.setAttribute("aria-label", "搜索参数组");
+    search.addEventListener("click", (event) => event.stopPropagation());
+    search.addEventListener("input", () => {
+      query = search.value || "";
+      renderOptions();
+    });
+    search.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        closeAllSelects();
+      }
+    });
+    searchRow.appendChild(search);
+    menu.appendChild(searchRow);
+  }
 
   function currentLabel() {
     const selected = select.options[select.selectedIndex];
     return selected ? selected.textContent : "请选择";
   }
 
-  function renderMenu() {
-    menu.innerHTML = "";
+  function renderOptions() {
+    menu.querySelectorAll("li[data-value], li.asqt-select-empty").forEach((node) => node.remove());
+    const needle = query.trim().toLowerCase();
+    let visible = 0;
     [...select.options].forEach((option) => {
+      const hay = `${option.textContent} ${option.value}`.toLowerCase();
+      if (needle && !hay.includes(needle)) {
+        return;
+      }
+      visible += 1;
       const li = document.createElement("li");
       li.textContent = option.textContent;
       li.dataset.value = option.value;
@@ -2491,6 +2524,16 @@ function enhanceSelect(select) {
       });
       menu.appendChild(li);
     });
+    if (searchable && needle && !visible) {
+      const empty = document.createElement("li");
+      empty.className = "asqt-select-empty";
+      empty.textContent = "无匹配参数组";
+      menu.appendChild(empty);
+    }
+  }
+
+  function renderMenu() {
+    renderOptions();
     const label = currentLabel() || "请选择";
     triggerLabel.textContent = label;
     trigger.title = label;
@@ -2504,9 +2547,19 @@ function enhanceSelect(select) {
     if (open) {
       menu.hidden = false;
       wrap.classList.add("is-open");
+      if (search) {
+        search.focus();
+      }
     }
   });
   select.addEventListener("change", renderMenu);
+  wrap._asqtSingleClear = () => {
+    query = "";
+    if (search) {
+      search.value = "";
+    }
+    renderOptions();
+  };
   renderMenu();
 }
 
@@ -2775,6 +2828,9 @@ function closeAllSelects() {
     if (typeof wrap._asqtMultiClear === "function") {
       wrap._asqtMultiClear();
     }
+    if (typeof wrap._asqtSingleClear === "function") {
+      wrap._asqtSingleClear();
+    }
   });
 }
 
@@ -2939,6 +2995,7 @@ const STRATEGY_LABEL = {
   stock_momentum_skip_month: "股票跳月动量",
   stock_holder_increase_follow: "股票股东增持跟随",
   stock_2560: "股票2560战法",
+  stock_yin_arb: "股票阴线套利",
 };
 
 const PARAM_LABEL = {
@@ -2960,9 +3017,23 @@ const PARAM_LABEL = {
     vol_fast: "快量天数",
     vol_slow: "慢量天数",
     pullback_band: "回踩带宽",
+    stop_loss: "止损",
+    take_profit: "止盈",
+    burst_lookback: "爆量回看",
+    burst_ratio: "爆量倍数",
+    min_body: "最小阴线实体",
+    ma_gap_max: "均线间距",
 };
 
-const PARAM_PCT_KEYS = new Set(["max_weight", "gross_limit", "pullback_band"]);
+const PARAM_PCT_KEYS = new Set([
+  "max_weight",
+  "gross_limit",
+  "pullback_band",
+  "stop_loss",
+  "take_profit",
+  "min_body",
+  "ma_gap_max",
+]);
 
 /** 与后端 STRATEGY_SPECS.params 对齐；策略页无 params 字段时用此展示。 */
 const STRATEGY_PARAMS = {
@@ -2984,13 +3055,29 @@ const STRATEGY_PARAMS = {
   },
   stock_2560: {
     ma_fast: 5,
-    ma_slow: 25,
+    ma_slow: 20,
     vol_fast: 5,
-    vol_slow: 60,
-    pullback_band: 0.02,
-    top_k: 5,
+    vol_slow: 90,
+    pullback_band: 0.03,
+    top_k: 10,
     max_weight: 0.1,
     gross_limit: 0.95,
+    stop_loss: 0.08,
+    take_profit: 0.2,
+  },
+  stock_yin_arb: {
+    ma_fast: 10,
+    ma_slow: 20,
+    burst_lookback: 5,
+    burst_ratio: 1.8,
+    pullback_band: 0.025,
+    min_body: 0.005,
+    ma_gap_max: 0.03,
+    top_k: 10,
+    max_weight: 0.1,
+    gross_limit: 0.95,
+    stop_loss: 0,
+    take_profit: 0,
   },
 };
 
@@ -3378,6 +3465,31 @@ function labRuleStrategyId() {
   return document.getElementById("lab-rule-strategy")?.value || "etf_ma_momentum_filter";
 }
 
+function labRuleDialogOpen() {
+  const dialog = document.getElementById("lab-rule-dialog");
+  return Boolean(dialog && !dialog.hidden);
+}
+
+function openLabRuleDialog(title, hint) {
+  const dialog = document.getElementById("lab-rule-dialog");
+  const heading = document.getElementById("lab-rule-dialog-title");
+  if (heading) {
+    heading.textContent = title;
+  }
+  if (dialog) {
+    dialog.hidden = false;
+  }
+  setHint("lab-rule-hint", hint || "");
+  document.getElementById("lab-rule-fields")?.querySelector("input")?.focus();
+}
+
+function closeLabRuleDialog() {
+  const dialog = document.getElementById("lab-rule-dialog");
+  if (dialog) {
+    dialog.hidden = true;
+  }
+}
+
 function fillLabRuleFields(params) {
   const host = document.getElementById("lab-rule-fields");
   if (!host) {
@@ -3393,7 +3505,7 @@ function fillLabRuleFields(params) {
     input.name = field.key;
     input.type = "number";
     input.required = true;
-    input.step = field.kind === "integer" ? "1" : "0.01";
+    input.step = field.kind === "integer" ? "1" : "any";
     const fallback = values[field.key] ?? field.default;
     input.value = fallback == null ? "" : String(fallback);
     label.append(document.createTextNode(PARAM_LABEL[field.key] || field.key), input);
@@ -3424,7 +3536,13 @@ function renderLabRuleEngine() {
     return;
   }
   body.innerHTML = "";
-  const list = labRuleState.presets;
+  const needle = (document.getElementById("lab-rule-q")?.value || "").trim().toLowerCase();
+  const list = needle
+    ? labRuleState.presets.filter((row) => {
+        const hay = `${row.short_id || ""} ${row.parameter_set_id}`.toLowerCase();
+        return hay.includes(needle);
+      })
+    : labRuleState.presets;
   if (!list.length) {
     const tr = document.createElement("tr");
     const td = document.createElement("td");
@@ -3439,7 +3557,9 @@ function renderLabRuleEngine() {
       if (row.parameter_set_id === labRuleState.editId) {
         tr.classList.add("is-active");
       }
-      appendCell(tr, row.parameter_set_id);
+      appendCell(tr, row.short_id || row.parameter_set_id, {
+        title: row.parameter_set_id,
+      });
       appendCell(tr, formatParamsChinese(row.params, row.parameter_set_id));
       appendCell(tr, row.source === "custom" ? "自定义" : "内置", {
         tone: row.source === "custom" ? "accent" : "muted",
@@ -3460,9 +3580,11 @@ function renderLabRuleEngine() {
         labRuleState.editId = row.parameter_set_id;
         labRuleState.editable = Boolean(row.editable);
         fillLabRuleFields(row.params);
-        setHint(
-          "lab-rule-hint",
-          row.editable ? `正在编辑 ${row.parameter_set_id}` : `内置组 ${row.parameter_set_id}：保存将另存为新组`,
+        openLabRuleDialog(
+          row.editable ? "编辑参数组" : "另存参数组",
+          row.editable
+            ? `正在编辑 ${row.parameter_set_id}`
+            : `内置组 ${row.parameter_set_id}：保存将另存为新组`,
         );
         renderLabRuleEngine();
       });
@@ -3505,7 +3627,9 @@ async function loadLabRuleEngine(strategyId = labRuleStrategyId()) {
   if (!current) {
     labRuleState.editId = "";
     labRuleState.editable = false;
-    const fallback = labRuleState.presets.find((row) => row.is_default) || labRuleState.presets[0];
+  }
+  if (labRuleDialogOpen()) {
+    const fallback = current || labRuleState.presets.find((row) => row.is_default) || labRuleState.presets[0];
     fillLabRuleFields(fallback?.params);
   }
   renderLabRuleEngine();
@@ -3531,7 +3655,7 @@ async function saveLabRule(event) {
   labRuleState.editId = payload.preset?.parameter_set_id || "";
   labRuleState.editable = true;
   showToast(`已保存 ${labRuleState.editId}`, "ok");
-  setHint("lab-rule-hint", `已保存 ${labRuleState.editId}`);
+  closeLabRuleDialog();
   await loadLabRuleEngine(strategyId);
 }
 
@@ -3575,16 +3699,32 @@ async function deleteLabRule(row) {
 document.getElementById("lab-rule-strategy")?.addEventListener("change", () => {
   labRuleState.editId = "";
   labRuleState.editable = false;
+  const q = document.getElementById("lab-rule-q");
+  if (q) {
+    q.value = "";
+  }
   loadLabRuleEngine().catch((error) => showToast(error.message || "加载规则失败", "block"));
+});
+
+document.getElementById("lab-rule-q")?.addEventListener("input", () => {
+  renderLabRuleEngine();
 });
 
 document.getElementById("lab-rule-new")?.addEventListener("click", () => {
   labRuleState.editId = "";
   labRuleState.editable = false;
   fillLabRuleFields();
-  setHint("lab-rule-hint", "填写参数后保存为新组");
+  openLabRuleDialog("新建参数组", "填写参数后保存为新组");
   renderLabRuleEngine();
 });
+
+document.getElementById("lab-rule-dialog")?.addEventListener("click", (event) => {
+  if (event.target?.id === "lab-rule-dialog") {
+    closeLabRuleDialog();
+  }
+});
+document.getElementById("lab-rule-dialog-close")?.addEventListener("click", () => closeLabRuleDialog());
+document.getElementById("lab-rule-dialog-cancel")?.addEventListener("click", () => closeLabRuleDialog());
 
 document.getElementById("lab-rule-form")?.addEventListener("submit", (event) => {
   saveLabRule(event).catch((error) => showToast(error.message || "保存失败", "block"));
@@ -3777,18 +3917,28 @@ function renderDecisions(payload) {
   }
 }
 
+let reviewBusy = false;
+
 async function loadReviewPage() {
+  if (reviewBusy) {
+    return;
+  }
   const select = document.getElementById("review-strategy");
   const strategyId = select?.value || "etf_ma_rotate";
+  reviewBusy = true;
   setText("review-hint", "正在按日重算归因，请稍候…");
-  const [payload, decisions] = await Promise.all([
-    requestJson(`/api/research/attribution?strategy_id=${encodeURIComponent(strategyId)}`),
-    requestJson(`/api/decisions?strategy_id=${encodeURIComponent(strategyId)}&limit=30`).catch(() => ({
-      items: [],
-    })),
-  ]);
-  renderAttribution(payload);
-  renderDecisions(decisions);
+  try {
+    const [payload, decisions] = await Promise.all([
+      requestJson(`/api/research/attribution?strategy_id=${encodeURIComponent(strategyId)}`),
+      requestJson(`/api/decisions?strategy_id=${encodeURIComponent(strategyId)}&limit=30`).catch(() => ({
+        items: [],
+      })),
+    ]);
+    renderAttribution(payload);
+    renderDecisions(decisions);
+  } finally {
+    reviewBusy = false;
+  }
 }
 
 let backtestTimer = 0;
@@ -4214,7 +4364,9 @@ async function loadPaperLabPresets(strategyId) {
     const opt = document.createElement("option");
     opt.value = row.parameter_set_id;
     const mark = row.parameter_set_id === defaultId ? "（默认）" : "";
-    opt.textContent = `${row.parameter_set_id}${mark}`;
+    const shown = row.short_id || row.parameter_set_id;
+    opt.textContent = `${shown}${mark}`;
+    opt.title = row.parameter_set_id;
     select.appendChild(opt);
   }
   select.value = paperLabPresets.some((row) => row.parameter_set_id === prev)
@@ -5564,8 +5716,9 @@ async function renderPaperAccount(account, kill, paperGate, multi = false) {
   tradePages.fills = 1;
   tradePages.orders = 1;
   renderPaperDaily();
-  if (timeline.length) {
-    selectPaperDay(timeline[timeline.length - 1].trade_date, "table");
+  const chartRows = filterPaperRowsByYear(timeline, paperChartYear);
+  if (chartRows.length) {
+    selectPaperDay(chartRows[chartRows.length - 1].trade_date, "table");
   }
   renderPaperPositions(account.positions || []);
   renderPaperFills(account.fills || []);
@@ -5878,6 +6031,14 @@ function xTickIndexes(count) {
 
 function selectPaperDay(date, origin = "hover") {
   if (!paperChartView || !date) {
+    return;
+  }
+  if (paperChartView.mode === "stack") {
+    const year = String(date).slice(0, 4);
+    const index = (paperChartView.stats || []).findIndex((row) => row.year === year);
+    if (index >= 0) {
+      selectPaperStackYear(index, origin);
+    }
     return;
   }
   const point = paperChartView.points.find((item) => item.date === date);
@@ -6205,7 +6366,7 @@ function paperChartPrincipal(board, dataMin, dataMax) {
   return null;
 }
 
-function paperChartYDomain(assets, principal) {
+function paperChartYDomain(assets, principal, { pinPrincipal = true } = {}) {
   const dataMin = Math.min(...assets);
   const dataMax = Math.max(...assets);
   const rawSpan = dataMax - dataMin;
@@ -6214,7 +6375,7 @@ function paperChartYDomain(assets, principal) {
   let minY = dataMin - pad;
   let maxY = dataMax + pad;
   const hasPrincipal = Number.isFinite(principal) && principal > 0;
-  if (hasPrincipal) {
+  if (hasPrincipal && pinPrincipal) {
     minY = Math.min(minY, principal - pad * 0.2);
     maxY = Math.max(maxY, principal + pad * 0.2);
   }
@@ -6318,11 +6479,349 @@ async function loadPaperLabGrid(strategyId) {
   }
 }
 
+let paperChartYear = "stack";
+let paperChartSource = { rows: [], board: {}, opts: {} };
+const PAPER_YEAR_METRICS = [
+  { key: "ret", label: "收益", color: "#38bdf8" },
+  { key: "peak", label: "峰值", color: "#f59e0b" },
+  { key: "dd", label: "回撤", color: "#f87171" },
+];
+
+function formatAxisPct(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return "-";
+  }
+  const pct = number * 100;
+  const digits = Math.abs(pct) >= 10 ? 0 : 1;
+  return `${pct.toFixed(digits)}%`;
+}
+
+function paperTimelineYears(rows) {
+  return [...new Set((rows || []).map((row) => String(row.trade_date || "").slice(0, 4)).filter((year) => year.length === 4))].sort();
+}
+
+function filterPaperRowsByYear(rows, year) {
+  if (!year || year === "all" || year === "stack") {
+    return rows || [];
+  }
+  return (rows || []).filter((row) => String(row.trade_date || "").startsWith(year));
+}
+
+function paperYearSummary(rows, board) {
+  const list = rows || [];
+  const years = paperTimelineYears(list);
+  return years.map((year) => {
+    const start = paperYearStartNav(list, year, board);
+    const pts = filterPaperRowsByYear(list, year);
+    let peakNav = start;
+    let maxDd = 0;
+    let hi = start;
+    for (const row of pts) {
+      const asset = Number(row.total_asset);
+      hi = Math.max(hi, asset);
+      peakNav = Math.max(peakNav, asset);
+      if (peakNav > 0) {
+        maxDd = Math.min(maxDd, asset / peakNav - 1);
+      }
+    }
+    const end = Number(pts[pts.length - 1]?.total_asset);
+    return {
+      year,
+      start,
+      end,
+      days: pts.length,
+      from: pts[0]?.trade_date,
+      to: pts[pts.length - 1]?.trade_date,
+      ret: start > 0 && Number.isFinite(end) ? end / start - 1 : 0,
+      peak: start > 0 ? hi / start - 1 : 0,
+      dd: maxDd,
+    };
+  });
+}
+
+function paperYearStartNav(rows, year, board) {
+  const initial = Number(board?.initial_cash);
+  const list = rows || [];
+  if (!year || year === "all" || year === "stack") {
+    return Number.isFinite(initial) && initial > 0 ? initial : Number(list[0]?.total_asset);
+  }
+  const idx = list.findIndex((row) => String(row.trade_date || "").startsWith(year));
+  if (idx > 0) {
+    return Number(list[idx - 1].total_asset);
+  }
+  if (Number.isFinite(initial) && initial > 0) {
+    return initial;
+  }
+  return Number(list[idx]?.total_asset);
+}
+
+function slicePaperLab(lab, rows) {
+  if (!lab?.points?.length || !rows?.length) {
+    return lab;
+  }
+  const dates = new Set(rows.map((row) => row.trade_date));
+  const points = lab.points.filter((point) => dates.has(point.trade_date));
+  if (!points.length) {
+    return null;
+  }
+  const markers = (lab.markers || []).filter((mark) => dates.has(mark.trade_date));
+  return {
+    ...lab,
+    points,
+    markers,
+    trough_date: dates.has(lab.trough_date) ? lab.trough_date : null,
+  };
+}
+
+function syncPaperChartYears(years) {
+  const host = document.getElementById("paper-chart-years");
+  if (!host) {
+    return;
+  }
+  host.innerHTML = "";
+  if (years.length < 2) {
+    host.hidden = true;
+    if (paperChartYear === "stack") {
+      paperChartYear = "all";
+    }
+    return;
+  }
+  host.hidden = false;
+  if (paperChartYear !== "all" && paperChartYear !== "stack" && !years.includes(paperChartYear)) {
+    paperChartYear = "stack";
+  }
+  for (const year of ["stack", "all", ...years]) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "paper-chart-year";
+    btn.dataset.paperYear = year;
+    btn.textContent = year === "stack" ? "按年" : year === "all" ? "全部" : year;
+    btn.classList.toggle("is-active", paperChartYear === year);
+    host.appendChild(btn);
+  }
+}
+
+function renderPaperStackChart(host, meta, bookEl, board, opts) {
+  paperChartView = null;
+  host.innerHTML = "";
+  if (bookEl) {
+    const label = paperChartBookLabel(board, opts);
+    bookEl.textContent = label;
+    bookEl.dataset.tone = label === "账户总览" ? "info" : "accent";
+  }
+  const stats = paperYearSummary(paperChartSource.rows, board);
+  if (!stats.length) {
+    if (meta) {
+      meta.textContent = `相对本金 ${formatMoney(board.initial_cash ?? lastPaperConfig?.initial_cash ?? 0)}`;
+    }
+    host.textContent = "暂无净值曲线";
+    return;
+  }
+  const values = stats.flatMap((row) => [row.ret, row.peak, row.dd]);
+  values.push(0);
+  const domain = paperChartYDomain(values, 0, { pinPrincipal: true });
+  const minY = domain.minY;
+  const maxY = domain.maxY;
+  const spanY = maxY - minY || 1;
+  const width = 720;
+  const height = 248;
+  const pad = { top: 22, right: 16, bottom: 28, left: 46 };
+  const innerW = width - pad.left - pad.right;
+  const innerH = height - pad.top - pad.bottom;
+  const slotW = innerW / stats.length;
+  const barW = Math.max(4, Math.min(14, (slotW - 10) / PAPER_YEAR_METRICS.length));
+  const groupW = barW * PAPER_YEAR_METRICS.length + 2 * (PAPER_YEAR_METRICS.length - 1);
+  const xMid = (index) => pad.left + (index + 0.5) * slotW;
+  const yAt = (value) => pad.top + (1 - (value - minY) / spanY) * innerH;
+  const zeroY = yAt(0);
+  if (meta) {
+    meta.textContent = `按年汇总 · X=年份 · 收益/峰值/回撤相对年初 · ${stats[0].year}–${stats[stats.length - 1].year}`;
+  }
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("class", "paper-chart-svg");
+  const ticks = [maxY, 0, minY].filter((value, index, all) => all.findIndex((item) => Math.abs(item - value) < 1e-9) === index);
+  ticks.forEach((value, tickIndex) => {
+    const y = yAt(value);
+    const isZero = Math.abs(value) < 1e-9;
+    if (!isZero) {
+      const grid = document.createElementNS(ns, "line");
+      grid.setAttribute("x1", String(pad.left));
+      grid.setAttribute("x2", String(width - pad.right));
+      grid.setAttribute("y1", String(y));
+      grid.setAttribute("y2", String(y));
+      grid.setAttribute("class", "paper-chart-grid");
+      svg.appendChild(grid);
+    }
+    const label = document.createElementNS(ns, "text");
+    label.setAttribute("x", String(pad.left - 8));
+    label.setAttribute("y", String(tickIndex === 0 ? y + 9 : tickIndex === ticks.length - 1 ? y - 2 : y + 3));
+    label.setAttribute("text-anchor", "end");
+    label.setAttribute("class", isZero ? "paper-chart-label is-principal" : "paper-chart-label");
+    label.textContent = formatAxisPct(value);
+    svg.appendChild(label);
+  });
+  const baseline = document.createElementNS(ns, "line");
+  baseline.setAttribute("x1", String(pad.left));
+  baseline.setAttribute("x2", String(width - pad.right));
+  baseline.setAttribute("y1", String(zeroY));
+  baseline.setAttribute("y2", String(zeroY));
+  baseline.setAttribute("class", "paper-chart-baseline");
+  svg.appendChild(baseline);
+  PAPER_YEAR_METRICS.forEach((metric, index) => {
+    const swatch = document.createElementNS(ns, "text");
+    swatch.setAttribute("x", String(pad.left + index * 56));
+    swatch.setAttribute("y", "12");
+    swatch.setAttribute("class", "paper-chart-legend-swatch");
+    swatch.setAttribute("fill", metric.color);
+    swatch.textContent = metric.label;
+    svg.appendChild(swatch);
+  });
+  stats.forEach((row, index) => {
+    const left = xMid(index) - groupW / 2;
+    PAPER_YEAR_METRICS.forEach((metric, m) => {
+      const value = Number(row[metric.key]);
+      const x = left + m * (barW + 2);
+      const y1 = yAt(value);
+      const y = Math.min(y1, zeroY);
+      const h = Math.max(1.5, Math.abs(y1 - zeroY));
+      const rect = document.createElementNS(ns, "rect");
+      rect.setAttribute("x", String(x));
+      rect.setAttribute("y", String(y));
+      rect.setAttribute("width", String(barW));
+      rect.setAttribute("height", String(h));
+      rect.setAttribute("rx", "1.5");
+      rect.setAttribute("fill", metric.color);
+      rect.setAttribute("class", "paper-chart-year-bar");
+      svg.appendChild(rect);
+    });
+    const text = document.createElementNS(ns, "text");
+    text.setAttribute("x", String(xMid(index)));
+    text.setAttribute("y", String(height - 6));
+    text.setAttribute("text-anchor", "middle");
+    text.setAttribute("class", "paper-chart-label paper-chart-x-label");
+    text.textContent = row.year;
+    svg.appendChild(text);
+  });
+  const cursor = document.createElementNS(ns, "rect");
+  cursor.setAttribute("class", "paper-chart-year-cursor");
+  cursor.setAttribute("y", String(pad.top));
+  cursor.setAttribute("height", String(innerH));
+  cursor.setAttribute("rx", "3");
+  cursor.setAttribute("visibility", "hidden");
+  svg.appendChild(cursor);
+  const tooltip = document.createElement("div");
+  tooltip.className = "paper-chart-tooltip";
+  tooltip.hidden = true;
+  stats.forEach((row, index) => {
+    const hit = document.createElementNS(ns, "rect");
+    hit.setAttribute("x", String(pad.left + index * slotW));
+    hit.setAttribute("y", String(pad.top));
+    hit.setAttribute("width", String(slotW));
+    hit.setAttribute("height", String(innerH + 16));
+    hit.setAttribute("class", "paper-chart-hit");
+    hit.addEventListener("mouseenter", () => selectPaperStackYear(index, "hover"));
+    hit.addEventListener("click", () => selectPaperStackYear(index, "chart"));
+    svg.appendChild(hit);
+  });
+  host.appendChild(svg);
+  host.appendChild(tooltip);
+  paperChartView = {
+    mode: "stack",
+    stats,
+    selected: null,
+    cursor,
+    tooltip,
+    host,
+    width,
+    height,
+    pad,
+    slotW,
+    xMid,
+  };
+}
+
+function selectPaperStackYear(index, origin = "hover") {
+  if (!paperChartView || paperChartView.mode !== "stack") {
+    return;
+  }
+  const { stats, cursor, tooltip, host, width, pad, slotW } = paperChartView;
+  const row = stats[index];
+  if (!row) {
+    return;
+  }
+  const x = pad.left + index * slotW;
+  cursor.setAttribute("x", String(x + 2));
+  cursor.setAttribute("width", String(Math.max(8, slotW - 4)));
+  cursor.setAttribute("visibility", "visible");
+  tooltip.innerHTML = "";
+  const title = document.createElement("strong");
+  title.textContent = `${row.year}${row.days < 200 ? "（未满年）" : ""}`;
+  tooltip.appendChild(title);
+  PAPER_YEAR_METRICS.forEach((metric) => {
+    const p = document.createElement("p");
+    p.style.color = metric.color;
+    p.style.fontWeight = "650";
+    p.textContent = `${metric.label} ${formatPct(row[metric.key])}`;
+    tooltip.appendChild(p);
+  });
+  const navLine = document.createElement("p");
+  navLine.textContent = `净值 ${formatMoney(row.start)} → ${formatMoney(row.end)}`;
+  tooltip.appendChild(navLine);
+  tooltip.hidden = false;
+  const hostW = host.clientWidth || width;
+  const scale = hostW / width;
+  const tipW = tooltip.offsetWidth || 168;
+  const left = Math.min(Math.max((x + slotW / 2) * scale - tipW / 2, 8), hostW - tipW - 8);
+  tooltip.style.left = `${left}px`;
+  tooltip.style.top = "8px";
+  paperChartView.selected = row.to;
+  if (row.to) {
+    document.querySelectorAll("#paper-curve-body tr[data-date]").forEach((tr) => {
+      tr.classList.toggle("is-selected", tr.dataset.date === row.to);
+    });
+    if (origin === "chart") {
+      const newestFirst = (paperDailyState.rows || []).slice().reverse();
+      const idx = newestFirst.findIndex((item) => item.trade_date === row.to);
+      if (idx >= 0) {
+        const nextPage = Math.floor(idx / TRADE_PAGE_SIZE) + 1;
+        if (nextPage !== tradePages.daily) {
+          tradePages.daily = nextPage;
+          renderPaperDaily();
+          document.querySelectorAll("#paper-curve-body tr[data-date]").forEach((tr) => {
+            tr.classList.toggle("is-selected", tr.dataset.date === row.to);
+          });
+        }
+      }
+    }
+  }
+}
+
 function renderPaperChart(rows, board, opts = {}) {
   const host = document.getElementById("paper-equity-chart");
   const meta = document.getElementById("paper-chart-meta");
   const bookEl = document.getElementById("paper-chart-book");
-  const lab = opts.lab || null;
+  paperChartSource = { rows: rows || [], board: board || {}, opts: opts || {} };
+  const years = paperTimelineYears(paperChartSource.rows);
+  syncPaperChartYears(years);
+  if (paperChartYear === "stack") {
+    if (!host) {
+      return;
+    }
+    renderPaperStackChart(host, meta, bookEl, board, opts);
+    return;
+  }
+  const year = paperChartYear;
+  const viewRows = filterPaperRowsByYear(paperChartSource.rows, year);
+  const lab = slicePaperLab(opts.lab || null, viewRows);
+  const yearStart = paperYearStartNav(paperChartSource.rows, year, board);
+  const yearEnd = Number(viewRows[viewRows.length - 1]?.total_asset);
+  const yearRet = yearStart > 0 && Number.isFinite(yearEnd) ? yearEnd / yearStart - 1 : null;
+  const pinPrincipal = year === "all";
+  const baseIsInitial = year === "all" || (Number(board?.initial_cash) > 0 && Math.abs(yearStart - Number(board.initial_cash)) < 1e-6);
+  const baseLabel = baseIsInitial ? "本金" : "年初";
   paperChartView = null;
   if (!host) {
     return;
@@ -6334,11 +6833,16 @@ function renderPaperChart(rows, board, opts = {}) {
     bookEl.dataset.tone = label === "账户总览" ? "info" : "accent";
   }
   if (meta) {
-    meta.textContent = board.window_start
-      ? `${board.window_start} ~ ${board.window_end} · 本金 ${formatMoney(board.initial_cash)} · 区间 ${formatPct(board.total_return)}`
-      : `相对本金 ${formatMoney(board.initial_cash ?? lastPaperConfig?.initial_cash ?? 0)}`;
+    if (viewRows.length) {
+      const winStart = viewRows[0].trade_date;
+      const winEnd = viewRows[viewRows.length - 1].trade_date;
+      const baseText = formatMoney(yearStart);
+      meta.textContent = `${winStart} ~ ${winEnd} · ${baseLabel} ${baseText} · ${year === "all" ? "区间" : "当年"} ${formatPct(yearRet)}`;
+    } else {
+      meta.textContent = `相对本金 ${formatMoney(board.initial_cash ?? lastPaperConfig?.initial_cash ?? 0)}`;
+    }
   }
-  if (!rows.length) {
+  if (!viewRows.length) {
     host.textContent = "暂无净值曲线";
     return;
   }
@@ -6347,10 +6851,14 @@ function renderPaperChart(rows, board, opts = {}) {
   const pad = { top: 16, right: 44, bottom: 28, left: 58 };
   const innerW = width - pad.left - pad.right;
   const innerH = height - pad.top - pad.bottom;
-  const assets = rows.map((row) => Number(row.total_asset));
-  const principal = paperChartPrincipal(board, Math.min(...assets), Math.max(...assets));
+  const assets = viewRows.map((row) => Number(row.total_asset));
+  if (Number.isFinite(yearStart) && yearStart > 0) {
+    assets.push(yearStart);
+  }
+  const bookPrincipal = paperChartPrincipal(board, Math.min(...assets), Math.max(...assets));
+  const principal = pinPrincipal ? bookPrincipal : yearStart;
   // Include scaled benchmark so dashed line stays inside Y domain.
-  if (lab?.points?.length === rows.length && principal != null && Number.isFinite(principal)) {
+  if (pinPrincipal && lab?.points?.length === viewRows.length && principal != null && Number.isFinite(principal)) {
     for (const point of lab.points) {
       const nav = Number(point.benchmark_nav);
       if (Number.isFinite(nav)) {
@@ -6360,11 +6868,11 @@ function renderPaperChart(rows, board, opts = {}) {
   }
   const dataMin = Math.min(...assets);
   const dataMax = Math.max(...assets);
-  const domain = paperChartYDomain(assets, principal);
+  const domain = paperChartYDomain(assets, principal, { pinPrincipal });
   const minY = domain.minY;
   const maxY = domain.maxY;
   const spanY = maxY - minY || 1;
-  const xAt = (index) => pad.left + (rows.length === 1 ? innerW / 2 : (index / (rows.length - 1)) * innerW);
+  const xAt = (index) => pad.left + (viewRows.length === 1 ? innerW / 2 : (index / (viewRows.length - 1)) * innerW);
   const yAt = (value) => pad.top + (1 - (value - minY) / spanY) * innerH;
   const ns = "http://www.w3.org/2000/svg";
   const svg = document.createElementNS(ns, "svg");
@@ -6372,7 +6880,7 @@ function renderPaperChart(rows, board, opts = {}) {
   svg.setAttribute("class", "paper-chart-svg");
 
   // Regime bands (lab view) — behind everything else
-  if (lab?.points?.length === rows.length) {
+  if (lab?.points?.length === viewRows.length) {
     let i = 0;
     while (i < lab.points.length) {
       const regime = lab.points[i].regime || "range";
@@ -6385,7 +6893,7 @@ function renderPaperChart(rows, board, opts = {}) {
       const rect = document.createElementNS(ns, "rect");
       rect.setAttribute("x", String(x0));
       rect.setAttribute("y", String(pad.top));
-      rect.setAttribute("width", String(Math.max(1, x1 - x0 + (rows.length === 1 ? 0 : innerW / (rows.length - 1)))));
+      rect.setAttribute("width", String(Math.max(1, x1 - x0 + (viewRows.length === 1 ? 0 : innerW / (viewRows.length - 1)))));
       rect.setAttribute("height", String(innerH));
       rect.setAttribute(
         "class",
@@ -6452,15 +6960,15 @@ function renderPaperChart(rows, board, opts = {}) {
     baseline.setAttribute("y2", String(baseY));
     baseline.setAttribute("class", "paper-chart-baseline");
     svg.appendChild(baseline);
-    const baseLabel = document.createElementNS(ns, "text");
-    baseLabel.setAttribute("x", String(width - pad.right + 4));
-    baseLabel.setAttribute("y", String(baseY + 3));
-    baseLabel.setAttribute("text-anchor", "start");
-    baseLabel.setAttribute("class", "paper-chart-baseline-label");
-    baseLabel.textContent = "本金";
-    svg.appendChild(baseLabel);
+    const baseLabelEl = document.createElementNS(ns, "text");
+    baseLabelEl.setAttribute("x", String(width - pad.right + 4));
+    baseLabelEl.setAttribute("y", String(baseY + 3));
+    baseLabelEl.setAttribute("text-anchor", "start");
+    baseLabelEl.setAttribute("class", "paper-chart-baseline-label");
+    baseLabelEl.textContent = baseLabel;
+    svg.appendChild(baseLabelEl);
   }
-  const points = rows.map((row, index) => ({
+  const points = viewRows.map((row, index) => ({
     date: row.trade_date,
     x: xAt(index),
     y: yAt(Number(row.total_asset)),
@@ -6480,7 +6988,7 @@ function renderPaperChart(rows, board, opts = {}) {
   svg.appendChild(line);
 
   // Benchmark nav scaled to principal
-  if (lab?.points?.length === rows.length && principal != null) {
+  if (pinPrincipal && lab?.points?.length === viewRows.length && principal != null) {
     const benchPts = lab.points.map((p, index) => ({
       x: xAt(index),
       y: yAt(Number(p.benchmark_nav || 1) * principal),
@@ -6521,8 +7029,8 @@ function renderPaperChart(rows, board, opts = {}) {
     }
   }
 
-  const tickIndexes = xTickIndexes(rows.length);
-  const spanYears = xAxisSpanYears(rows);
+  const tickIndexes = xTickIndexes(viewRows.length);
+  const spanYears = xAxisSpanYears(viewRows);
   tickIndexes.forEach((index, order) => {
     const text = document.createElementNS(ns, "text");
     text.setAttribute("x", String(xAt(index)));
@@ -6532,7 +7040,7 @@ function renderPaperChart(rows, board, opts = {}) {
       order === 0 ? "start" : order === tickIndexes.length - 1 ? "end" : "middle",
     );
     text.setAttribute("class", "paper-chart-label paper-chart-x-label");
-    text.textContent = axisDateLabel(rows[index].trade_date, { spanYears });
+    text.textContent = axisDateLabel(viewRows[index].trade_date, { spanYears });
     svg.appendChild(text);
   });
   points.forEach((point) => {
@@ -6577,7 +7085,7 @@ function renderPaperChart(rows, board, opts = {}) {
   yValueLabel.setAttribute("visibility", "hidden");
   svg.appendChild(yValueLabel);
   const hit = document.createElementNS(ns, "g");
-  const band = rows.length === 1 ? innerW : innerW / (rows.length - 1);
+  const band = viewRows.length === 1 ? innerW : innerW / (viewRows.length - 1);
   points.forEach((point) => {
     const rect = document.createElementNS(ns, "rect");
     rect.setAttribute("x", String(point.x - band / 2));
@@ -6597,6 +7105,26 @@ function renderPaperChart(rows, board, opts = {}) {
   host.appendChild(tooltip);
   paperChartView = { points, selected: null, cursor, hCursor, marker, axisDot, yAxisDot, yValueLabel, yValueBg, tooltip, host, width, height, pad };
 }
+
+document.getElementById("paper-chart-years")?.addEventListener("click", (event) => {
+  const btn = event.target.closest("[data-paper-year]");
+  if (!btn) {
+    return;
+  }
+  const year = btn.dataset.paperYear || "all";
+  if (year === paperChartYear) {
+    return;
+  }
+  paperChartYear = year;
+  renderPaperChart(paperChartSource.rows, paperChartSource.board, paperChartSource.opts);
+  if (paperChartYear === "stack") {
+    return;
+  }
+  const chartRows = filterPaperRowsByYear(paperChartSource.rows, paperChartYear);
+  if (chartRows.length) {
+    selectPaperDay(chartRows[chartRows.length - 1].trade_date, "chart");
+  }
+});
 
 bindTradePager("paper-daily", "daily", renderPaperDaily);
 bindTradePager("paper-position", "positions", () => renderPaperPositions());

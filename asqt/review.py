@@ -11,6 +11,7 @@ from asqt.paper import account_id_for, paper_curve
 from asqt.research_engine import LocalResearchEngine, data_version_for
 from asqt.storage import read_market_daily
 from asqt.strategies import (
+    STOCK_HOLDER_INCREASE_FOLLOW,
     STRATEGY_SPECS,
     adj_close,
     market_by_symbol,
@@ -53,6 +54,12 @@ class LocalReviewService:
         grouped = market_by_symbol(rows)
         suspended = suspended_keys(limits)
         weight_cache: dict[str, dict[str, float]] = {}
+        event_rows = None
+        if strategy_id == STOCK_HOLDER_INCREASE_FOLLOW:
+            from asqt.events import query_events
+
+            # 一次拉齐事件；逐日 weights_for 再 query 会把复盘卡死（17万行 × 两千交易日）。
+            event_rows = query_events(settings=self.settings, newest_first=False)
 
         def cached_weights(asof: str) -> dict[str, float]:
             hit = weight_cache.get(asof)
@@ -64,6 +71,8 @@ class LocalReviewService:
                     limits=limits,
                     market_by_symbol=grouped,
                     suspended=suspended,
+                    events=event_rows,
+                    settings=self.settings,
                 )
                 weight_cache[asof] = hit
             return hit

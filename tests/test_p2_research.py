@@ -15,6 +15,8 @@ from asqt.strategies import (
     ETF_MA_ROTATE,
     ETF_MOMENTUM_TOPK,
     STOCK_2560,
+    STOCK_HOLDER_INCREASE_FOLLOW,
+    STOCK_YIN_ARB,
     STOCK_MOMENTUM_TOPK,
     STRATEGY_SPECS,
     asof_rows,
@@ -301,6 +303,24 @@ def test_p2_backtest_attribution_and_quality_block(tmp_path):
     assert len(daily["items"]) == len(STRATEGY_SPECS)
 
 
+def test_holder_attribution_queries_events_once(tmp_path, monkeypatch):
+    from asqt.review import LocalReviewService
+
+    settings = make_settings(tmp_path)
+    rows, instruments = _trend_book()
+    _seed(settings, rows, instruments)
+    n = {"q": 0}
+    real_query = __import__("asqt.events", fromlist=["query_events"]).query_events
+
+    def counted_query(*args, **kwargs):
+        n["q"] += 1
+        return real_query(*args, **kwargs)
+
+    monkeypatch.setattr("asqt.events.query_events", counted_query)
+    LocalReviewService(settings).attribute_backtest(STOCK_HOLDER_INCREASE_FOLLOW)
+    assert n["q"] == 1
+
+
 def test_p2_attribution_api(tmp_path, monkeypatch):
     settings = make_settings(tmp_path)
     (tmp_path / "frontend").mkdir(parents=True, exist_ok=True)
@@ -322,6 +342,8 @@ def test_p2_attribution_api(tmp_path, monkeypatch):
     by_id = {row["strategy_id"]: row for row in versions}
     assert STOCK_2560 in by_id
     assert by_id[STOCK_2560]["status"] == "unregistered"
+    assert STOCK_YIN_ARB in by_id
+    assert by_id[STOCK_YIN_ARB]["status"] == "unregistered"
     assert by_id[STOCK_MOMENTUM_TOPK]["status"] != "unregistered"
     experiments = client.get("/api/research/experiments").json()
     assert any(row["strategy_id"] == STOCK_MOMENTUM_TOPK for row in experiments)

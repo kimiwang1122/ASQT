@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from asqt.factors import _sma, closes_asof, rule_2560
+from asqt.lab_params import builtin_presets
 from asqt.strategies import STOCK_2560, STRATEGY_SPECS, factor_rows, weights_for
-from asqt.tune import DEFAULT_GRIDS, suggest_parameter_set_id
+from asqt.tune import DEFAULT_GRIDS, stock_2560_short_id, suggest_parameter_set_id
 
 
 def _dates(n: int) -> list[str]:
@@ -133,6 +134,24 @@ def test_stock_2560_sticky_keeps_hold_over_new_entry():
     assert len(fresh) == 1
 
 
+def test_strategy_stops_disable_at_zero():
+    from asqt.paper import strategy_stops
+
+    take, stop = strategy_stops(STOCK_2560)
+    assert take == 0.20
+    assert stop == -0.08
+    pinned = {**STRATEGY_SPECS[STOCK_2560]["params"], "stop_loss": 0, "take_profit": 0}
+    STRATEGY_SPECS[STOCK_2560]["params"] = pinned
+    try:
+        assert strategy_stops(STOCK_2560) == (0.0, 0.0)
+    finally:
+        STRATEGY_SPECS[STOCK_2560]["params"] = {
+            **pinned,
+            "stop_loss": 0.08,
+            "take_profit": 0.20,
+        }
+
+
 def test_stock_2560_weights_top_k_from_setup():
     hot = "000001.SZ"
     cold = "000002.SZ"
@@ -161,9 +180,33 @@ def test_stock_2560_weights_top_k_from_setup():
     assert cold not in weights
     factors = factor_rows(STOCK_2560, rows, asof, source_run_id="t2560", params=classic)
     assert {row["symbol"] for row in factors} == {hot}
-    assert STRATEGY_SPECS[STOCK_2560]["parameter_set_id"] == "stock_2560.k10.f5.s20.vf5.vs90.b30"
+    assert STRATEGY_SPECS[STOCK_2560]["parameter_set_id"] == "stock_2560.k10.f5.s20.vf5.vs90.b30.sl8.tp20"
     assert (
         suggest_parameter_set_id(STOCK_2560, STRATEGY_SPECS[STOCK_2560]["params"])
-        == "stock_2560.k10.f5.s20.vf5.vs90.b30"
+        == "stock_2560.k10.f5.s20.vf5.vs90.b30.sl8.tp20"
     )
     assert len(DEFAULT_GRIDS[STOCK_2560]) == 12
+
+
+def test_stock_2560_short_id_matches_table_codes():
+    params = {
+        "ma_fast": 5,
+        "ma_slow": 25,
+        "vol_fast": 5,
+        "vol_slow": 90,
+        "pullback_band": 0.02,
+        "top_k": 8,
+        "max_weight": 0.10,
+        "gross_limit": 0.95,
+        "stop_loss": 0.0,
+        "take_profit": 0.60,
+    }
+    short = stock_2560_short_id(params)
+    full = suggest_parameter_set_id(STOCK_2560, params)
+    assert short == "k8.s25.vs90.b20.sl0.tp60"
+    assert full == "stock_2560.k8.f5.s25.vf5.vs90.b20.sl0.tp60"
+    assert short not in full
+    shorts = {stock_2560_short_id(row["params"]) for row in builtin_presets(STOCK_2560)}
+    assert "k8.s20.vs90.b30.sl8.tp0" in shorts
+    assert "k8.s25.vs90.b20.sl4.tp20" in shorts
+    assert "k8.s25.vs90.b20.sl8.tp30" in shorts

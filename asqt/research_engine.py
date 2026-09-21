@@ -112,9 +112,20 @@ class LocalStrategyService:
                 out.append(row)
         return out
 
-    def generate_target_positions(self, strategy_id: str, trade_date: str) -> list[dict[str, Any]]:
+    def generate_target_positions(
+        self,
+        strategy_id: str,
+        trade_date: str,
+        *,
+        held_symbols: list[str] | None = None,
+        market_by_symbol: dict | None = None,
+        session_dates: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
         version = self._require_orderable(strategy_id)
-        rows = read_market_daily(end=trade_date, settings=self.settings)
+        if market_by_symbol is None:
+            rows = read_market_daily(end=trade_date, settings=self.settings)
+        else:
+            rows = []
         limits = query_all(
             "SELECT * FROM limit_suspension WHERE trade_date = ?",
             (trade_date,),
@@ -122,7 +133,7 @@ class LocalStrategyService:
         )
         params = dict(STRATEGY_SPECS[strategy_id]["params"])
         rebalance_every_n = max(1, int(params.get("rebalance_every_n") or 1))
-        dates = sorted({str(row["trade_date"]) for row in rows})
+        dates = list(session_dates) if session_dates is not None else sorted({str(row["trade_date"]) for row in rows})
         signal_index = dates.index(trade_date) if trade_date in dates else -1
         hold_prior = (
             rebalance_every_n > 1
@@ -148,8 +159,16 @@ class LocalStrategyService:
                 "params": params,
                 "settings": self.settings,
             }
+            if market_by_symbol is not None:
+                weight_kwargs["market_by_symbol"] = market_by_symbol
             if strategy_id == STOCK_2560:
-                weight_kwargs["held_symbols"] = [str(row["symbol"]) for row in prior]
+                # Paper must pass live positions. Prior *targets* still list names
+                # that SL/TP already flattened, which would re-buy them next day.
+                weight_kwargs["held_symbols"] = (
+                    list(held_symbols)
+                    if held_symbols is not None
+                    else [str(row["symbol"]) for row in prior]
+                )
             weights = weights_for(strategy_id, rows, trade_date, **weight_kwargs)
         pool_tags = params.get("pool_tags")
         if pool_tags:

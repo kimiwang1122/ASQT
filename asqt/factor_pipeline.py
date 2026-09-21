@@ -45,6 +45,16 @@ _BUILTIN: dict[str, Callable[..., float | None]] = {
         vol_slow=int(kw.get("vol_slow", 60)),
         pullback_band=float(kw.get("pullback_band", 0.02)),
     ),
+    "rule_yin_arb": lambda hist, **kw: F.rule_yin_arb(
+        hist,
+        ma_fast=int(kw.get("ma_fast", 10)),
+        ma_slow=int(kw.get("ma_slow", 20)),
+        burst_lookback=int(kw.get("burst_lookback", 5)),
+        burst_ratio=float(kw.get("burst_ratio", 1.8)),
+        pullback_band=float(kw.get("pullback_band", 0.025)),
+        min_body=float(kw.get("min_body", 0.005)),
+        ma_gap_max=float(kw.get("ma_gap_max", 0.03)),
+    ),
 }
 
 

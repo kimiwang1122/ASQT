@@ -667,6 +667,12 @@ def test_paper_run_days_max_follows_calendar(tmp_path):
     assert window[0] == "2024-01-02"  # signal day before first fill
     assert window[-1] == "2024-01-08"
     assert sessions == 6
+    nudged, n_first = resolve_paper_window(dates, start_date="2024-01-01", end_date="2024-01-08")
+    assert nudged[0] == "2024-01-01"
+    assert nudged[1] == "2024-01-02"
+    assert n_first == 7
+    with pytest.raises(ValueError, match="行情首日"):
+        resolve_paper_window(dates, start_date="2024-01-01", end_date="2024-01-01")
     trailing, n = resolve_paper_window(dates, days=3)
     assert trailing == dates[-4:]
     assert n == 3

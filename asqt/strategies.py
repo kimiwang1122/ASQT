@@ -1,4 +1,4 @@
-"""P2/P2.4 strategies: MA rotate, momentum/reversal TopK, low-vol, volume confirm, skip-month, holder events, 2560."""
+"""P2/P2.4 strategies: MA rotate, momentum/reversal TopK, low-vol, volume confirm, skip-month, holder events, 2560, yin arb."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ STOCK_MOMENTUM_VOLUME_CONFIRM = "stock_momentum_volume_confirm"
 STOCK_MOMENTUM_SKIP_MONTH = "stock_momentum_skip_month"
 STOCK_HOLDER_INCREASE_FOLLOW = "stock_holder_increase_follow"
 STOCK_2560 = "stock_2560"
+STOCK_YIN_ARB = "stock_yin_arb"
 
 STRATEGY_SPECS: dict[str, dict[str, Any]] = {
     ETF_MA_ROTATE: {
@@ -117,7 +118,7 @@ STRATEGY_SPECS: dict[str, dict[str, Any]] = {
     STOCK_2560: {
         "kind": "topk",
         "instrument_type": "stock",
-        "parameter_set_id": "stock_2560.k10.f5.s20.vf5.vs90.b30",
+        "parameter_set_id": "stock_2560.k10.f5.s20.vf5.vs90.b30.sl8.tp20",
         "params": {
             "ma_fast": 5,
             "ma_slow": 20,
@@ -127,6 +128,27 @@ STRATEGY_SPECS: dict[str, dict[str, Any]] = {
             "top_k": 10,
             "max_weight": 0.10,
             "gross_limit": 0.95,
+            "stop_loss": 0.08,
+            "take_profit": 0.20,
+        },
+    },
+    STOCK_YIN_ARB: {
+        "kind": "topk",
+        "instrument_type": "stock",
+        "parameter_set_id": "stock_yin_arb.k10.f10.s20.bl5.br180.b25.mg30",
+        "params": {
+            "ma_fast": 10,
+            "ma_slow": 20,
+            "burst_lookback": 5,
+            "burst_ratio": 1.8,
+            "pullback_band": 0.025,
+            "min_body": 0.005,
+            "ma_gap_max": 0.03,
+            "top_k": 10,
+            "max_weight": 0.10,
+            "gross_limit": 0.95,
+            "stop_loss": 0.0,
+            "take_profit": 0.0,
         },
     },
 }
@@ -142,7 +164,13 @@ STRATEGY_LABEL = {
     STOCK_MOMENTUM_SKIP_MONTH: "股票跳月动量",
     STOCK_HOLDER_INCREASE_FOLLOW: "股票股东增持跟随",
     STOCK_2560: "股票2560战法",
+    STOCK_YIN_ARB: "股票阴线套利",
 }
+
+# (id(grouped), ma/vol params) → (timelines, asof_index). Prefix grouped (tests) misses cache; paper reuses.
+_2560_TL_CACHE: dict[tuple[Any, ...], tuple[dict[str, list], dict[str, dict[str, int]]]] = {}
+# id(events list) → HolderEventIndex. 复盘逐日 weights 必须复用，否则每天重建 17 万行索引。
+_HOLDER_INDEX_CACHE: tuple[int, Any] | None = None
 
 
 def adj_close(row: dict[str, Any]) -> float:
@@ -359,10 +387,20 @@ def factor_specs_for(
     if strategy_id == STOCK_HOLDER_INCREASE_FOLLOW:
         from asqt.events import build_holder_event_index, holder_net_in_window
 
+        global _HOLDER_INDEX_CACHE
         event_lookback = int(spec["event_lookback"])
         lookback = int(spec["lookback"])
         # Index once: raw 17万行线性扫在全窗因子任务里会卡数十分钟。
-        event_index = build_holder_event_index(_resolve_events(events, settings=settings))
+        if events is not None:
+            cache_key = id(events)
+            hit = _HOLDER_INDEX_CACHE
+            if hit is not None and hit[0] == cache_key:
+                event_index = hit[1]
+            else:
+                event_index = build_holder_event_index(events)
+                _HOLDER_INDEX_CACHE = (cache_key, event_index)
+        else:
+            event_index = build_holder_event_index(_resolve_events(None, settings=settings))
 
         def _holder_net(hist: list[dict[str, Any]], *, _events=event_index, _n=event_lookback) -> float | None:
             if not hist:
@@ -393,6 +431,25 @@ def factor_specs_for(
             },
         ]
         return out
+    if strategy_id == STOCK_YIN_ARB:
+        kw = {
+            "ma_fast": int(spec["ma_fast"]),
+            "ma_slow": int(spec["ma_slow"]),
+            "burst_lookback": int(spec["burst_lookback"]),
+            "burst_ratio": float(spec["burst_ratio"]),
+            "pullback_band": float(spec["pullback_band"]),
+            "min_body": float(spec["min_body"]),
+            "ma_gap_max": float(spec["ma_gap_max"]),
+        }
+        return [
+            {
+                "name": "stock_yin_arb",
+                "instrument_type": "stock",
+                "kind": "rule_yin_arb",
+                "kwargs": kw,
+                "params_for_hash": kw,
+            }
+        ]
     if strategy_id == STOCK_2560:
         ma_fast = int(spec["ma_fast"])
         ma_slow = int(spec["ma_slow"])
@@ -514,6 +571,13 @@ def selector_rules_for(strategy_id: str, params: dict[str, Any] | None = None) -
             "filters": [],
             "top_k": int(spec["top_k"]),
         }
+    if strategy_id == STOCK_YIN_ARB:
+        return {
+            **base,
+            "score_factor": "stock_yin_arb",
+            "filters": [],
+            "top_k": int(spec["top_k"]),
+        }
     raise ValueError(f"unknown strategy: {strategy_id}")
 
 
@@ -567,7 +631,7 @@ def _weights_stock_2560(
     held_symbols: list[str] | None = None,
 ) -> dict[str, float]:
     """Sticky 2560: keep prior names until exit; fill free slots from new entries only."""
-    from asqt.factors import rule_2560_state
+    from asqt.factors import rule_2560_timeline
 
     spec = _merged_params(STOCK_2560, params)
     top_k = int(spec["top_k"])
@@ -579,19 +643,34 @@ def _weights_stock_2560(
     vol_slow = int(spec["vol_slow"])
     pullback_band = float(spec["pullback_band"])
     grouped = market_by_symbol if market_by_symbol is not None else _by_symbol(rows)
+    tl_key = (id(grouped), ma_fast, ma_slow, vol_fast, vol_slow, round(pullback_band, 6))
+    packed = _2560_TL_CACHE.get(tl_key)
+    if packed is None:
+        timelines: dict[str, list] = {}
+        asof_index: dict[str, dict[str, int]] = {}
+        for symbol, series in grouped.items():
+            timelines[symbol] = rule_2560_timeline(
+                series,
+                ma_fast=ma_fast,
+                ma_slow=ma_slow,
+                vol_fast=vol_fast,
+                vol_slow=vol_slow,
+                pullback_band=pullback_band,
+            )
+            asof_index[symbol] = {str(row["trade_date"]): i for i, row in enumerate(series)}
+        packed = (timelines, asof_index)
+        if len(_2560_TL_CACHE) >= 8:
+            _2560_TL_CACHE.clear()
+        _2560_TL_CACHE[tl_key] = packed
+    timelines, asof_index = packed
     states: dict[str, tuple[str, float]] = {}
-    for symbol, series in grouped.items():
+    for symbol, index_map in asof_index.items():
         if _is_suspended(symbol, asof, limits=limits, suspended=suspended):
             continue
-        hist = series_asof(series, asof)
-        state = rule_2560_state(
-            hist,
-            ma_fast=ma_fast,
-            ma_slow=ma_slow,
-            vol_fast=vol_fast,
-            vol_slow=vol_slow,
-            pullback_band=pullback_band,
-        )
+        idx = index_map.get(str(asof))
+        if idx is None:
+            continue
+        state = timelines[symbol][idx]
         if state is not None:
             states[symbol] = state
     keep: list[str] = []
