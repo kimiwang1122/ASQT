@@ -4,7 +4,26 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ASQT 控制台</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=p3-ui97" />
+    <link rel="stylesheet" href="/assets/styles.css?v=p3-ui112" />
+    <style>
+      html, body { width: 100% !important; max-width: 100% !important; }
+      .shell { width: 100% !important; max-width: 100% !important; }
+      .shell > *, main, .page, .panel, .table-wrap { min-width: 0 !important; max-width: 100% !important; }
+      .table-wrap { overflow: hidden !important; }
+      table { width: 100% !important; max-width: 100% !important; table-layout: fixed !important; }
+      th, td { overflow: hidden; text-overflow: ellipsis; }
+      .strategy-table th:nth-child(5),
+      .strategy-table td:nth-child(5) { width: auto !important; max-width: 0 !important; }
+      .strategy-table th:nth-child(7),
+      .strategy-table td:nth-child(7) { width: 7.5rem !important; min-width: 7.5rem !important; }
+      #page-sync table th:first-child,
+      #page-sync table td:first-child { width: 2.75rem !important; max-width: 2.75rem !important; }
+      #page-sync table th:nth-child(2),
+      #page-sync table td:nth-child(2),
+      #page-sync table th:nth-child(3),
+      #page-sync table td:nth-child(3) { width: 11.5rem !important; }
+      .filters { flex-wrap: wrap !important; max-width: 100% !important; }
+    </style>
   </head>
   <body>
     <div class="shell">
@@ -487,6 +506,15 @@
             </div>
             <div class="table-wrap">
               <table class="strategy-table">
+                <colgroup>
+                  <col style="width: 36px" />
+                  <col />
+                  <col style="width: 3.2em" />
+                  <col style="width: 4.6em" />
+                  <col />
+                  <col style="width: 5.5rem" />
+                  <col style="width: 7.5rem" />
+                </colgroup>
                 <thead>
                   <tr>
                     <th class="strategy-check-col">
@@ -775,7 +803,7 @@
             <form class="filters filters-inline" id="paper-run-form">
               <label class="filter-inline">
                 策略
-                <select id="paper-run-id" data-asqt-select="wide multi" data-max-tags="1" multiple>
+                <select id="paper-run-id" data-asqt-select="wide multi" multiple>
                   <option value="all">全部</option>
                   <option value="etf_ma_rotate">ETF 均线轮动</option>
                   <option value="stock_momentum_topk">股票动量 TopK</option>
@@ -1357,6 +1385,20 @@
           </section>
         </section>
       </main>
+      <aside class="lookup-rail" id="lookup-rail">
+        <div class="lookup-head">
+          <h2>查询助手</h2>
+          <button id="lookup-toggle" type="button" class="icon-btn" aria-label="收起查询助手" title="收起/展开查询助手">⟩</button>
+        </div>
+        <div class="lookup-body">
+          <label class="lookup-search">
+            <span>代码 / 名称</span>
+            <input id="lookup-q" type="search" placeholder="如 000001、平安" autocomplete="off" />
+          </label>
+          <p class="hint" id="lookup-hint">模糊匹配股票池内标的，点结果看 F10 资料。</p>
+          <ul id="lookup-results" class="lookup-results"></ul>
+        </div>
+      </aside>
     </div>
     <div id="toast-host" class="toast-host" aria-live="polite"></div>
     <div id="confirm-dialog" class="confirm-mask" hidden>
@@ -1393,6 +1435,18 @@
         </form>
       </div>
     </div>
-    <script src="/assets/app.js?v=p3-ui97"></script>
+    <div id="lookup-dialog" class="confirm-mask" hidden>
+      <div class="confirm-card lookup-card" role="dialog" aria-modal="true" aria-labelledby="lookup-dialog-title">
+        <div class="confirm-head">
+          <div>
+            <h3 id="lookup-dialog-title">标的资料</h3>
+            <p class="hint" id="lookup-dialog-sub" hidden></p>
+          </div>
+          <button type="button" class="confirm-close" id="lookup-dialog-close" aria-label="关闭">×</button>
+        </div>
+        <div id="lookup-dialog-body" class="lookup-dialog-body"></div>
+      </div>
+    </div>
+    <script src="/assets/app.js?v=p3-ui112"></script>
   </body>
 </html>

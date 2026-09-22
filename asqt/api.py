@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 import json
 import threading
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -244,13 +244,25 @@ def create_app() -> FastAPI:
         stop.set()
 
     app = FastAPI(title="ASQT", version="0.1.0", lifespan=lifespan)
+
+    @app.middleware("http")
+    async def no_store_frontend(request: Request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if path == "/" or path.startswith("/assets/"):
+            response.headers["Cache-Control"] = "no-store, max-age=0"
+        return response
+
     assets_dir = settings.frontend_dir / "assets"
     if assets_dir.exists():
         app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
     @app.get("/")
     def index() -> FileResponse:
-        return FileResponse(settings.frontend_dir / "index.html")
+        return FileResponse(
+            settings.frontend_dir / "index.html",
+            headers={"Cache-Control": "no-store, max-age=0"},
+        )
 
     @app.get("/favicon.ico", include_in_schema=False)
     def favicon() -> Response:
@@ -353,6 +365,28 @@ def create_app() -> FastAPI:
     @app.get("/api/instruments")
     def instruments() -> list[dict]:
         return query_all("SELECT * FROM instrument_master ORDER BY symbol", settings=settings)
+
+    @app.get("/api/lookup/search")
+    def lookup_search(
+        q: str = Query(default=""),
+        limit: int = Query(default=20, ge=1, le=50),
+    ) -> dict:
+        from asqt.instrument_lookup import search_instruments
+
+        items = search_instruments(q, limit=limit, settings=settings)
+        return {"q": q.strip(), "items": items, "total": len(items)}
+
+    @app.get("/api/lookup/profile")
+    def lookup_profile(symbol: str = Query(..., min_length=1, max_length=32)) -> dict:
+        from asqt.instrument_lookup import instrument_profile
+
+        payload = instrument_profile(symbol, settings=settings)
+        if not payload:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "unknown_symbol", "message": f"未找到标的 {symbol}"},
+            )
+        return payload
 
     @app.get("/api/calendar")
     def calendar(market: str = Query(default="CN")) -> list[dict]:

@@ -275,6 +275,8 @@ def _set_progress(run_id: str, settings: Settings, done: int, total: int, label:
     total = max(1, int(total))
     done = max(0, min(int(done), total))
     pct = int(done * 100 / total)
+    if pct == 0 and done < total:
+        pct = 1
     _patch(
         run_id,
         settings,

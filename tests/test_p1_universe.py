@@ -51,8 +51,8 @@ def _etf(**overrides) -> dict[str, str]:
 
 def test_repo_poc_universe_meets_policy():
     payload = load_poc_universe()
-    assert len(payload["stocks"]) >= 50
-    assert 5 <= len(payload["etfs"]) <= 50
+    assert 50 <= len(payload["stocks"]) <= 300
+    assert 5 <= len(payload["etfs"]) <= 200
     assert all(row["exchange"] in {"SH", "SZ"} for row in payload["stocks"])
     indexes = {row["index_name"] for row in payload["etfs"]}
     assert len(indexes) == len(payload["etfs"])

@@ -63,6 +63,16 @@ def test_rule_yin_arb_requires_burst_yin_and_ma_pullback():
     assert rule_yin_arb(_setup(near_ma=False)) is None
 
 
+def test_yin_arb_timeline_matches_prefix_scores():
+    from asqt.factors import rule_yin_arb_timeline
+
+    rows = _setup()
+    timeline = rule_yin_arb_timeline(rows)
+    assert timeline[-1] == rule_yin_arb(rows)
+    for i in range(22, len(rows)):
+        assert timeline[i] == rule_yin_arb(rows[: i + 1])
+
+
 def test_yin_arb_weights_and_pin():
     rows = _setup()
     asof = rows[-1]["trade_date"]
@@ -75,3 +85,27 @@ def test_yin_arb_weights_and_pin():
     assert pin == "stock_yin_arb.k10.f10.s20.bl5.br180.b25.mg30"
     assert suggest_parameter_set_id(STOCK_YIN_ARB, params) == pin
     assert len(DEFAULT_GRIDS[STOCK_YIN_ARB]) == 8
+    sl_params = {**params, "stop_loss": 0.04, "take_profit": 0.20}
+    assert suggest_parameter_set_id(STOCK_YIN_ARB, sl_params).endswith(".sl4.tp20")
+    from asqt.tune import stock_yin_arb_short_id
+
+    assert stock_yin_arb_short_id(sl_params) == "k10.br180.b25.bl5.sl4.tp20"
+
+
+def test_yin_arb_paper_top_presets_registered():
+    from asqt.lab_params import builtin_presets
+    from asqt.tune import stock_yin_arb_short_id
+
+    shorts = {stock_yin_arb_short_id(row["params"]) for row in builtin_presets(STOCK_YIN_ARB)}
+    assert shorts >= {
+        "k10.br150.b30.bl5",
+        "k10.br150.b25.bl5",
+        "k10.br180.b25.bl5",
+        "k5.br150.b30.bl5",
+        "k5.br150.b25.bl5",
+        "k5.br180.b25.bl5",
+        "k10.br150.b20.bl5",
+        "k10.br180.b30.bl5",
+        "k5.br180.b30.bl5",
+        "k5.br150.b30.bl3",
+    }

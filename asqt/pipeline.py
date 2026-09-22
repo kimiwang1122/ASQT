@@ -16,7 +16,13 @@ from asqt.normalize import StandardNormalizer, repair_placeholder_adj_factors
 from asqt.quality import ContractQualityChecker
 from asqt.rawstore import write_raw_json
 from asqt.session import session_asof_date
-from asqt.storage import market_daily_path, market_daily_span, read_market_daily, upsert_market_daily
+from asqt.storage import (
+    market_daily_path,
+    market_daily_row_count,
+    market_daily_span,
+    read_market_daily,
+    upsert_market_daily,
+)
 
 
 def resolve_append_window(
@@ -44,6 +50,13 @@ def resolve_append_window(
         "end": end_d.isoformat(),
         "max_trade_date": max_trade_date,
     }
+
+
+def _iso_minus_days(value: str, days: int) -> str:
+    try:
+        return (date.fromisoformat(str(value)[:10]) - timedelta(days=max(0, int(days)))).isoformat()
+    except ValueError:
+        return str(value)[:10]
 
 
 def _fetch_pct(done: int, total: int) -> int:
@@ -157,8 +170,9 @@ def pull_daily(
     source_id = getattr(adapter, "source_id", "unknown")
     normalizer = StandardNormalizer()
     normalized = normalizer.normalize_market_daily(raw_rows, source_id)
-    stored = read_market_daily(settings=settings)
-    merged = {(row["symbol"], row["trade_date"]): dict(row) for row in stored}
+    context_start = _iso_minus_days(start, 10)
+    context = read_market_daily(start=context_start, end=end, settings=settings)
+    merged = {(row["symbol"], row["trade_date"]): dict(row) for row in context}
     for row in normalized:
         key = (row["symbol"], row["trade_date"])
         merged[key] = {**merged.get(key, {}), **row}
@@ -171,21 +185,23 @@ def pull_daily(
     instruments = normalizer.instruments_from_rows(normalized)
     limits = normalizer.limit_rows_from_daily(normalized)
     _upsert_source(adapter, settings)
-    _upsert_instruments(instruments, settings)
+    named = [row for row in instruments if row.get("name") and row["name"] != row["symbol"]]
+    if named:
+        _upsert_instruments(named, settings)
     _upsert_limits(limits, settings)
     calendar_rows: list[dict] = []
     if hasattr(adapter, "fetch_trade_calendar"):
         calendar_rows = adapter.fetch_trade_calendar(start, end)
         _upsert_calendar(calendar_rows, settings)
 
-    stored = read_market_daily(settings=settings)
+    span_min, span_max = market_daily_span(settings)
     check = None
     if run_check:
         check_end = min(end, session_asof_date())
         check = ContractQualityChecker().check(
             "market_daily",
             asof=check_end,
-            records=[row for row in stored if start <= row["trade_date"] <= end and row["symbol"] in set(symbols)],
+            records=read_market_daily(start=context_start, end=check_end, settings=settings),
             instruments=query_all("SELECT * FROM instrument_master", settings=settings),
             calendar=query_all(
                 "SELECT * FROM trade_calendar WHERE market = 'CN' AND trade_date >= ? AND trade_date <= ?",
@@ -205,9 +221,9 @@ def pull_daily(
         (
             "market_daily",
             str(parquet_path),
-            len(stored),
-            min((row["trade_date"] for row in stored), default=None),
-            max((row["trade_date"] for row in stored), default=None),
+            market_daily_row_count(settings),
+            span_min,
+            span_max,
             f"{source_id}-daily",
         ),
         settings=settings,
@@ -316,20 +332,33 @@ def _fetch_peer_rows(adapter, symbols: list[str], start: str, end: str, *, timeo
             raise TimeoutError(f"peer {source_id} timed out after {int(timeout_s)}s") from exc
 
 
-def check_market_daily(*, settings: Settings | None = None, expected_symbols: list[str] | None = None) -> dict:
+def check_market_daily(
+    *,
+    settings: Settings | None = None,
+    expected_symbols: list[str] | None = None,
+    start: str | None = None,
+) -> dict:
     settings = settings or get_settings()
     initialize_database(settings)
     asof = session_asof_date()
-    result = ContractQualityChecker().check(
-        "market_daily",
-        asof=asof,
-        records=read_market_daily(settings=settings),
-        instruments=query_all("SELECT * FROM instrument_master", settings=settings),
-        calendar=query_all(
+    if start:
+        calendar = query_all(
+            "SELECT * FROM trade_calendar WHERE market = 'CN' AND trade_date >= ? AND trade_date <= ?",
+            (start, asof),
+            settings=settings,
+        )
+    else:
+        calendar = query_all(
             "SELECT * FROM trade_calendar WHERE market = 'CN' AND trade_date <= ?",
             (asof,),
             settings=settings,
-        ),
+        )
+    result = ContractQualityChecker().check(
+        "market_daily",
+        asof=asof,
+        records=read_market_daily(start=start, end=asof, settings=settings),
+        instruments=query_all("SELECT * FROM instrument_master", settings=settings),
+        calendar=calendar,
         expected_symbols=expected_symbols,
     )
     persist_quality_result(result, settings=settings)

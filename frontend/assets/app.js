@@ -261,6 +261,30 @@ function makeTag(label, tone) {
   return span;
 }
 
+function containPageWidth() {
+  document.querySelectorAll(".table-wrap").forEach((wrap) => {
+    wrap.style.maxWidth = "100%";
+    wrap.style.overflowX = "hidden";
+    const table = wrap.querySelector("table");
+    if (!table) {
+      return;
+    }
+    table.style.tableLayout = "fixed";
+    table.style.width = "100%";
+    table.style.maxWidth = "100%";
+    if (!table.classList.contains("strategy-table")) {
+      return;
+    }
+    table.querySelectorAll("th:nth-child(5), td:nth-child(5)").forEach((cell) => {
+      cell.style.maxWidth = "0";
+    });
+    table.querySelectorAll("th:nth-child(7), td:nth-child(7)").forEach((cell) => {
+      cell.style.width = "7.5rem";
+      cell.style.minWidth = "7.5rem";
+    });
+  });
+}
+
 function appendCell(tr, value, options = {}) {
   const td = document.createElement("td");
   if (options.className) {
@@ -520,8 +544,27 @@ function formatTaskName(name) {
   return TASK_NAME_LABEL[alt] || name;
 }
 
+let overviewTaskTimer = 0;
+let overviewTaskStamp = "";
+
 function renderTasks(tasks) {
   const list = document.getElementById("task-list");
+  if (!list) {
+    return;
+  }
+  const stamp = JSON.stringify(
+    (tasks || []).map((task) => [
+      task.run_id,
+      task.status,
+      task.started_at,
+      task.finished_at,
+      task.message,
+    ]),
+  );
+  if (stamp === overviewTaskStamp) {
+    return;
+  }
+  overviewTaskStamp = stamp;
   list.innerHTML = "";
   if (!tasks.length) {
     const li = document.createElement("li");
@@ -548,6 +591,30 @@ function renderTasks(tasks) {
     li.append(left, tag);
     list.appendChild(li);
   }
+}
+
+function pollOverviewTasks() {
+  if (currentPage() !== "overview" || document.hidden) {
+    return;
+  }
+  requestJson("/api/status")
+    .then((status) => {
+      renderTasks(status.recent_tasks || []);
+    })
+    .catch(() => {});
+}
+
+function watchOverviewTasks() {
+  if (overviewTaskTimer) {
+    return;
+  }
+  pollOverviewTasks();
+  overviewTaskTimer = window.setInterval(pollOverviewTasks, 2000);
+}
+
+function stopOverviewTasks() {
+  window.clearInterval(overviewTaskTimer);
+  overviewTaskTimer = 0;
 }
 
 function renderKv(containerId, entries) {
@@ -1598,9 +1665,12 @@ function showPage(page) {
   setText("page-title", PAGE_TITLES[page]);
   if (page === "overview") {
     loadOverviewAlerts().catch(() => {});
+    watchOverviewTasks();
     if ((location.hash || "").includes("overview-alerts")) {
       window.setTimeout(focusOverviewAlerts, 80);
     }
+  } else {
+    stopOverviewTasks();
   }
   if (page === "data") {
     loadQualityIssues().catch((error) => {
@@ -2052,8 +2122,16 @@ document.getElementById("confirm-reason")?.addEventListener("keydown", (event) =
   }
 });
 window.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && confirmResolver) {
+  if (event.key !== "Escape") {
+    return;
+  }
+  if (confirmResolver) {
     closeConfirmDialog(false);
+    return;
+  }
+  const lookup = document.getElementById("lookup-dialog");
+  if (lookup && !lookup.hidden) {
+    closeLookupDialog();
   }
 });
 
@@ -2564,7 +2642,8 @@ function enhanceSelect(select) {
 }
 
 function enhanceMultiSelect(select, modes) {
-  const maxTags = Math.max(1, Number(select.dataset.maxTags || 1) || 1);
+  const parsedMax = Number(select.dataset.maxTags);
+  const maxTags = Number.isFinite(parsedMax) && parsedMax > 0 ? parsedMax : Number.POSITIVE_INFINITY;
   const wrap = document.createElement("div");
   wrap.className = modes.includes("wide")
     ? "asqt-select asqt-select-wide asqt-select-multi"
@@ -2871,6 +2950,367 @@ document.getElementById("sidebar-toggle").addEventListener("click", () => {
 document.getElementById("tasks-toggle").addEventListener("click", () => {
   const row = document.querySelector(".overview-alerts-row") || document.querySelector(".overview-workbench");
   applyTasks(!row?.classList.contains("tasks-collapsed"));
+});
+
+const LOOKUP_TYPE_LABEL = { stock: "股票", etf: "ETF" };
+let lookupTimer = 0;
+let lookupSeq = 0;
+
+function applyLookup(collapsed) {
+  document.querySelector(".shell")?.classList.toggle("lookup-collapsed", collapsed);
+  localStorage.setItem("asqt-lookup", collapsed ? "1" : "0");
+  const btn = document.getElementById("lookup-toggle");
+  if (btn) {
+    btn.textContent = collapsed ? "⟨" : "⟩";
+    btn.setAttribute("aria-label", collapsed ? "展开查询助手" : "收起查询助手");
+  }
+}
+
+function lookupDash(value) {
+  if (value == null || value === "") {
+    return "—";
+  }
+  return String(value);
+}
+
+function lookupMoney(value) {
+  if (value == null || value === "") {
+    return "—";
+  }
+  const number = Number(value);
+  if (Number.isNaN(number)) {
+    return String(value);
+  }
+  if (Math.abs(number) >= 10000) {
+    return `${(number / 10000).toFixed(2)} 万`;
+  }
+  return number.toFixed(2);
+}
+
+function renderLookupHits(items, q) {
+  const list = document.getElementById("lookup-results");
+  if (!list) {
+    return;
+  }
+  list.innerHTML = "";
+  if (!q) {
+    setHint("lookup-hint", "模糊匹配股票池内标的，点结果看 F10 资料。");
+    return;
+  }
+  if (!items.length) {
+    setHint("lookup-hint", `没有匹配「${q}」`);
+    return;
+  }
+  setHint("lookup-hint", `${items.length} 条结果`);
+  for (const row of items) {
+    const li = document.createElement("li");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    const title = document.createElement("span");
+    title.className = "lookup-sym";
+    title.textContent = `${row.name || "—"}  ${row.symbol}`;
+    const meta = document.createElement("span");
+    meta.className = "lookup-meta";
+    meta.textContent = `${LOOKUP_TYPE_LABEL[row.instrument_type] || row.instrument_type} · ${row.exchange || "—"}`;
+    btn.append(title, meta);
+    btn.addEventListener("click", () => {
+      openLookupProfile(row.symbol).catch((error) => showToast(error.message || "查询失败", "block"));
+    });
+    li.appendChild(btn);
+    list.appendChild(li);
+  }
+}
+
+async function runLookupSearch(q) {
+  const seq = ++lookupSeq;
+  const needle = (q || "").trim();
+  if (!needle) {
+    renderLookupHits([], "");
+    return;
+  }
+  const payload = await requestJson(`/api/lookup/search?q=${encodeURIComponent(needle)}&limit=20`);
+  if (seq !== lookupSeq) {
+    return;
+  }
+  renderLookupHits(payload.items || [], needle);
+}
+
+function scheduleLookupSearch() {
+  window.clearTimeout(lookupTimer);
+  lookupTimer = window.setTimeout(() => {
+    runLookupSearch(document.getElementById("lookup-q")?.value || "").catch((error) => {
+      setHint("lookup-hint", error.message || "查询失败");
+    });
+  }, 200);
+}
+
+function lookupKv(entries) {
+  const grid = document.createElement("div");
+  grid.className = "lookup-kv";
+  for (const [label, value] of entries) {
+    const item = document.createElement("div");
+    const k = document.createElement("span");
+    const v = document.createElement("strong");
+    k.textContent = label;
+    v.textContent = lookupDash(value);
+    item.append(k, v);
+    grid.appendChild(item);
+  }
+  return grid;
+}
+
+function lookupSection(title, child) {
+  const section = document.createElement("section");
+  section.className = "lookup-section";
+  const h = document.createElement("h4");
+  h.textContent = title;
+  section.append(h, child);
+  return section;
+}
+
+function lookupTable(headers, rows) {
+  if (!rows.length) {
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.textContent = "暂无";
+    return p;
+  }
+  const table = document.createElement("table");
+  table.className = "lookup-mini";
+  const thead = document.createElement("thead");
+  const hr = document.createElement("tr");
+  for (const name of headers) {
+    const th = document.createElement("th");
+    th.textContent = name;
+    hr.appendChild(th);
+  }
+  thead.appendChild(hr);
+  const body = document.createElement("tbody");
+  for (const row of rows) {
+    const tr = document.createElement("tr");
+    for (const cell of row) {
+      const td = document.createElement("td");
+      td.textContent = lookupDash(cell);
+      tr.appendChild(td);
+    }
+    body.appendChild(tr);
+  }
+  table.append(thead, body);
+  return table;
+}
+
+function closeLookupDialog() {
+  const dialog = document.getElementById("lookup-dialog");
+  if (dialog) {
+    dialog.hidden = true;
+  }
+}
+
+function paintLookupProfile(payload) {
+  const inst = payload.instrument || {};
+  const quote = payload.quote || {};
+  setText("lookup-dialog-title", `${inst.name || "标的"} ${inst.symbol || ""}`.trim());
+  const sub = document.getElementById("lookup-dialog-sub");
+  if (sub) {
+    const bits = [
+      LOOKUP_TYPE_LABEL[inst.instrument_type] || inst.instrument_type,
+      inst.exchange,
+      (payload.tags || []).join(" / "),
+      payload.sources?.tushare ? "Tushare F10" : "本地档案",
+    ].filter(Boolean);
+    sub.textContent = bits.join(" · ");
+    sub.hidden = !bits.length;
+  }
+  const host = document.getElementById("lookup-dialog-body");
+  if (!host) {
+    return;
+  }
+  host.innerHTML = "";
+  host.appendChild(
+    lookupSection(
+      "基本资料",
+      lookupKv([
+        ["代码", inst.symbol],
+        ["名称", inst.name],
+        ["类型", LOOKUP_TYPE_LABEL[inst.instrument_type] || inst.instrument_type],
+        ["交易所", inst.exchange],
+        ["板块", inst.board],
+        ["上市日", inst.list_date],
+        ["状态", inst.status],
+        ["ST", inst.is_st ? "是" : "否"],
+        ["标签", (payload.tags || []).join("、") || "—"],
+      ]),
+    ),
+  );
+  host.appendChild(
+    lookupSection(
+      "最新行情",
+      lookupKv([
+        ["日期", quote.trade_date],
+        ["收盘", quote.close],
+        ["开盘", quote.open],
+        ["最高", quote.high],
+        ["最低", quote.low],
+        ["涨跌", quote.change_pct == null ? "—" : formatPct(quote.change_pct)],
+        ["成交量", lookupMoney(quote.volume)],
+        ["成交额", lookupMoney(quote.amount)],
+      ]),
+    ),
+  );
+  const lim = payload.limit;
+  if (lim) {
+    host.appendChild(
+      lookupSection(
+        "涨跌停 / 停牌",
+        lookupKv([
+          ["日期", lim.trade_date],
+          ["涨停", lim.limit_up],
+          ["跌停", lim.limit_down],
+          ["停牌", lim.is_suspended ? "是" : "否"],
+          ["原因", lim.reason],
+        ]),
+      ),
+    );
+  }
+  const company = payload.company || {};
+  if (Object.keys(company).length) {
+    host.appendChild(
+      lookupSection(
+        "公司概况",
+        lookupKv([
+          ["董事长", company.chairman],
+          ["总经理", company.manager],
+          ["注册资本", company.reg_capital],
+          ["成立日期", company.setup_date || company.found_date],
+          ["省份", company.province],
+          ["城市", company.city],
+          ["员工数", company.employees],
+          ["网站", company.website],
+          ["基金管理人", company.management],
+          ["托管人", company.custodian],
+        ].filter(([, value]) => value != null && value !== "")),
+      ),
+    );
+    if (company.main_business || company.introduction) {
+      const p = document.createElement("p");
+      p.className = "lookup-prose";
+      p.textContent = company.main_business || company.introduction;
+      host.appendChild(lookupSection("主营 / 简介", p));
+    }
+  }
+  const valuation = payload.valuation || {};
+  if (Object.keys(valuation).length) {
+    host.appendChild(
+      lookupSection(
+        "估值",
+        lookupKv([
+          ["PE", valuation.pe],
+          ["PE(TTM)", valuation.pe_ttm],
+          ["PB", valuation.pb],
+          ["PS", valuation.ps],
+          ["换手率%", valuation.turnover_rate],
+          ["股息率%", valuation.dv_ratio],
+          ["总市值", lookupMoney(valuation.total_mv)],
+          ["流通市值", lookupMoney(valuation.circ_mv)],
+        ]),
+      ),
+    );
+  }
+  const financials = payload.financials || [];
+  if (financials.length) {
+    host.appendChild(
+      lookupSection(
+        "财务摘要",
+        lookupTable(
+          ["报告期", "ROE", "ROA", "毛利率", "净利率", "EPS", "BPS"],
+          financials.map((row) => [
+            row.end_date,
+            row.roe,
+            row.roa,
+            row.grossprofit_margin,
+            row.netprofit_margin,
+            row.eps,
+            row.bps,
+          ]),
+        ),
+      ),
+    );
+  }
+  const holders = payload.holders || [];
+  if (holders.length) {
+    host.appendChild(
+      lookupSection(
+        "十大股东",
+        lookupTable(
+          ["股东", "持股", "占比%", "报告期"],
+          holders.map((row) => [row.holder_name, lookupMoney(row.hold_amount), row.hold_ratio, row.end_date]),
+        ),
+      ),
+    );
+  }
+  const dividends = payload.dividends || [];
+  if (dividends.length) {
+    host.appendChild(
+      lookupSection(
+        "分红",
+        lookupTable(
+          ["报告期", "方案", "派息", "送转"],
+          dividends.map((row) => [row.end_date, row.div_proc, row.cash_div, row.stk_div]),
+        ),
+      ),
+    );
+  }
+  const bars = payload.bars || [];
+  if (bars.length) {
+    host.appendChild(
+      lookupSection(
+        "近期日K",
+        lookupTable(
+          ["日期", "开", "高", "低", "收", "量"],
+          bars.map((row) => [row.trade_date, row.open, row.high, row.low, row.close, lookupMoney(row.volume)]),
+        ),
+      ),
+    );
+  }
+}
+
+async function openLookupProfile(symbol) {
+  const dialog = document.getElementById("lookup-dialog");
+  const host = document.getElementById("lookup-dialog-body");
+  setText("lookup-dialog-title", "加载中…");
+  const sub = document.getElementById("lookup-dialog-sub");
+  if (sub) {
+    sub.hidden = true;
+  }
+  if (host) {
+    host.innerHTML = "";
+  }
+  if (dialog) {
+    dialog.hidden = false;
+  }
+  const payload = await requestJson(`/api/lookup/profile?symbol=${encodeURIComponent(symbol)}`);
+  paintLookupProfile(payload);
+}
+
+document.getElementById("lookup-toggle")?.addEventListener("click", () => {
+  applyLookup(!document.querySelector(".shell")?.classList.contains("lookup-collapsed"));
+});
+document.getElementById("lookup-q")?.addEventListener("input", scheduleLookupSearch);
+document.getElementById("lookup-q")?.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") {
+    return;
+  }
+  event.preventDefault();
+  const first = document.querySelector("#lookup-results button");
+  if (first) {
+    first.click();
+  }
+});
+document.getElementById("lookup-dialog-close")?.addEventListener("click", closeLookupDialog);
+document.getElementById("lookup-dialog")?.addEventListener("click", (event) => {
+  if (event.target?.id === "lookup-dialog") {
+    closeLookupDialog();
+  }
 });
 
 function applySettingsPanelCollapse(panel, collapsed) {
@@ -3211,7 +3651,8 @@ function renderStrategyVersions(rows) {
     appendCell(tr, STRATEGY_LABEL[row.strategy_id] || row.strategy_id);
     appendCell(tr, row.version || "v1");
     appendCell(tr, STRATEGY_STATUS_LABEL[row.status] || row.status || "-", { tone: toneForStrategy(row.status) });
-    appendCell(tr, formatParameterSetDisplay(row));
+    const paramsLabel = formatParameterSetDisplay(row);
+    appendCell(tr, paramsLabel, { title: paramsLabel });
     appendCell(tr, row.code_version || "-");
     appendCell(tr, row.effective_date || "-");
     tr.addEventListener("click", (event) => {
@@ -3224,6 +3665,7 @@ function renderStrategyVersions(rows) {
   });
   paintStrategyPager(total, strategyPage, pages);
   syncStrategyBatchUi();
+  containPageWidth();
 }
 
 const STRATEGY_PAGE_SIZE = 10;
@@ -5045,29 +5487,18 @@ function paperHaltStatus(accountOrSummary) {
   return "active";
 }
 
-function paperRequestedDays() {
-  const input = document.getElementById("paper-run-days");
-  const n = Number(input?.value);
-  return Number.isFinite(n) && n > 0 ? n : null;
-}
-
 /** Display status for book cards: 待运行 / 运行中 / 已完成, or risk 平仓中 / 已平仓. */
 function paperBookDisplayStatus(accountOrSummary, options = {}) {
   const halt = paperHaltStatus(accountOrSummary);
   if (halt === "flatten_pending" || halt === "halted") {
     return halt;
   }
-  const summary = accountOrSummary?.summary || accountOrSummary || {};
-  const sessions = Number(summary.sessions || 0);
-  if (sessions <= 0) {
-    return "pending";
-  }
   const busy = options.busy != null ? Boolean(options.busy) : paperBusy;
-  const target = options.targetDays != null ? options.targetDays : paperRequestedDays();
-  if (busy && (target == null || sessions < target)) {
+  if (busy) {
     return "running";
   }
-  return "done";
+  const summary = accountOrSummary?.summary || accountOrSummary || {};
+  return Number(summary.sessions || 0) > 0 ? "done" : "pending";
 }
 
 function paperHaltCounts(ids) {
@@ -5427,6 +5858,21 @@ function mergePaperTimelines(ids, initialCash) {
   return timeline;
 }
 
+function paperSelectedStrategyLabel() {
+  const ids = getPaperSelectedStrategyIds();
+  const select = document.getElementById("paper-run-id");
+  const allCount = select
+    ? [...select.options].filter((option) => option.value && option.value !== "all").length
+    : 0;
+  if (!ids.length) {
+    return "-";
+  }
+  if (allCount && ids.length === allCount) {
+    return "全部";
+  }
+  return ids.map((id) => STRATEGY_LABEL[id] || id).join("、");
+}
+
 function renderPaperGates(kill, paperGate, account, multi) {
   const summary = document.getElementById("paper-summary");
   if (!summary) {
@@ -5434,9 +5880,11 @@ function renderPaperGates(kill, paperGate, account, multi) {
   }
   summary.innerHTML = "";
   summary.className = "paper-gates";
+  const strategyLabel = paperSelectedStrategyLabel();
   const gates = [
     ["模拟交易", paperGate?.enabled ? "开" : "关"],
     ["急停", kill?.engaged ? "开" : "关"],
+    ["策略", strategyLabel],
   ];
   if (isPaperOverview() && multi) {
     const stats = paperSessionStats(paperBookIds());
@@ -5450,7 +5898,6 @@ function renderPaperGates(kill, paperGate, account, multi) {
       gates.push(["风控", `平仓中 ${haltCounts.pending} · 已平仓 ${haltCounts.halted}`]);
     }
   } else if (account && account.strategy_id && account.strategy_id !== PAPER_OVERVIEW_ID) {
-    gates.push(["策略", STRATEGY_LABEL[account.strategy_id] || account.strategy_id || "-"]);
     const status = paperBookDisplayStatus(account);
     gates.push(["状态", PAPER_BOOK_STATUS_LABEL[status] || status]);
   }
@@ -5461,6 +5908,9 @@ function renderPaperGates(kill, paperGate, account, multi) {
     const v = document.createElement("strong");
     k.textContent = label;
     v.textContent = value;
+    if (label === "策略") {
+      v.title = value;
+    }
     if (label === "交易日" && String(value).includes("未对齐")) {
       v.className = "warn";
     }
@@ -5528,6 +5978,11 @@ function renderPaperBookSwitcher(ids) {
       const badge = document.createElement("span");
       badge.className = `paper-halt-badge is-${String(card.haltStatus).split("_").join("-")}`;
       badge.textContent = PAPER_HALT_STATUS_LABEL[card.haltStatus];
+      titleRow.appendChild(badge);
+    } else if (!card.overview && card.displayStatus === "running") {
+      const badge = document.createElement("span");
+      badge.className = "paper-halt-badge is-running";
+      badge.textContent = PAPER_BOOK_STATUS_LABEL.running;
       titleRow.appendChild(badge);
     } else if (!card.overview && card.displayStatus === "done") {
       const badge = document.createElement("span");
@@ -6101,6 +6556,13 @@ function selectPaperDay(date, origin = "hover") {
     ["卖出", `${sells} 条`, "side-sell"],
     ["累计", formatPct(point.row.total_return), pnlClass(point.row.total_return)],
   ];
+  const yearBase = Number(paperChartView.yearNavBase);
+  if (yearBase > 0) {
+    const asset = Number(point.row.total_asset);
+    const yearRet = Number.isFinite(asset) ? asset / yearBase - 1 : null;
+    lines.push(["当年", formatPct(yearRet), pnlClass(yearRet)]);
+  }
+  lines.push(["净值率", formatPct(point.row.daily_return), pnlClass(point.row.daily_return)]);
   for (const [label, value, className] of lines) {
     const p = document.createElement("p");
     p.className = className || "";
@@ -7103,7 +7565,23 @@ function renderPaperChart(rows, board, opts = {}) {
   tooltip.hidden = true;
   host.appendChild(svg);
   host.appendChild(tooltip);
-  paperChartView = { points, selected: null, cursor, hCursor, marker, axisDot, yAxisDot, yValueLabel, yValueBg, tooltip, host, width, height, pad };
+  paperChartView = {
+    points,
+    selected: null,
+    cursor,
+    hCursor,
+    marker,
+    axisDot,
+    yAxisDot,
+    yValueLabel,
+    yValueBg,
+    tooltip,
+    host,
+    width,
+    height,
+    pad,
+    yearNavBase: year !== "all" && Number.isFinite(yearStart) && yearStart > 0 ? yearStart : null,
+  };
 }
 
 document.getElementById("paper-chart-years")?.addEventListener("click", (event) => {
@@ -8379,12 +8857,24 @@ applyTheme(localStorage.getItem("asqt-theme") || "dark");
 enhanceSelects();
 bindTips();
 applySidebar(localStorage.getItem("asqt-sidebar") === "1");
+applyLookup(localStorage.getItem("asqt-lookup") !== "0");
 applyTasks(localStorage.getItem("asqt-tasks") === "1");
 initSettingsCollapsiblePanels();
 showPage(currentPage());
+containPageWidth();
+window.addEventListener("resize", containPageWidth);
 refresh().catch((error) => {
   setText("runtime", `加载失败：${error.message}`);
   showActionError(`加载失败：${error.message}`);
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    stopOverviewTasks();
+    return;
+  }
+  if (currentPage() === "overview") {
+    watchOverviewTasks();
+  }
 });
 resumeActiveSync();
 resumeActiveBacktest();

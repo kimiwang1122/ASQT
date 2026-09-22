@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from asqt.config import Settings, get_settings
 from asqt.db import connect, execute, initialize_database, query_all
-from asqt.pipeline import check_market_daily, pull_daily_append
+from asqt.pipeline import check_market_daily, pull_daily_append, _iso_minus_days
 from asqt.session import session_asof_date
 from asqt.storage import market_daily_span
 from asqt.universe import poc_symbols
@@ -537,9 +537,17 @@ def _execute_sync(
             return _finish(run_id, status="failed", fail_reason="宇宙名单为空，无法追加", settings=settings)
         _set_progress(run_id, settings, pct=1, done=0, total=len(symbols), symbol="")
 
+        last_done = -99
+
         def report(info: dict) -> None:
+            nonlocal last_done
             if _abandoned(run_id, settings):
                 return
+            done = int(info.get("done") or 0)
+            total = int(info.get("total") or 0)
+            if done not in {0, 1, total} and done - last_done < 5:
+                return
+            last_done = done
             _set_progress(
                 run_id,
                 settings,
@@ -584,7 +592,12 @@ def _execute_sync(
         if _abandoned(run_id, settings):
             return get_sync_run(run_id, settings=settings) or {"run_id": run_id, "status": "failed"}
         _set_progress(run_id, settings, pct=95, done=len(symbols), total=len(symbols), symbol="")
-        quality = check_market_daily(settings=settings)
+        asof = today or session_asof_date()
+        quality_start = _iso_minus_days(asof, 14)
+        pull_start = pull.get("start")
+        if pull_start:
+            quality_start = min(str(quality_start), _iso_minus_days(str(pull_start), 10))
+        quality = check_market_daily(settings=settings, expected_symbols=symbols, start=quality_start)
         issue_count = int(quality.get("issue_count") or 0)
         quality_ok = bool(quality.get("ok"))
         trade_allowed = bool(quality.get("trade_allowed"))

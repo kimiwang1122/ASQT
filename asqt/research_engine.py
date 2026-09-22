@@ -11,7 +11,7 @@ from uuid import uuid4
 from asqt.config import Settings, ensure_runtime_dirs, get_settings
 from asqt.db import execute, executemany, initialize_database, query_all
 from asqt.factor_pipeline import compute_factor_frame, write_factor_signals
-from asqt.pipeline import check_market_daily
+from asqt.quality import ContractQualityChecker
 from asqt.selectors import select_targets
 from asqt.storage import read_market_daily
 from asqt.strategies import (
@@ -366,9 +366,14 @@ class LocalResearchEngine:
         dates = sorted({str(row["trade_date"]) for row in rows})
         steps = max(1, len(dates) - 1)
         if progress:
-            progress(0, steps, f"{strategy_id} quality")
+            progress(1, steps, f"{strategy_id} quality")
 
-        quality = check_market_daily(settings=self.settings)
+        quality = ContractQualityChecker().check(
+            "market_daily",
+            asof=dates[-1] if dates else None,
+            records=rows,
+            instruments=query_all("SELECT * FROM instrument_master", settings=self.settings),
+        )
         run_id = str(uuid4())
         held = self._held_lifecycle(strategy_id)
         if held in BLOCK_RESEARCH:
@@ -426,12 +431,24 @@ class LocalResearchEngine:
             from asqt.events import query_events
 
             event_rows = query_events(settings=self.settings, newest_first=False)
+        if progress:
+            progress(max(1, steps // 50), steps, f"{strategy_id} factors")
+
+        def _factor_progress(info: dict[str, Any]) -> None:
+            if not progress:
+                return
+            done = int(info.get("done") or 0)
+            total = max(1, int(info.get("total") or 1))
+            mapped = max(1, min(steps - 1, int(steps * 0.15 * done / total)))
+            progress(mapped, steps, f"{strategy_id} factors {done}/{total}")
+
         factor_payload = compute_factor_frame(
             grouped,
             factor_specs_for(strategy_id, params, events=event_rows, settings=self.settings),
             dates=signal_dates,
             source_run_id=run_id,
             model_version=CODE_VERSION,
+            on_progress=_factor_progress,
         )
         factors_by_date: dict[str, list[dict[str, Any]]] = {}
         for row in factor_payload:

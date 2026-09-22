@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import socket
+from datetime import date
 from typing import Any
 
 from asqt.symbols import from_vendor_code, to_vendor_code
@@ -111,8 +112,14 @@ class BaoStockAdapter:
             )
         )
         adj_close = {_iso_date(row.get("date")): _to_float(row.get("close")) for row in adj_rows}
-        basic = _read_result(bs.query_stock_basic(code=vendor))
-        profile = basic[0] if basic else {}
+        profile: dict[str, Any] = {}
+        try:
+            wide = (date.fromisoformat(end) - date.fromisoformat(start)).days > 14
+        except ValueError:
+            wide = True
+        if wide:
+            basic = _read_result(bs.query_stock_basic(code=vendor))
+            profile = basic[0] if basic else {}
         packed = []
         for row in raw_rows:
             trade_date = _iso_date(row.get("date"))

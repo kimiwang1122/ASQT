@@ -51,5 +51,7 @@ def test_gate_a3_vendor_roundtrip_incl_bj():
 def test_gate_a3_board_and_limit_for_bj():
     assert infer_board("920000.BJ") == "bse"
     assert limit_pct("920000.BJ") == 0.30
+    assert infer_board("302132.SZ") == "chinext"
+    assert limit_pct("302132.SZ") == 0.20
     assert infer_instrument_type("510300.SH") == "etf"
     assert infer_market_from_code("000001") == "SZ"

@@ -169,6 +169,7 @@ STRATEGY_LABEL = {
 
 # (id(grouped), ma/vol params) → (timelines, asof_index). Prefix grouped (tests) misses cache; paper reuses.
 _2560_TL_CACHE: dict[tuple[Any, ...], tuple[dict[str, list], dict[str, dict[str, int]]]] = {}
+_YIN_TL_CACHE: dict[tuple[Any, ...], tuple[dict[str, list], dict[str, dict[str, int]]]] = {}
 # id(events list) → HolderEventIndex. 复盘逐日 weights 必须复用，否则每天重建 17 万行索引。
 _HOLDER_INDEX_CACHE: tuple[int, Any] | None = None
 
@@ -604,6 +605,15 @@ def _weights_via_pipeline(
             suspended=suspended,
             held_symbols=held_symbols,
         )
+    if strategy_id == STOCK_YIN_ARB:
+        return _weights_stock_yin_arb(
+            rows,
+            asof,
+            limits=limits,
+            params=params,
+            market_by_symbol=market_by_symbol,
+            suspended=suspended,
+        )
     grouped = market_by_symbol if market_by_symbol is not None else _by_symbol(rows)
     factors = compute_factor_frame(
         grouped,
@@ -694,6 +704,71 @@ def _weights_stock_2560(
         picked = [symbol for _score, symbol in ranked[:top_k]]
     else:
         picked = keep + [symbol for _score, symbol in entries[:slots]]
+    if not picked:
+        return {}
+    weight = 1.0 / len(picked)
+    return clip_weights({symbol: weight for symbol in picked}, max_weight, gross_limit)
+
+
+def _weights_stock_yin_arb(
+    rows: list[dict[str, Any]],
+    asof: str,
+    *,
+    limits: list[dict[str, Any]] | None = None,
+    params: dict[str, Any] | None = None,
+    market_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
+    suspended: set[tuple[str, str]] | None = None,
+) -> dict[str, float]:
+    from asqt.factors import rule_yin_arb_timeline
+
+    spec = _merged_params(STOCK_YIN_ARB, params)
+    top_k = int(spec["top_k"])
+    max_weight = float(spec["max_weight"])
+    gross_limit = float(spec["gross_limit"])
+    tl_kw = {
+        "ma_fast": int(spec["ma_fast"]),
+        "ma_slow": int(spec["ma_slow"]),
+        "burst_lookback": int(spec["burst_lookback"]),
+        "burst_ratio": float(spec["burst_ratio"]),
+        "pullback_band": float(spec["pullback_band"]),
+        "min_body": float(spec["min_body"]),
+        "ma_gap_max": float(spec["ma_gap_max"]),
+    }
+    grouped = market_by_symbol if market_by_symbol is not None else _by_symbol(rows)
+    tl_key = (
+        id(grouped),
+        tl_kw["ma_fast"],
+        tl_kw["ma_slow"],
+        tl_kw["burst_lookback"],
+        round(tl_kw["burst_ratio"], 6),
+        round(tl_kw["pullback_band"], 6),
+        round(tl_kw["min_body"], 6),
+        round(tl_kw["ma_gap_max"], 6),
+    )
+    packed = _YIN_TL_CACHE.get(tl_key)
+    if packed is None:
+        timelines: dict[str, list] = {}
+        asof_index: dict[str, dict[str, int]] = {}
+        for symbol, series in grouped.items():
+            timelines[symbol] = rule_yin_arb_timeline(series, **tl_kw)
+            asof_index[symbol] = {str(row["trade_date"]): i for i, row in enumerate(series)}
+        packed = (timelines, asof_index)
+        if len(_YIN_TL_CACHE) >= 40:
+            _YIN_TL_CACHE.clear()
+        _YIN_TL_CACHE[tl_key] = packed
+    timelines, asof_index = packed
+    scored: list[tuple[float, str]] = []
+    for symbol, index_map in asof_index.items():
+        if _is_suspended(symbol, asof, limits=limits, suspended=suspended):
+            continue
+        idx = index_map.get(str(asof))
+        if idx is None:
+            continue
+        value = timelines[symbol][idx]
+        if value is not None:
+            scored.append((float(value), symbol))
+    scored.sort(reverse=True)
+    picked = [symbol for _score, symbol in scored[:top_k]]
     if not picked:
         return {}
     weight = 1.0 / len(picked)

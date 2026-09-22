@@ -226,6 +226,67 @@ def adj_open(row: dict[str, Any]) -> float:
     return float(row["open"]) * float(row["adj_factor"])
 
 
+def rule_yin_arb_timeline(
+    hist: Sequence[dict[str, Any]],
+    *,
+    ma_fast: int = 10,
+    ma_slow: int = 20,
+    burst_lookback: int = 5,
+    burst_ratio: float = 1.8,
+    pullback_band: float = 0.025,
+    min_body: float = 0.005,
+    ma_gap_max: float = 0.03,
+) -> list[float | None]:
+    """Per-bar yin-arb score or None; rolling MA so paper grid is O(n) per symbol."""
+    n = len(hist)
+    out: list[float | None] = [None] * n
+    need = max(ma_slow, burst_lookback) + 2
+    if ma_fast < 1 or ma_slow < ma_fast or burst_lookback < 2 or n < need:
+        return out
+    try:
+        opens = [adj_open(item) for item in hist]
+    except (KeyError, TypeError, ValueError):
+        return out
+    closes = closes_asof(hist)
+    vols = [float(item.get("volume") or 0) for item in hist]
+    sum_f = sum(closes[need - ma_fast : need])
+    sum_s = sum(closes[need - ma_slow : need])
+    for end in range(need, n + 1):
+        if end > need:
+            sum_f += closes[end - 1] - closes[end - 1 - ma_fast]
+            sum_s += closes[end - 1] - closes[end - 1 - ma_slow]
+        ma_f = sum_f / ma_fast
+        ma_s = sum_s / ma_slow
+        ma_f_prev = (sum_f - closes[end - 1] + closes[end - 1 - ma_fast]) / ma_fast
+        if ma_f <= 0 or ma_s <= 0 or ma_f <= ma_f_prev:
+            continue
+        if abs(ma_f / ma_s - 1.0) >= ma_gap_max:
+            continue
+        close = closes[end - 1]
+        prev = closes[end - 2]
+        opn = opens[end - 1]
+        if opn <= 0 or close <= 0 or close >= opn or close <= prev:
+            continue
+        if (opn - close) / opn < min_body:
+            continue
+        if abs(close / ma_f - 1.0) > pullback_band:
+            continue
+        start = end - burst_lookback
+        burst = 0.0
+        for j in range(start, end):
+            prev_v = vols[j - 1]
+            if prev_v > 0:
+                burst = max(burst, vols[j] / prev_v)
+        if burst < burst_ratio:
+            continue
+        prior_peak = max(vols[start : end - 1])
+        if prior_peak <= 0 or vols[end - 1] >= prior_peak:
+            continue
+        tightness = 1.0 - abs(close / ma_f - 1.0) / pullback_band
+        out[end - 1] = burst * max(0.0, tightness)
+    return out
+
+
 def rule_yin_arb(
     hist: Sequence[dict[str, Any]],
     *,
@@ -242,42 +303,14 @@ def rule_yin_arb(
     绿柱按阴线（收盘<开盘）计；跌幅看实体 (open-close)/open。收盘>昨收 与
     「相对昨收下跌」互斥，故不采用后者。日 K 无 14:50/次日 10:00，信号只打分。
     """
-    n = len(hist)
-    need = max(ma_slow, burst_lookback) + 2
-    if ma_fast < 1 or ma_slow < ma_fast or burst_lookback < 2 or n < need:
-        return None
-    try:
-        opens = [adj_open(item) for item in hist]
-    except (KeyError, TypeError, ValueError):
-        return None
-    closes = closes_asof(hist)
-    vols = [float(item.get("volume") or 0) for item in hist]
-    ma_f = _sma(closes, ma_fast, end=n)
-    ma_f_prev = _sma(closes, ma_fast, end=n - 1)
-    ma_s = _sma(closes, ma_slow, end=n)
-    if ma_f <= 0 or ma_s <= 0 or ma_f <= ma_f_prev:
-        return None
-    if abs(ma_f / ma_s - 1.0) >= ma_gap_max:
-        return None
-    close = closes[-1]
-    prev = closes[-2]
-    opn = opens[-1]
-    if opn <= 0 or close <= 0 or close >= opn or close <= prev:
-        return None
-    if (opn - close) / opn < min_body:
-        return None
-    if abs(close / ma_f - 1.0) > pullback_band:
-        return None
-    burst = 0.0
-    start = n - burst_lookback
-    for j in range(start, n):
-        prev_v = vols[j - 1]
-        if prev_v > 0:
-            burst = max(burst, vols[j] / prev_v)
-    if burst < burst_ratio:
-        return None
-    prior_peak = max(vols[start : n - 1])
-    if prior_peak <= 0 or vols[-1] >= prior_peak:
-        return None
-    tightness = 1.0 - abs(close / ma_f - 1.0) / pullback_band
-    return burst * max(0.0, tightness)
+    timeline = rule_yin_arb_timeline(
+        hist,
+        ma_fast=ma_fast,
+        ma_slow=ma_slow,
+        burst_lookback=burst_lookback,
+        burst_ratio=burst_ratio,
+        pullback_band=pullback_band,
+        min_body=min_body,
+        ma_gap_max=ma_gap_max,
+    )
+    return timeline[-1] if timeline else None

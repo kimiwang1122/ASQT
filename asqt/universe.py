@@ -23,9 +23,9 @@ COLUMNS = (
 )
 
 STOCK_MIN = 50
-STOCK_MAX = 100
+STOCK_MAX = 300  # lab: fill remaining HS300
 ETF_MIN = 5
-ETF_MAX = 50  # lab raised from POC 12
+ETF_MAX = 200  # lab: unique-index equity ETFs
 CHINEXT_STAR_MAX_SHARE = 0.40
 
 

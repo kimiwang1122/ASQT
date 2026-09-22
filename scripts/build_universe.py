@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Expand POC universe CSVs toward policy caps (≤100 stocks, ≤50 ETFs).
+"""Expand POC universe CSVs toward policy caps (≤300 stocks, ≤200 ETFs).
 
 Uses AkShare CSI index constituents. Liquidity hard filters that need daily bars
 are deferred to post-pull quality; this script prefers HS300 → CSI500 order and
@@ -21,9 +21,12 @@ ROOT = Path(__file__).resolve().parents[1]
 STOCK_PATH = ROOT / "docs" / "p0" / "universe_stock.csv"
 ETF_PATH = ROOT / "docs" / "p0" / "universe_etf.csv"
 
-STOCK_TARGET = 100
-ETF_TARGET = 50
+STOCK_TARGET = 300
+ETF_TARGET = 200
 CHINEXT_STAR_MAX_SHARE = 0.40
+# 中航成飞 002013→302132 换码，BaoStock 复权因子约 6 倍且无对应送转，入池会把质量闸门打成 block。
+STOCK_EXCLUDE = {"302132.SZ"}
+ETF_EXCLUDE = {"510230.SH", "512930.SH"}  # adj_factor 跳变无核实送转，入池会 block 闸门
 COLUMNS = (
     "symbol",
     "name",
@@ -104,7 +107,7 @@ def _exchange_board(code6: str) -> tuple[str, str, str]:
         return f"{code6}.SH", "SH", "main" if not code6.startswith("688") else "star"
     if code6.startswith("688"):
         return f"{code6}.SH", "SH", "star"
-    if code6.startswith("300") or code6.startswith("301"):
+    if code6.startswith(("300", "301", "302")):
         return f"{code6}.SZ", "SZ", "chinext"
     if code6.startswith(("000", "001", "002", "003")):
         return f"{code6}.SZ", "SZ", "main"
@@ -116,22 +119,63 @@ def _is_st(name: str) -> bool:
 
 
 def _fetch_csindex(symbol: str) -> list[tuple[str, str]]:
+    errors: list[str] = []
+    try:
+        return _fetch_tushare_index(symbol)
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"tushare {symbol}: {exc}")
+    try:
+        return _fetch_akshare_index(symbol)
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"akshare {symbol}: {exc}")
+    raise RuntimeError("; ".join(errors))
+
+
+def _fetch_akshare_index(symbol: str) -> list[tuple[str, str]]:
     import akshare as ak
 
     df = ak.index_stock_cons_csindex(symbol=symbol)
-    code_col = "成分券代码"
-    name_col = "成分券名称"
     out: list[tuple[str, str]] = []
     for _, row in df.iterrows():
-        code = str(row[code_col]).zfill(6)
-        name = str(row[name_col]).strip()
+        code = str(row["成分券代码"]).zfill(6)
+        name = str(row["成分券名称"]).strip()
         out.append((code, name))
     return out
 
 
+def _fetch_tushare_index(symbol: str) -> list[tuple[str, str]]:
+    from asqt.adapters.tushare_source import TushareAdapter
+
+    adapter = TushareAdapter()
+    ts_code = f"{symbol}.SH"
+    weights = adapter._query(
+        "index_weight",
+        {"index_code": ts_code, "start_date": "20260801", "end_date": "20260831"},
+        "index_code,con_code,trade_date,weight",
+    )
+    if not weights:
+        raise RuntimeError(f"empty index_weight for {ts_code}")
+    basics = adapter._query("stock_basic", {"list_status": "L"}, "ts_code,name")
+    names = {str(row.get("ts_code")): str(row.get("name") or "").strip() for row in basics}
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for row in sorted(weights, key=lambda item: -float(item.get("weight") or 0)):
+        con = str(row.get("con_code") or "")
+        if not con or con in seen:
+            continue
+        seen.add(con)
+        name = names.get(con, "")
+        if not name:
+            continue
+        out.append((con.split(".")[0], name))
+    if not out:
+        raise RuntimeError(f"no named constituents for {ts_code}")
+    return out
+
+
 def expand_stocks(existing: list[dict[str, str]], asof: str) -> list[dict[str, str]]:
-    have = {row["symbol"] for row in existing}
-    rows = list(existing)
+    have = {row["symbol"] for row in existing if row["symbol"] not in STOCK_EXCLUDE}
+    rows = [row for row in existing if row["symbol"] not in STOCK_EXCLUDE]
     asof_date = asof or (existing[0]["asof_date"] if existing else "")
 
     sources = [
@@ -156,7 +200,7 @@ def expand_stocks(existing: list[dict[str, str]], asof: str) -> list[dict[str, s
                 symbol, exchange, board = _exchange_board(code6)
             except ValueError:
                 continue
-            if symbol in have:
+            if symbol in have or symbol in STOCK_EXCLUDE:
                 continue
             chinext_star = sum(1 for r in rows if r["board"] in {"chinext", "star"})
             if board in {"chinext", "star"} and (chinext_star + 1) / (len(rows) + 1) > CHINEXT_STAR_MAX_SHARE:
@@ -178,31 +222,138 @@ def expand_stocks(existing: list[dict[str, str]], asof: str) -> list[dict[str, s
     return rows
 
 
+_ETF_SKIP = re.compile(
+    r"货币|债券|国债|城投|可转债|短融|同业存单|信用债|中债|公司债|地方债|地债|政金债|"
+    r"黄金|原油|商品|豆粕|期货|"
+    r"REIT|REITs|港股|恒生|纳斯达克|标普|日经|德国|亚太|全球|跨境|美元|"
+    r"杠杆|反向|双向|中概|美股|沙特|法国|韩国|印度|越南|巴西|MSCI|FOF"
+)
+
+
+def _keep_etf_row(row: dict[str, str]) -> bool:
+    symbol = row.get("symbol") or ""
+    if symbol in ETF_EXCLUDE or symbol.startswith("511"):
+        return False
+    blob = f"{row.get('name','')} {row.get('index_name','')}"
+    return _ETF_SKIP.search(blob) is None
+
+
+_ETF_BROAD = frozenset(
+    {
+        "沪深300",
+        "中证500",
+        "中证800",
+        "中证1000",
+        "中证2000",
+        "中证A50",
+        "中证A100",
+        "中证A500",
+        "上证50",
+        "上证180",
+        "上证综指",
+        "上证指数",
+        "深证100",
+        "深证成指",
+        "创业板指",
+        "创业板50",
+        "科创50",
+        "科创100",
+        "科创成长",
+        "国证2000",
+        "双创50",
+        "上证380",
+        "中证全A",
+        "上证红利",
+        "中证红利",
+        "红利低波",
+    }
+)
+
+
+def _etf_board_pool(index_name: str) -> tuple[str, str]:
+    if index_name in _ETF_BROAD:
+        return "broad_index", "etf_broad"
+    return "sector", "etf_sector_fallback"
+
+
+def _fetch_tushare_etfs() -> list[dict[str, str]]:
+    from asqt.adapters.tushare_source import TushareAdapter
+    from asqt.symbols import infer_instrument_type
+
+    adapter = TushareAdapter()
+    fields = "ts_code,csname,extname,index_name,setup_date,list_date,list_status,exchange,etf_type"
+    raw: list[dict] = []
+    for exchange in ("SH", "SZ"):
+        raw.extend(adapter._query("etf_basic", {"list_status": "L", "exchange": exchange}, fields))
+    best: dict[str, dict[str, str]] = {}
+    for row in raw:
+        if str(row.get("etf_type") or "") != "纯境内":
+            continue
+        symbol = str(row.get("ts_code") or "").strip()
+        if symbol.startswith("511"):
+            continue
+        try:
+            if infer_instrument_type(symbol) != "etf":
+                continue
+        except ValueError:
+            continue
+        index_name = str(row.get("index_name") or "").strip()
+        name = str(row.get("csname") or row.get("extname") or "").strip()
+        blob = " ".join(str(row.get(key) or "") for key in ("csname", "extname", "index_name"))
+        if not symbol or not index_name or not name or _ETF_SKIP.search(blob):
+            continue
+        list_date = str(row.get("list_date") or "99999999")
+        prev = best.get(index_name)
+        if prev is None or list_date < prev["_list"]:
+            exchange = "SH" if symbol.endswith(".SH") else "SZ"
+            board, pool = _etf_board_pool(index_name)
+            best[index_name] = {
+                "symbol": symbol,
+                "name": name,
+                "instrument_type": "etf",
+                "exchange": exchange,
+                "board": board,
+                "pool": pool,
+                "index_name": index_name,
+                "reason": "wide_lab" if board == "broad_index" else "sector_lab",
+                "_list": list_date,
+            }
+    ranked = sorted(best.values(), key=lambda item: item["_list"])
+    for item in ranked:
+        item.pop("_list", None)
+    return ranked
+
+
 def expand_etfs(existing: list[dict[str, str]], asof: str) -> list[dict[str, str]]:
-    rows = list(existing)
+    rows = [row for row in existing if _keep_etf_row(row)]
     have_sym = {row["symbol"] for row in rows}
     have_idx = {row["index_name"] for row in rows}
     asof_date = asof or (existing[0]["asof_date"] if existing else "")
-    for item in EXTRA_ETFS:
+
+    extras = list(EXTRA_ETFS)
+    try:
+        extras = _fetch_tushare_etfs() + extras
+    except Exception as exc:  # noqa: BLE001
+        print(f"tushare etf_basic: {exc}")
+
+    for item in extras:
         if len(rows) >= ETF_TARGET:
             break
         idx = item["index_name"]
-        if idx in have_idx:
+        if idx in have_idx or item["symbol"] in have_sym or item["symbol"] in ETF_EXCLUDE:
             continue
-        if item["symbol"] in have_sym:
-            continue
-        if "沪深300" in idx and "沪深300" in have_idx:
+        if item["symbol"].startswith("511"):
             continue
         rows.append(
             {
                 "symbol": item["symbol"],
                 "name": item["name"],
                 "instrument_type": "etf",
-                "exchange": "SH" if item["symbol"].endswith(".SH") else "SZ",
+                "exchange": item.get("exchange") or ("SH" if item["symbol"].endswith(".SH") else "SZ"),
                 "board": item["board"],
                 "pool": item["pool"],
                 "index_name": idx,
-                "reason": item["reason"],
+                "reason": item.get("reason") or ("wide_lab" if item["board"] == "broad_index" else "sector_lab"),
                 "asof_date": asof_date,
             }
         )

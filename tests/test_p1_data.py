@@ -271,6 +271,12 @@ def test_check_market_daily_ignores_unclosed_session(tmp_path, monkeypatch):
     result = check_market_daily(settings=settings, expected_symbols=["000001.SZ"])
     assert result["trade_allowed"] is True
     assert not any(item.get("trade_date") == "2026-09-08" for item in result["issues"])
+    windowed = check_market_daily(
+        settings=settings,
+        expected_symbols=["000001.SZ"],
+        start="2026-09-07",
+    )
+    assert windowed["trade_allowed"] is True
 
 
 def test_resolve_append_window_from_latest_and_empty():
@@ -301,6 +307,9 @@ def test_pull_daily_append_skips_without_store_and_merges_new_dates(tmp_path):
     assert result["skipped"] is False
     stored = read_market_daily(symbol="000001.SZ", settings=settings)
     assert {row["trade_date"] for row in stored} == {"2024-01-02", "2024-01-03"}
+    from asqt.storage import market_daily_row_count
+
+    assert market_daily_row_count(settings) == 2
 
 
 def test_upsert_empty_records_does_not_wipe_parquet(tmp_path):

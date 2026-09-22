@@ -240,14 +240,20 @@ def suggest_parameter_set_id(strategy_id: str, params: dict[str, Any]) -> str:
         band = float(params.get("pullback_band", 0.025))
         ratio = float(params.get("burst_ratio", 1.8))
         gap = float(params.get("ma_gap_max", 0.03))
-        return (
-            f"stock_yin_arb.k{int(params['top_k'])}"
-            f".f{int(params['ma_fast'])}.s{int(params['ma_slow'])}"
-            f".bl{int(params['burst_lookback'])}"
-            f".br{int(round(ratio * 100))}"
-            f".b{int(round(band * 1000))}"
-            f".mg{int(round(gap * 1000))}"
-        )
+        parts = [
+            f"stock_yin_arb.k{int(params['top_k'])}",
+            f"f{int(params['ma_fast'])}.s{int(params['ma_slow'])}",
+            f"bl{int(params['burst_lookback'])}",
+            f"br{int(round(ratio * 100))}",
+            f"b{int(round(band * 1000))}",
+            f"mg{int(round(gap * 1000))}",
+        ]
+        sl = abs(float(params.get("stop_loss") or 0))
+        tp = float(params.get("take_profit") or 0)
+        if sl > 0 or tp > 0:
+            parts.append(f"sl{int(round(sl * 100))}")
+            parts.append(f"tp{int(round(tp * 100))}")
+        return ".".join(parts)
     parts = [strategy_id] + [
         f"{key}{params[key]}"
         for key in sorted(params)
@@ -264,6 +270,22 @@ def stock_2560_short_id(params: dict[str, Any]) -> str:
         f"s{int(params['ma_slow'])}",
         f"vs{int(params['vol_slow'])}",
         f"b{int(round(band * 1000))}",
+    ]
+    sl = abs(float(params.get("stop_loss") or 0))
+    tp = float(params.get("take_profit") or 0)
+    if sl > 0 or tp > 0:
+        parts.append(f"sl{int(round(sl * 100))}")
+        parts.append(f"tp{int(round(tp * 100))}")
+    return ".".join(parts)
+
+
+def stock_yin_arb_short_id(params: dict[str, Any]) -> str:
+    """k10.br180.b25.bl5 or k10.br180.b25.bl5.sl4.tp20"""
+    parts = [
+        f"k{int(params['top_k'])}",
+        f"br{int(round(float(params['burst_ratio']) * 100))}",
+        f"b{int(round(float(params['pullback_band']) * 1000))}",
+        f"bl{int(params['burst_lookback'])}",
     ]
     sl = abs(float(params.get("stop_loss") or 0))
     tp = float(params.get("take_profit") or 0)

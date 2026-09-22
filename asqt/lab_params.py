@@ -10,7 +10,7 @@ from asqt.config import Settings, ensure_runtime_dirs, get_settings
 from asqt.db import execute, initialize_database
 from asqt.ops import _setting_value
 from asqt.strategies import STRATEGY_SPECS, pin_strategy_params
-from asqt.tune import stock_2560_short_id, suggest_parameter_set_id
+from asqt.tune import stock_2560_short_id, stock_yin_arb_short_id, suggest_parameter_set_id
 
 PAPER_LAB_DEFAULTS_KEY = "paper.lab_defaults"
 PAPER_LAB_PRESETS_KEY = "paper.lab_presets"
@@ -125,6 +125,20 @@ STOCK_2560_PRESETS: list[dict[str, Any]] = [
         "stop_loss": 0.08,
         "take_profit": 0.30,
     },
+]
+
+# PaperBroker 阴线套利收益 Top10（2018-01-02→2026-09-21，佣金/印花税/滑点/整手）
+STOCK_YIN_ARB_PRESETS: list[dict[str, Any]] = [
+    {"top_k": 10, "burst_ratio": 1.5, "pullback_band": 0.03, "burst_lookback": 5},
+    {"top_k": 10, "burst_ratio": 1.5, "pullback_band": 0.025, "burst_lookback": 5},
+    {"top_k": 10, "burst_ratio": 1.8, "pullback_band": 0.025, "burst_lookback": 5},
+    {"top_k": 5, "burst_ratio": 1.5, "pullback_band": 0.03, "burst_lookback": 5},
+    {"top_k": 5, "burst_ratio": 1.5, "pullback_band": 0.025, "burst_lookback": 5},
+    {"top_k": 5, "burst_ratio": 1.8, "pullback_band": 0.025, "burst_lookback": 5},
+    {"top_k": 10, "burst_ratio": 1.5, "pullback_band": 0.02, "burst_lookback": 5},
+    {"top_k": 10, "burst_ratio": 1.8, "pullback_band": 0.03, "burst_lookback": 5},
+    {"top_k": 5, "burst_ratio": 1.8, "pullback_band": 0.03, "burst_lookback": 5},
+    {"top_k": 5, "burst_ratio": 1.5, "pullback_band": 0.03, "burst_lookback": 3},
 ]
 
 
@@ -277,6 +291,8 @@ def builtin_presets(strategy_id: str) -> list[dict[str, Any]]:
         extra = ETF_MA_MOMENTUM_PRESETS
     elif strategy_id == "stock_2560":
         extra = STOCK_2560_PRESETS
+    elif strategy_id == "stock_yin_arb":
+        extra = STOCK_YIN_ARB_PRESETS
     else:
         extra = []
     for params in extra:
@@ -311,6 +327,8 @@ def presets_for(strategy_id: str, *, settings: Settings | None = None) -> list[d
         item["is_default"] = item["parameter_set_id"] == default_id
         if strategy_id == "stock_2560":
             item["short_id"] = stock_2560_short_id(item["params"])
+        elif strategy_id == "stock_yin_arb":
+            item["short_id"] = stock_yin_arb_short_id(item["params"])
         else:
             item["short_id"] = item["parameter_set_id"]
         out.append(item)

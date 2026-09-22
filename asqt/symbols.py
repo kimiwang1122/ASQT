@@ -102,7 +102,7 @@ def infer_board(symbol: str) -> str:
         return "broad_index"
     if market == "BJ":
         return "bse"
-    if code.startswith("300") or code.startswith("301"):
+    if code.startswith(("300", "301", "302")):
         return "chinext"
     if code.startswith("688") or code.startswith("689"):
         return "star"

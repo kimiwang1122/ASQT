@@ -109,6 +109,7 @@ def compute_factor_frame(
     dates: Sequence[str] | None = None,
     source_run_id: str = "",
     model_version: str = "p2.4",
+    on_progress=None,
 ) -> list[dict[str, Any]]:
     """Compute factor rows for one asof or a list of dates (no look-ahead)."""
     if asof is None and dates is None:
@@ -119,9 +120,15 @@ def compute_factor_frame(
         name = str(spec["name"])
         want = spec.get("instrument_type")
         phash = _hash_for_spec(spec)
-        for symbol, series in data.items():
-            if want and infer_instrument_type(symbol) != want:
-                continue
+        eligible = [
+            (symbol, series)
+            for symbol, series in data.items()
+            if not want or infer_instrument_type(symbol) == want
+        ]
+        total_sym = len(eligible)
+        for index, (symbol, series) in enumerate(eligible, 1):
+            if on_progress and (index == 1 or index == total_sym or index % 5 == 0):
+                on_progress({"done": index, "total": total_sym, "symbol": symbol, "factor": name})
             for trade_date in target_dates:
                 hist = series_asof(series, trade_date)
                 value = _eval_spec(hist, spec)

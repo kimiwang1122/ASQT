@@ -20,6 +20,18 @@ def market_daily_span(settings: Settings | None = None) -> tuple[str | None, str
     return str(frame["trade_date"].min()), str(frame["trade_date"].max())
 
 
+def market_daily_row_count(settings: Settings | None = None) -> int:
+    path = market_daily_path(settings)
+    if not path.exists():
+        return 0
+    try:
+        import pyarrow.parquet as pq
+
+        return int(pq.ParquetFile(path).metadata.num_rows)
+    except Exception:
+        return int(pd.read_parquet(path, columns=["trade_date"]).shape[0])
+
+
 def market_daily_path(settings: Settings | None = None) -> Path:
     # Keep parquet under standard_data for tech-design layout clarity.
     return record_parquet_path("market_daily", settings)
